@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trqlmao/avp-spec/schema/avp.schema.json",
+  "title": "Alt Vault Protocol — HTTP/JSON profile",
+  "description": "JSON message shapes for the AVP HTTP/JSON transport profile. Field names match the proto field names in camelCase. Binary values are base64 strings. See ../SPEC.md.",
+  "$defs": {
+    "WrappedKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemeId", "ephemeralPublicKey", "iv", "ciphertext"],
+      "properties": {
+        "schemeId": { "type": "string" },
+        "ephemeralPublicKey": { "type": "string", "description": "base64 ephemeral X25519 public key" },
+        "iv": { "type": "string", "description": "base64" },
+        "ciphertext": { "type": "string", "description": "base64" }
+      }
+    },
+    "MemberEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ed25519PublicKey", "x25519PublicKey", "wrappedDataKey", "keyEpoch"],
+      "properties": {
+        "ed25519PublicKey": { "type": "string", "description": "base64 raw 32 bytes; the member id" },
+        "x25519PublicKey": { "type": "string", "description": "base64 raw 32 bytes" },
+        "wrappedDataKey": { "$ref": "#/$defs/WrappedKey" },
+        "keyEpoch": { "type": "integer" },
+        "keyBindingSig": {
+          "type": ["string", "null"],
+          "description": "optional base64 issuer signature over the two public keys"
+        }
+      }
+    },
+    "EncryptedEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "payloadVersion", "keyEpoch", "iv", "ciphertext"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "payloadVersion": { "type": "integer" },
+        "keyEpoch": { "type": "integer" },
+        "iv": { "type": "string", "description": "base64" },
+        "ciphertext": { "type": "string", "description": "base64" }
+      }
+    },
+    "VaultManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "schemeId", "keyEpoch", "payloadVersion", "members"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "schemeId": { "type": "string" },
+        "keyEpoch": { "type": "integer" },
+        "payloadVersion": { "type": "integer" },
+        "members": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } }
+      }
+    },
+    "BanInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["banned", "observedAt", "source", "detail"],
+      "properties": {
+        "banned": { "type": "boolean" },
+        "observedAt": { "type": "integer" },
+        "source": { "type": "string" },
+        "detail": { "type": "string" },
+        "observedBy": { "type": ["string", "null"], "description": "member id or null" }
+      }
+    },
+    "AltAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uuid", "username", "accessToken", "type", "lastUsed"],
+      "properties": {
+        "uuid": { "type": "string" },
+        "username": { "type": "string" },
+        "accessToken": { "type": "string" },
+        "type": { "type": "string", "enum": ["MICROSOFT", "COOKIE", "SESSION", "OFFLINE"] },
+        "lastUsed": { "type": "integer" },
+        "lastUsedBy": { "type": ["string", "null"], "description": "member id or null" },
+        "ban": { "oneOf": [{ "$ref": "#/$defs/BanInfo" }, { "type": "null" }] },
+        "sourceClient": { "type": ["string", "null"], "description": "client an alt was added from" },
+        "sourceUser": { "type": ["string", "null"], "description": "user within sourceClient" }
+      }
+    },
+    "VaultPayload": {
+      "type": "object",
+      "description": "Plaintext encrypted into EncryptedEnvelope.ciphertext.",
+      "additionalProperties": false,
+      "required": ["alts", "payloadVersion"],
+      "properties": {
+        "alts": { "type": "array", "items": { "$ref": "#/$defs/AltAccount" } },
+        "payloadVersion": { "type": "integer" }
+      }
+    },
+    "CreateRepoRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "initialEnvelope"],
+      "properties": {
+        "manifest": { "$ref": "#/$defs/VaultManifest" },
+        "initialEnvelope": { "$ref": "#/$defs/EncryptedEnvelope" }
+      }
+    },
+    "PullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "knownPayloadVersion"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "knownPayloadVersion": { "type": "integer" }
+      }
+    },
+    "PullResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "unchanged"],
+      "properties": {
+        "manifest": { "$ref": "#/$defs/VaultManifest" },
+        "envelope": { "oneOf": [{ "$ref": "#/$defs/EncryptedEnvelope" }, { "type": "null" }] },
+        "unchanged": { "type": "boolean" }
+      }
+    },
+    "PushRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "envelope", "expectedPayloadVersion"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "envelope": { "$ref": "#/$defs/EncryptedEnvelope" },
+        "expectedPayloadVersion": { "type": "integer" },
+        "rotatedMembers": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/MemberEntry" }
+        }
+      }
+    },
+    "PushResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "payloadVersion", "keyEpoch", "conflict"],
+      "properties": {
+        "accepted": { "type": "boolean" },
+        "payloadVersion": { "type": "integer" },
+        "keyEpoch": { "type": "integer" },
+        "conflict": { "type": "boolean" }
+      }
+    },
+    "MemberAddRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "member"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "member": { "$ref": "#/$defs/MemberEntry" }
+      }
+    },
+    "MemberRemoveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "removedMemberId", "rotatedEnvelope", "rewrappedMembers", "newKeyEpoch"],
+      "properties": {
+        "repoId": { "type": "string" },
+        "removedMemberId": { "type": "string" },
+        "rotatedEnvelope": { "$ref": "#/$defs/EncryptedEnvelope" },
+        "rewrappedMembers": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } },
+        "newKeyEpoch": { "type": "integer" }
+      }
+    },
+    "ChallengeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ed25519PublicKey"],
+      "properties": { "ed25519PublicKey": { "type": "string" } }
+    },
+    "AuthChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nonce"],
+      "properties": { "nonce": { "type": "string", "description": "base64, single-use, short TTL" } }
+    },
+    "TokenRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ed25519PublicKey", "nonce", "signature"],
+      "properties": {
+        "ed25519PublicKey": { "type": "string" },
+        "nonce": { "type": "string" },
+        "signature": { "type": "string", "description": "base64 Ed25519 signature over the raw nonce bytes" }
+      }
+    },
+    "AuthToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "expiresAt"],
+      "properties": {
+        "token": { "type": "string" },
+        "expiresAt": { "type": "integer" }
+      }
+    },
+    "InviteRequest": {
+      "type": "object",
+      "description": "Federation join handshake, step 1 (base64url-encoded JSON). See SPEC §8.1.",
+      "additionalProperties": false,
+      "required": ["v", "ed25519PublicKey", "x25519PublicKey"],
+      "properties": {
+        "v": { "type": "integer" },
+        "ed25519PublicKey": { "type": "string" },
+        "x25519PublicKey": { "type": "string" }
+      }
+    },
+    "RepoLocator": {
+      "type": "object",
+      "description": "Federation join handshake, step 2 (base64url-encoded JSON). See SPEC §8.1.",
+      "additionalProperties": false,
+      "required": ["v", "host", "repoId"],
+      "properties": {
+        "v": { "type": "integer" },
+        "host": { "type": "string" },
+        "repoId": { "type": "string" },
+        "schemeId": { "type": ["string", "null"] },
+        "keyEpoch": { "type": ["integer", "null"] },
+        "issuerJwksUrl": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
