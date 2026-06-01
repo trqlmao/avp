@@ -1,0 +1,29 @@
+# AVP (Alt Vault Protocol)
+
+> An open, vendor-neutral protocol for sharing Minecraft alt accounts across clients through a zero-knowledge, federated sync server. Members are identified by an Ed25519 keypair; the alt payload is encrypted on the client, so the server stores only ciphertext, wrapped keys, public keys, and version counters, and can decrypt nothing.
+
+This repository is the specification, not an implementation. It defines the wire contract so any client or server can interoperate. The same messages are available in two interchangeable transport profiles, gRPC and HTTP/JSON. Repositories are addressed `avp://host/repoId` and reachable across independently hosted servers with one portable keypair identity.
+
+Notes for implementers: field names are normative; do not rename or renumber them. The additional-authenticated-data layout and the canonical key-binding message are fixed byte constructions with deterministic test vectors. The server must never receive plaintext alts, passphrases, identity seeds, or the data key. Provenance fields carry implementer-defined values at runtime and are never part of the spec text.
+
+## Specification
+
+- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, federation, anti-MITM key binding, invariants, conformance, and security considerations.
+- [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
+- [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile.
+
+## Conformance vectors
+
+- [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
+- [AAD vectors](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/aad.json): Deterministic additional-authenticated-data construction (SPEC section 4).
+- [Key-binding message vectors](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/key-binding-message.json): Deterministic canonical key-binding message (SPEC section 9).
+
+## Project
+
+- [README](https://raw.githubusercontent.com/trqlmao/avp-spec/main/README.md): Overview, implementer guide, and ways to help.
+- [Contributing guide](https://raw.githubusercontent.com/trqlmao/avp-spec/main/CONTRIBUTING.md): How to propose changes and the vendor-neutrality rule.
+- [Security policy](https://raw.githubusercontent.com/trqlmao/avp-spec/main/SECURITY.md): How to report a vulnerability privately.
+
+## Optional
+
+- [License](https://raw.githubusercontent.com/trqlmao/avp-spec/main/LICENSE): CC-BY-4.0 for prose, MIT for machine-readable artifacts.
