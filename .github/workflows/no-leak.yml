@@ -1,0 +1,26 @@
+name: no-leak
+
+# Fail the build if any vendor-internal name leaks into the published standard.
+# AVP is deliberately vendor-neutral: the spec must never name a specific client,
+# product, sponsor, server deployment, or internal host.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbidden-name scan
+        run: |
+          set -e
+          # Scan the published spec content. .github (this CI config) is excluded so the
+          # denylist definition below does not match itself.
+          PATTERN='opal|terminus|fernan|vane\.moe|cps\.sh|\bcps\b|\btomb\b|54fd49e4-2103-4044'
+          if grep -rniE "$PATTERN" --exclude-dir=.git --exclude-dir=.github . ; then
+            echo "::error::forbidden internal name found in published spec"
+            exit 1
+          fi
+          echo "no-leak scan clean"

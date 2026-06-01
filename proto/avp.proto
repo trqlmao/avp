@@ -1,0 +1,137 @@
+// Alt Vault Protocol (AVP) — canonical gRPC schema.
+//
+// This is the source of truth for the gRPC transport profile. Field numbers and
+// names are stable. The HTTP/JSON profile uses the same field names in camelCase
+// (see ../schema/avp.schema.json). See ../SPEC.md for semantics.
+//
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package avp;
+
+// The zero-knowledge vault service. The server stores and serves only ciphertext,
+// per-member wrapped keys, public keys, counters, and opaque signatures — it can
+// decrypt nothing. Authentication (challenge/token) yields a bearer token carried
+// in transport metadata; it is typically HTTP/JSON to the identity provider but
+// MAY be offered over gRPC using the auth messages below.
+service Vault {
+  // Create a repository from a client-built manifest and initial payload.
+  rpc CreateRepo(CreateRepoRequest) returns (VaultManifest);
+  // Fetch the current manifest and (if changed) payload.
+  rpc Pull(PullRequest) returns (PullResponse);
+  // Write a new payload using optimistic concurrency.
+  rpc Push(PushRequest) returns (PushResponse);
+  // Record a member whose wrapped key the client computed.
+  rpc AddMember(MemberAddRequest) returns (VaultManifest);
+  // Remove a member, applying the accompanying key rotation atomically.
+  rpc RemoveMember(MemberRemoveRequest) returns (VaultManifest);
+  // Look up a single member's public-key entry.
+  rpc FetchMemberKey(FetchMemberKeyRequest) returns (MemberEntry);
+}
+
+// The repository data key encrypted to one member under a named wrap scheme.
+message WrappedKey {
+  string scheme_id = 1;
+  string ephemeral_public_key = 2; // base64 ephemeral X25519 public key
+  string iv = 3;                   // base64
+  string ciphertext = 4;           // base64
+}
+
+// A member as the server stores it. The server can read none of the wrapped key.
+message MemberEntry {
+  string ed25519_public_key = 1;   // base64 raw 32 bytes; the member id
+  string x25519_public_key = 2;    // base64 raw 32 bytes
+  WrappedKey wrapped_data_key = 3;
+  int64 key_epoch = 4;
+  // Optional anti-MITM binding: an identity-provider Ed25519 signature over the
+  // two public keys (base64). Absent when no binding is published.
+  optional string key_binding_sig = 5;
+}
+
+// The encrypted alt payload. The header fields are bound into the ciphertext AAD.
+message EncryptedEnvelope {
+  string repo_id = 1;
+  int64 payload_version = 2;
+  int64 key_epoch = 3;
+  string iv = 4;          // base64
+  string ciphertext = 5;  // base64
+}
+
+// Non-secret repository metadata.
+message VaultManifest {
+  string repo_id = 1;
+  string scheme_id = 2;
+  int64 key_epoch = 3;
+  int64 payload_version = 4;
+  repeated MemberEntry members = 5;
+}
+
+message CreateRepoRequest {
+  VaultManifest manifest = 1;
+  EncryptedEnvelope initial_envelope = 2;
+}
+
+message PullRequest {
+  string repo_id = 1;
+  int64 known_payload_version = 2;
+}
+
+message PullResponse {
+  VaultManifest manifest = 1;
+  EncryptedEnvelope envelope = 2; // omitted when unchanged
+  bool unchanged = 3;
+}
+
+message PushRequest {
+  string repo_id = 1;
+  EncryptedEnvelope envelope = 2;
+  int64 expected_payload_version = 3;
+  repeated MemberEntry rotated_members = 4; // present only on the rotation path
+}
+
+message PushResponse {
+  bool accepted = 1;
+  int64 payload_version = 2;
+  int64 key_epoch = 3;
+  bool conflict = 4;
+}
+
+message MemberAddRequest {
+  string repo_id = 1;
+  MemberEntry member = 2;
+}
+
+message MemberRemoveRequest {
+  string repo_id = 1;
+  string removed_member_id = 2;
+  EncryptedEnvelope rotated_envelope = 3;
+  repeated MemberEntry rewrapped_members = 4;
+  int64 new_key_epoch = 5;
+}
+
+message FetchMemberKeyRequest {
+  string repo_id = 1;
+  string member_id = 2;
+}
+
+// --- Authentication (challenge -> token). Typically HTTP/JSON to the IdP. ---
+
+message ChallengeRequest {
+  string ed25519_public_key = 1;
+}
+
+message AuthChallenge {
+  string nonce = 1; // base64, single-use, short TTL
+}
+
+message TokenRequest {
+  string ed25519_public_key = 1;
+  string nonce = 2;
+  string signature = 3; // base64 Ed25519 signature over the raw nonce bytes
+}
+
+message AuthToken {
+  string token = 1;
+  int64 expires_at = 2;
+}
