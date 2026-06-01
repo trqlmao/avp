@@ -1,0 +1,12 @@
+{
+  "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
+  "envelope": {
+    "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
+    "payloadVersion": 2,
+    "keyEpoch": 0,
+    "iv": "Hx4dHBsaGRgXFhUUEw",
+    "ciphertext": "ZW5jcnlwdGVkLWFsdC1wYXlsb2FkLXYy"
+  },
+  "expectedPayloadVersion": 1,
+  "rotatedMembers": null
+}
