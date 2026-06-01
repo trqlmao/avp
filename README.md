@@ -50,6 +50,7 @@ A browser or Node client can implement AVP with no gRPC toolchain at all.
 | [`proto/avp.proto`](proto/avp.proto) | Canonical Protocol Buffers schema (gRPC profile). |
 | [`schema/avp.schema.json`](schema/avp.schema.json) | JSON Schema (HTTP/JSON profile). |
 | [`vectors/`](vectors/) | Conformance test vectors. |
+| [`examples/`](examples/) | A worked end-to-end flow and representative message bodies. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to help. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability. |
 | [`llms.txt`](llms.txt) | Structured entry point for LLMs and AI agents. |
@@ -64,6 +65,9 @@ the side you need:
    [`schema/avp.schema.json`](schema/avp.schema.json) if you prefer JSON.
 3. Check your build against [`vectors/`](vectors/), then cross-test against another implementation: if
    it decrypts what you encrypt and verifies what you sign, you interoperate.
+
+The [`examples/`](examples/) directory walks the full flow (create, invite, join, pull, push, rotate)
+with representative message bodies, which is the fastest way to see how the pieces fit together.
 
 Your client and ours can then share the same repositories. The protocol does not care which client a
 member runs.

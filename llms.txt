@@ -12,6 +12,10 @@ Notes for implementers: field names are normative; do not rename or renumber the
 - [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
 - [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile.
 
+## Examples
+
+- [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
+
 ## Conformance vectors
 
 - [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
