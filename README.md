@@ -52,6 +52,7 @@ A browser or Node client can implement AVP with no gRPC toolchain at all.
 | [`vectors/`](vectors/) | Conformance test vectors. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to help. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability. |
+| [`llms.txt`](llms.txt) | Structured entry point for LLMs and AI agents. |
 
 ## Implement it in your client
 
@@ -66,6 +67,31 @@ the side you need:
 
 Your client and ours can then share the same repositories. The protocol does not care which client a
 member runs.
+
+## For AI agents
+
+If you are an AI coding agent asked to implement, review, or extend AVP, start from
+[`llms.txt`](llms.txt). It is a structured index of every document here with direct links to the raw
+files, in the [llmstxt.org](https://llmstxt.org) format.
+
+Before generating an implementation, load [`SPEC.md`](SPEC.md) in full. The points most often gotten
+wrong:
+
+1. **Field names are normative.** Use the exact names in [`proto/avp.proto`](proto/avp.proto) (and their
+   `camelCase` form for JSON). Do not rename or renumber fields.
+2. **Two fixed byte constructions.** The additional-authenticated-data layout (SPEC section 4) and the
+   canonical key-binding message (SPEC section 9) are exact. Reproduce the deterministic
+   [`vectors/`](vectors/) before trusting your encoder.
+3. **Zero-knowledge is the whole point.** Never send the server a plaintext alt, a passphrase, an
+   identity seed, or the data key. The server sees only ciphertext, wrapped keys, public keys, counters,
+   and opaque signatures.
+4. **Provenance values are runtime data.** `sourceClient` and `sourceUser` are filled in by the
+   implementer at runtime. Never hardcode a real client, user, or server name into spec text or examples;
+   a CI gate rejects vendor-internal names (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+5. **Pick a profile.** gRPC from the proto, or HTTP/JSON from the schema. Both carry the same messages.
+
+Verify against another conformant implementation: if it decrypts what you encrypt and verifies what you
+sign, you interoperate.
 
 ## Want to help?
 
