@@ -12,11 +12,14 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: examples/rust/server
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --verbose
-      - run: cargo test --verbose
+      - name: Build and test the server
+        working-directory: examples/rust/server
+        run: |
+          cargo build --verbose
+          cargo test --verbose
+      - name: Build the client
+        working-directory: examples/rust/client
+        run: cargo build --verbose
