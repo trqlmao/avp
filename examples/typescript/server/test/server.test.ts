@@ -1,33 +1,67 @@
+/**
+ * Integration tests for the AVP reference server (HTTP/JSON profile).
+ *
+ * These drive the real {@link server} over HTTP on an ephemeral port using
+ * `fetch`, exercising the genuine Ed25519 challenge/token auth flow and the
+ * full repo lifecycle (create, pull, push, add-member, fetch, remove-member),
+ * plus the access-control rejections. State is reset before each test so cases
+ * stay independent.
+ *
+ * Run: `npm test` (`node --import tsx --test test/server.test.ts`).
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, KeyObject, sign as cryptoSign } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { resetState, server } from "../src/server.ts";
 
+/** Base URL (with the ephemeral port) the suite sends requests to; set in `before`. */
 let base = "";
 
+// Start the server on an OS-chosen free port and record its base URL.
 before(async () => {
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
   base = `http://localhost:${port}`;
 });
 
+// Tear down the listener after the suite, and wipe state between every test.
 after(() => server.close());
 beforeEach(() => resetState());
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
+/** A test Ed25519 identity: the base64 raw public key plus its private {@link KeyObject}. */
 interface KeyPair {
+  /** Base64-encoded raw 32-byte Ed25519 public key; also the member id. */
   pub: string;
+  /** The matching private key, used to sign challenge nonces. */
   priv: KeyObject;
 }
 
+/**
+ * Generates a fresh Ed25519 key pair in the wire format the server expects.
+ * The 32 raw public-key bytes are sliced off the tail of the SPKI export.
+ *
+ * @returns A {@link KeyPair} with the base64 public key and private key object.
+ */
 function keypair(): KeyPair {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const spki = publicKey.export({ format: "der", type: "spki" }) as Buffer;
   return { pub: spki.subarray(spki.length - 32).toString("base64"), priv: privateKey };
 }
 
+/**
+ * Sends a JSON `POST` to the running server.
+ *
+ * @param path - The request path, appended to the test {@link base} URL.
+ * @param body - The value serialized as the JSON request body.
+ * @param token - Optional bearer token to send in the `Authorization` header.
+ * @returns The HTTP status and parsed JSON response body.
+ */
 async function post(path: string, body: unknown, token?: string): Promise<{ status: number; json: any }> {
   const res = await fetch(base + path, {
     method: "POST",
@@ -37,12 +71,25 @@ async function post(path: string, body: unknown, token?: string): Promise<{ stat
   return { status: res.status, json: await res.json() };
 }
 
+/**
+ * Sends an authenticated `GET` to the running server.
+ *
+ * @param path - The request path, appended to the test {@link base} URL.
+ * @param token - The bearer token to send in the `Authorization` header.
+ * @returns The HTTP status and parsed JSON response body.
+ */
 async function get(path: string, token: string): Promise<{ status: number; json: any }> {
   const res = await fetch(base + path, { headers: { Authorization: `Bearer ${token}` } });
   return { status: res.status, json: await res.json() };
 }
 
-/** Runs the keypair challenge -> token flow and returns a bearer token. */
+/**
+ * Runs the full keypair challenge -> signed-nonce -> token flow for an
+ * identity and returns the issued bearer token.
+ *
+ * @param kp - The key pair to authenticate as.
+ * @returns The bearer token string the server issued.
+ */
 async function authenticate(kp: KeyPair): Promise<string> {
   const challenge = await post("/api/auth/keypair/challenge", { ed25519PublicKey: kp.pub });
   const signature = cryptoSign(null, Buffer.from(challenge.json.nonce, "base64"), kp.priv).toString("base64");
@@ -54,6 +101,15 @@ async function authenticate(kp: KeyPair): Promise<string> {
   return token.json.token;
 }
 
+/**
+ * Builds a placeholder member entry for a public key. The wrapped-key fields
+ * are dummy strings: the server stores them verbatim and never decrypts, so
+ * they need only be present and well-shaped for these tests.
+ *
+ * @param pub - The member's base64 Ed25519 public key.
+ * @param epoch - The key epoch to stamp on the entry (default `0`).
+ * @returns A member-entry object suitable for the wire requests.
+ */
 function entry(pub: string, epoch = 0) {
   return {
     ed25519PublicKey: pub,
@@ -63,6 +119,15 @@ function entry(pub: string, epoch = 0) {
   };
 }
 
+/**
+ * Builds a placeholder encrypted envelope. The ciphertext is a recognizable
+ * marker (`ct-<version>`) so tests can assert it round-trips byte-for-byte.
+ *
+ * @param repoId - The repo the envelope belongs to.
+ * @param version - The payload version to stamp on the envelope.
+ * @param epoch - The key epoch the envelope is encrypted under (default `0`).
+ * @returns An envelope object suitable for the wire requests.
+ */
 function envelope(repoId: string, version: number, epoch = 0) {
   return { repoId, payloadVersion: version, keyEpoch: epoch, iv: "iv", ciphertext: `ct-${version}` };
 }

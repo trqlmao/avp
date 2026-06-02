@@ -1,0 +1,22 @@
+name: examples-rust
+
+on:
+  push:
+    paths:
+      - "examples/rust/**"
+      - ".github/workflows/examples-rust.yml"
+  pull_request:
+    paths:
+      - "examples/rust/**"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/rust/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --verbose
+      - run: cargo test --verbose

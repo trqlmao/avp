@@ -1,0 +1,35 @@
+name: examples-node
+
+# Typecheck (and test) the Node/TypeScript examples so they cannot drift from the spec.
+
+on:
+  push:
+    paths:
+      - "examples/typescript/**"
+      - "examples/conformance/**"
+      - ".github/workflows/examples-node.yml"
+  pull_request:
+    paths:
+      - "examples/typescript/**"
+      - "examples/conformance/**"
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project:
+          - examples/typescript/server
+          - examples/typescript/client
+          - examples/conformance
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test --if-present
