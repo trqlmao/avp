@@ -8,18 +8,23 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Forbidden-name scan
         run: |
           set -e
-          # Scan the published spec content. .github (this CI config) is excluded so the
-          # denylist definition below does not match itself.
+          # Scan the published spec content. This workflow file is the only thing
+          # excluded (so the denylist definition below does not match itself); every
+          # other file, including the other workflows, IS scanned. Binary files are
+          # skipped (-I).
           PATTERN='opal|terminus|fernan|vane\.moe|cps\.sh|\bcps\b|\btomb\b|54fd49e4-2103-4044'
-          if grep -rniE "$PATTERN" --exclude-dir=.git --exclude-dir=.github . ; then
+          if grep -rnIiE "$PATTERN" --exclude-dir=.git --exclude=no-leak.yml . ; then
             echo "::error::forbidden internal name found in published spec"
             exit 1
           fi
