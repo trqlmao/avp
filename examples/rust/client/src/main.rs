@@ -134,7 +134,9 @@ fn call(base: &str, method: &str, path: &str, body: Option<&Value>, token: Optio
             return Err(format!("{method} {path} -> transport error: {t}"));
         }
     };
-    let text = response.into_string().map_err(|e| format!("{method} {path} -> body read error: {e}"))?;
+    let text = response
+        .into_string()
+        .map_err(|e| format!("{method} {path} -> body read error: {e}"))?;
     if text.is_empty() {
         return Ok(Value::Null);
     }
@@ -174,7 +176,9 @@ fn authenticate(base: &str, identity: &Identity) -> Result<String, String> {
         .get("nonce")
         .and_then(Value::as_str)
         .ok_or_else(|| "challenge response missing string `nonce`".to_string())?;
-    let nonce_bytes = STANDARD.decode(nonce).map_err(|e| format!("nonce is not valid base64: {e}"))?;
+    let nonce_bytes = STANDARD
+        .decode(nonce)
+        .map_err(|e| format!("nonce is not valid base64: {e}"))?;
     // Ed25519 signs the message bytes directly (no pre-hash).
     let signature = STANDARD.encode(identity.signing_key.sign(&nonce_bytes).to_bytes());
     let auth = call(
@@ -378,7 +382,11 @@ fn run(base: &str) -> Result<(), String> {
     let bob = generate_identity("bob");
     step(
         "members",
-        &format!("alice={} bob={}", short(&alice.ed25519_public_key), short(&bob.ed25519_public_key)),
+        &format!(
+            "alice={} bob={}",
+            short(&alice.ed25519_public_key),
+            short(&bob.ed25519_public_key)
+        ),
     );
 
     // 1. Authenticate alice (challenge -> sign nonce -> token).
