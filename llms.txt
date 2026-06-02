@@ -15,7 +15,7 @@ Notes for implementers: field names are normative; do not rename or renumber the
 ## Examples
 
 - [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
-- [Reference server (TypeScript, in-memory)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/server/typescript/src/server.ts): A tiny runnable HTTP/JSON server implementing the full contract, to test a client against. Illustrative, not production.
+- [Reference server (TypeScript, in-memory)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/typescript/server/src/server.ts): A tiny runnable HTTP/JSON server implementing the full contract, to test a client against. Illustrative, not production.
 
 ## Conformance vectors
 
