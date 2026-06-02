@@ -7,7 +7,7 @@
  * this same process (a real deployment mints a JWT verifiable via JWKS, as the spec describes). What it
  * does honour is the part that matters: it is zero-knowledge. It stores only the manifest, the encrypted
  * envelope, the per-member wrapped keys, public keys, and counters that clients send, and decrypts
- * nothing.
+ * nothing. Field shapes follow schema/avp.schema.json.
  *
  * Run: `npm install && npm start` (uses tsx; no runtime dependencies, only Node's built-in crypto/http).
  *
@@ -16,8 +16,9 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { createPublicKey, randomBytes, verify as cryptoVerify } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
-// ─── Wire types (HTTP/JSON profile; see ../../schema/avp.schema.json) ───
+// ─── Wire types (HTTP/JSON profile) ──────────────────────────────────────
 
 interface WrappedKey {
   schemeId: string;
@@ -47,7 +48,7 @@ interface VaultManifest {
   members: MemberEntry[];
 }
 
-// ─── In-memory state ────────────────────────────────────────────────────
+// ─── In-memory state ──────────────────────────────────────────────────────
 
 const repos = new Map<string, { manifest: VaultManifest; envelope: EncryptedEnvelope }>();
 const nonces = new Map<string, { publicKey: string; expiresAt: number }>();
@@ -76,9 +77,8 @@ function verifyEd25519(publicKeyBase64: string, message: Buffer, signatureBase64
 // ─── Tiny HTTP helpers ────────────────────────────────────────────────────
 
 function send(res: ServerResponse, status: number, body: unknown): void {
-  const json = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(json);
+  res.end(JSON.stringify(body));
 }
 
 async function readJson(req: IncomingMessage): Promise<any> {
@@ -105,7 +105,8 @@ function isMember(manifest: VaultManifest, memberId: string): boolean {
 
 // ─── Request handling ─────────────────────────────────────────────────────
 
-const server = createServer(async (req, res) => {
+/** The HTTP server. Importable for tests; only listens when this file is run directly. */
+export const server = createServer(async (req, res) => {
   try {
     await route(req, res);
   } catch (err) {
@@ -164,7 +165,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // routes under /v1/repos/:repoId/...
   const match = path.match(/^\/v1\/repos\/([^/]+)\/(pull|push|add-member|remove-member)$/);
   const memberMatch = path.match(/^\/v1\/repos\/([^/]+)\/member\/([^/]+)$/);
-  const repoId = match?.[1] ?? memberMatch?.[1];
+  const repoIdRaw = match?.[1] ?? memberMatch?.[1];
+  const repoId = repoIdRaw ? decodeURIComponent(repoIdRaw) : undefined;
   const stored = repoId ? repos.get(repoId) : undefined;
   if (!stored) {
     return send(res, 404, { error: "repo not found" });
@@ -224,12 +226,23 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   if (method === "GET" && memberMatch) {
-    const entry = stored.manifest.members.find((m) => m.ed25519PublicKey === memberMatch[2]);
+    const memberId = decodeURIComponent(memberMatch[2]);
+    const entry = stored.manifest.members.find((m) => m.ed25519PublicKey === memberId);
     return entry ? send(res, 200, entry) : send(res, 404, { error: "member not found" });
   }
 
   return send(res, 404, { error: "no such route" });
 }
 
-const port = Number(process.env.PORT ?? 8787);
-server.listen(port, () => console.log(`AVP reference server (in-memory) listening on http://localhost:${port}`));
+/** Drops all state. Exposed so tests start from a clean slate. */
+export function resetState(): void {
+  repos.clear();
+  nonces.clear();
+  tokens.clear();
+}
+
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  const port = Number(process.env.PORT ?? 8787);
+  server.listen(port, () => console.log(`AVP reference server (in-memory) listening on http://localhost:${port}`));
+}
