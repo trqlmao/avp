@@ -12,14 +12,19 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: examples/python/server
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - run: python -m py_compile server.py test_server.py
-      - run: python -m unittest test_server.py
+      - name: Compile and test the server
+        working-directory: examples/python/server
+        run: |
+          pip install -r requirements.txt
+          python -m py_compile server.py test_server.py
+          python -m unittest test_server.py
+      - name: Compile the client
+        working-directory: examples/python/client
+        run: |
+          pip install -r requirements.txt
+          python -m py_compile client.py

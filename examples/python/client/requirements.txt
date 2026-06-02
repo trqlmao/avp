@@ -1,0 +1,4 @@
+# AVP reference client (Python) — runtime dependency.
+# Only the Ed25519 challenge signature needs a third-party package; everything
+# else is the standard library (urllib.request, json, base64, uuid).
+cryptography==44.0.0

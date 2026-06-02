@@ -17,9 +17,9 @@ HTTP/JSON profile against in-memory state and is illustrative, not production.
 | Language | Server | Client |
 |---|---|---|
 | TypeScript | [`typescript/server/`](typescript/server/) | [`typescript/client/`](typescript/client/) |
-| Rust | [`rust/server/`](rust/server/) | — |
-| Python | [`python/server/`](python/server/) | — |
-| Java | [`java/server/`](java/server/) | — |
+| Rust | [`rust/server/`](rust/server/) | [`rust/client/`](rust/client/) |
+| Python | [`python/server/`](python/server/) | [`python/client/`](python/client/) |
+| Java | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
 
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
 [`../vectors/`](../vectors/)). More languages are welcome; see
