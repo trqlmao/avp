@@ -6,7 +6,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "start": "tsx server.ts",
+    "start": "tsx src/server.ts",
+    "test": "node --import tsx --test test/server.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

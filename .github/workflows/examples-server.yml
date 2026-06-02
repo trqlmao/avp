@@ -1,0 +1,27 @@
+name: examples-server
+
+# Typecheck and test the TypeScript reference server so it cannot drift from the spec.
+
+on:
+  push:
+    paths:
+      - "examples/server/typescript/**"
+      - ".github/workflows/examples-server.yml"
+  pull_request:
+    paths:
+      - "examples/server/typescript/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/server/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
