@@ -1,0 +1,6 @@
+title: AVP — Alt Vault Protocol
+description: An open, vendor-neutral, zero-knowledge, federated protocol for sharing Minecraft alt accounts across clients.
+theme: jekyll-theme-cayman
+# GitHub Pages renders the Markdown in this repo as a site; the README is the home page and
+# SPEC.md / the guides become pages. jekyll-relative-links (enabled by default on Pages) rewrites
+# the .md links so they resolve on the site.
