@@ -50,7 +50,7 @@ A browser or Node client can implement AVP with no gRPC toolchain at all.
 | [`proto/avp.proto`](proto/avp.proto) | Canonical Protocol Buffers schema (gRPC profile). |
 | [`schema/avp.schema.json`](schema/avp.schema.json) | JSON Schema (HTTP/JSON profile). |
 | [`vectors/`](vectors/) | Conformance test vectors. |
-| [`examples/`](examples/) | A worked end-to-end flow and representative message bodies. |
+| [`examples/`](examples/) | A worked end-to-end flow, representative message bodies, and a runnable reference server. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to help. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability. |
 | [`llms.txt`](llms.txt) | Structured entry point for LLMs and AI agents. |

@@ -1,6 +1,7 @@
 # Examples
 
-A worked end-to-end flow plus representative message bodies, to make the spec concrete. Everything here
+A worked end-to-end flow plus representative message bodies, and a runnable
+[reference server](server/), to make the spec concrete. Everything here
 is **illustrative**: hosts are `vault.example`, members are `alice` and `bob`, and the base64 key and
 ciphertext values are placeholders, not real cryptographic output. See [`../SPEC.md`](../SPEC.md) for the
 normative rules and [`../vectors/`](../vectors/) for byte-exact construction vectors.
