@@ -76,9 +76,28 @@ two's-complement encodings of `payloadVersion` and `keyEpoch`. A conformant enco
 this way, so that an envelope replayed under a different repo, version, or epoch fails authentication.
 See [`vectors/aad.json`](vectors/aad.json).
 
-The default wrap scheme has `schemeId` **`X25519-HKDF-SHA256-AESGCM-v1`**: generate an ephemeral X25519
-keypair, ECDH with the recipient's X25519 key, derive an AES-256 key with HKDF-SHA256, and AES-256-GCM
-encrypt the 32-byte data key. `WrappedKey.ephemeralPublicKey` is the ephemeral X25519 public key.
+### Default wrap scheme — `X25519-HKDF-SHA256-AESGCM-v1`
+
+This is the default `schemeId`. Keys are raw encodings: X25519 keys are the raw 32-byte little-endian
+form (RFC 7748), and the 32-byte data key is the AES-256 key. To **wrap** a data key to a recipient
+whose X25519 public key is `recipientPub`:
+
+1. Generate a fresh ephemeral X25519 key pair `(ephemeralPriv, ephemeralPub)`.
+2. `sharedSecret = X25519(ephemeralPriv, recipientPub)` — the raw 32-byte ECDH output (not hashed).
+3. `KEK = HKDF-SHA256(ikm = sharedSecret, salt = ephemeralPubRaw, info = UTF8("avp/rdk-wrap/v1"), L = 32)`
+   where `ephemeralPubRaw` is the raw 32-byte ephemeral public key and `KEK` is a 32-byte key. (HKDF is
+   RFC 5869; the extract step uses 32 zero bytes when the salt is empty, but here the salt is never
+   empty.)
+4. Pick a fresh 12-byte `iv`. `ciphertext = AES-256-GCM(key = KEK, iv = iv, aad = UTF8("avp/rdk-wrap/v1"),
+   plaintext = dataKey)`, with the 128-bit tag appended to the ciphertext.
+5. `WrappedKey = { schemeId, ephemeralPublicKey: base64(ephemeralPubRaw), iv: base64(iv),
+   ciphertext: base64(ciphertext) }`.
+
+To **unwrap**, recompute `sharedSecret = X25519(recipientPriv, ephemeralPub)` and the same `KEK`, then
+AES-256-GCM-decrypt with the same `aad`. The `info` string (`avp/rdk-wrap/v1`) is bound as both the HKDF
+`info` and the GCM AAD; it is the vendor-neutral scheme label, identical for every implementation.
+
+The conformance vectors in [`vectors/`](vectors/) pin each primitive and this composition byte-for-byte.
 
 ## 5. Payload and provenance
 
