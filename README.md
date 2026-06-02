@@ -119,10 +119,12 @@ or with applicable law, is the implementer's responsibility.
 
 ## License
 
-- Specification prose (`SPEC.md`, this README) is licensed **CC-BY-4.0**.
-- Machine-readable artifacts (`proto/`, `schema/`, `vectors/`) are licensed **MIT**.
+This repository is dual-licensed:
 
-See [`LICENSE`](LICENSE).
+- **Machine-readable artifacts** (`proto/`, `schema/`, `vectors/`) and the example code under
+  `examples/` are licensed **MIT** — see [`LICENSE`](LICENSE).
+- **Specification prose** (`SPEC.md` and this README) is licensed **CC-BY-4.0** — see
+  [`LICENSE-docs`](LICENSE-docs).
 
 ## Status
 
