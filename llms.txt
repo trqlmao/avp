@@ -8,27 +8,27 @@ Notes for implementers: field names are normative; do not rename or renumber the
 
 ## Specification
 
-- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, federation, anti-MITM key binding, invariants, conformance, and security considerations.
-- [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
-- [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp-spec/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile.
+- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, federation, anti-MITM key binding, invariants, conformance, and security considerations.
+- [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
+- [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile.
 
 ## Examples
 
-- [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
-- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp-spec/main/examples/README.md): runnable in-memory HTTP/JSON servers (TypeScript, Rust, Python, Java), a TypeScript client, and a conformance runner over the vectors, organized as `examples/<language>/<client|server>/`. Illustrative, not production.
+- [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
+- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): runnable in-memory HTTP/JSON servers (TypeScript, Rust, Python, Java), a TypeScript client, and a conformance runner over the vectors, organized as `examples/<language>/<client|server>/`. Illustrative, not production.
 
 ## Conformance vectors
 
-- [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
-- [AAD vectors](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/aad.json): Deterministic additional-authenticated-data construction (SPEC section 4).
-- [Key-binding message vectors](https://raw.githubusercontent.com/trqlmao/avp-spec/main/vectors/key-binding-message.json): Deterministic canonical key-binding message (SPEC section 9).
+- [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
+- [AAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/aad.json): Deterministic additional-authenticated-data construction (SPEC section 4).
+- [Key-binding message vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-binding-message.json): Deterministic canonical key-binding message (SPEC section 9).
 
 ## Project
 
-- [README](https://raw.githubusercontent.com/trqlmao/avp-spec/main/README.md): Overview, implementer guide, and ways to help.
-- [Contributing guide](https://raw.githubusercontent.com/trqlmao/avp-spec/main/CONTRIBUTING.md): How to propose changes and the vendor-neutrality rule.
-- [Security policy](https://raw.githubusercontent.com/trqlmao/avp-spec/main/SECURITY.md): How to report a vulnerability privately.
+- [README](https://raw.githubusercontent.com/trqlmao/avp/main/README.md): Overview, implementer guide, and ways to help.
+- [Contributing guide](https://raw.githubusercontent.com/trqlmao/avp/main/CONTRIBUTING.md): How to propose changes and the vendor-neutrality rule.
+- [Security policy](https://raw.githubusercontent.com/trqlmao/avp/main/SECURITY.md): How to report a vulnerability privately.
 
 ## Optional
 
-- [License](https://raw.githubusercontent.com/trqlmao/avp-spec/main/LICENSE): CC-BY-4.0 for prose, MIT for machine-readable artifacts.
+- [License](https://raw.githubusercontent.com/trqlmao/avp/main/LICENSE): CC-BY-4.0 for prose, MIT for machine-readable artifacts.

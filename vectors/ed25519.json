@@ -1,5 +1,5 @@
 {
-  "description": "Ed25519 sign/verify (RFC 8032) with raw 32-byte keys. AVP uses Ed25519 for member identity, the challenge→token signature (SPEC §3) and the anti-MITM key binding (SPEC §9). 'seedHex' is the 32-byte secret seed, 'publicKeyHex' the raw 32-byte public key (derivable from the seed), 'messageHex' the message bytes, 'signatureHex' the 64-byte signature — all lowercase hex. Cases rfc8032-test2/test3 are the published RFC 8032 §7.1 test vectors: the runner derives the public key from the seed, reproduces the signature byte-for-byte, and verifies it.",
+  "description": "Ed25519 sign/verify (RFC 8032) with raw 32-byte keys. AVP uses Ed25519 for member identity, the challenge→token signature (SPEC §3) and the anti-MITM key binding (SPEC §9). 'seedHex' is the 32-byte secret seed, 'publicKeyHex' the raw 32-byte public key (derivable from the seed), 'messageHex' the message bytes, 'signatureHex' the 64-byte signature, all lowercase hex. Cases rfc8032-test2/test3 are the published RFC 8032 §7.1 test vectors: the runner derives the public key from the seed, reproduces the signature byte-for-byte, and verifies it.",
   "cases": [
     {
       "name": "rfc8032-test2",

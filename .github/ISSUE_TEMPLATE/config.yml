@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://github.com/trqlmao/avp-spec/security/advisories/new
+    url: https://github.com/trqlmao/avp/security/advisories/new
     about: Report a vulnerability privately. Do not open a public issue for security problems.

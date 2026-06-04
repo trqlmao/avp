@@ -14,7 +14,7 @@
     },
     {
       "name": "rfc5869-tc3",
-      "source": "RFC 5869 Appendix A.3 (Test Case 3) — zero-length salt and info; exercises the empty-salt -> 32 zero bytes rule",
+      "source": "RFC 5869 Appendix A.3 (Test Case 3), zero-length salt and info; exercises the empty-salt -> 32 zero bytes rule",
       "hash": "SHA-256",
       "ikmHex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
       "saltHex": "",

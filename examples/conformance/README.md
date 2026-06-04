@@ -30,19 +30,19 @@ These use Node's built-in `crypto` (`hkdfSync`, `diffieHellman` over X25519
 `sign`/`verify`). The primitive helpers live in
 [`src/crypto.ts`](src/crypto.ts).
 
-- **HKDF-SHA256** (RFC 5869) — reproduces the `okm` for each case in
+- **HKDF-SHA256** (RFC 5869), reproduces the `okm` for each case in
   [`vectors/hkdf.json`](../../vectors/hkdf.json).
-- **X25519** (RFC 7748) — reproduces the raw, unhashed shared secret for each
+- **X25519** (RFC 7748), reproduces the raw, unhashed shared secret for each
   case in [`vectors/x25519.json`](../../vectors/x25519.json).
-- **Ed25519** (RFC 8032) — for each case in
+- **Ed25519** (RFC 8032), for each case in
   [`vectors/ed25519.json`](../../vectors/ed25519.json) it derives the public key
   from the seed, reproduces the deterministic signature byte-for-byte, and
   verifies it.
-- **Payload AEAD** (SPEC section 4) — for
+- **Payload AEAD** (SPEC section 4), for
   [`vectors/payload-aead.json`](../../vectors/payload-aead.json) it asserts the
   AAD layout, re-encrypts and asserts the ciphertext matches, decrypts and
   asserts plaintext recovery, and asserts a tampered AAD epoch is rejected.
-- **Key wrap** `X25519-HKDF-SHA256-AESGCM-v1` (SPEC section 4) — for
+- **Key wrap** `X25519-HKDF-SHA256-AESGCM-v1` (SPEC section 4), for
   [`vectors/key-wrap.json`](../../vectors/key-wrap.json) it recomputes the
   shared secret and KEK, re-wraps and asserts the ciphertext matches, and
   unwraps with the recipient private key and asserts data-key recovery.
@@ -68,9 +68,9 @@ test/crypto.test.ts    node:test suite for the cryptographic vectors
 Requires Node 20+ (uses the built-in `node:test` runner and `node --import tsx`).
 
 ```sh
-npm install
-npm run typecheck    # tsc --noEmit
-npm test             # node --import tsx --test test/*.test.ts
+bun install
+bun run typecheck    # tsc --noEmit
+bun run test             # node --import tsx --test test/*.test.ts
 ```
 
 ## Caveats

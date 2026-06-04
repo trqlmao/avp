@@ -1,7 +1,7 @@
-# AVP reference server — Java (in-memory)
+# AVP reference server, Java (in-memory)
 
 A tiny, runnable reference server for the [HTTP/JSON profile](../../../SPEC.md), so you can point a
-client at something real while you build it. JDK built-ins only — no dependencies, no build tool. The
+client at something real while you build it. JDK built-ins only, no dependencies, no build tool. The
 source is one file, [`Server.java`](Server.java), runnable straight from source.
 
 ```sh
@@ -48,7 +48,7 @@ The server stores only the manifest, the encrypted envelope, the per-member wrap
 keys, and the version and epoch counters that clients send. It never sees a data key or a plaintext alt,
 and it decrypts nothing. The only cryptography it performs is verifying the Ed25519 challenge signature
 over the raw nonce bytes (the base64-decoded nonce), exactly as the spec requires, using the JDK's
-built-in `Ed25519` provider — the smoke test drives this with a real keypair.
+built-in `Ed25519` provider, the smoke test drives this with a real keypair.
 
 ## What is simplified (do not ship this)
 

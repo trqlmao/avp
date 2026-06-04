@@ -1,4 +1,4 @@
-# Alt Vault Protocol (AVP) — Specification
+# Alt Vault Protocol (AVP): Specification
 
 **Version:** 0.2 (draft)
 **Status:** stable wire contract; see §12 for open items.
@@ -12,8 +12,7 @@ the vectors in [`vectors/`](vectors/).
 A **repository** ("repo") is a shared, end-to-end-encrypted collection of alt accounts with a set of
 **members**. A member is an Ed25519 keypair. The repo has a single symmetric **data key** that encrypts
 the alt payload; the data key is wrapped to each member's X25519 public key. A **server** stores the
-encrypted payload, the per-member wrapped keys, the members' public keys, and version/epoch counters —
-and nothing it can decrypt. All cryptography happens on the client.
+encrypted payload, the per-member wrapped keys, the members' public keys, and version/epoch counters, and nothing it can decrypt. All cryptography happens on the client.
 
 Repositories are **federated**: each is addressed `avp://host/repoId`, and a member's keypair
 authenticates against any conformant server, so a member can join and sync a repository hosted anywhere.
@@ -33,9 +32,9 @@ Members are identified by an **Ed25519 keypair, not an account**. Authentication
 flow that yields a bearer token scoping the caller to the repositories it is a member of. The token is
 minted by an **identity provider (IdP)** and verified by the vault server.
 
-1. `challenge { ed25519PublicKey } → { nonce }` — the server returns a single-use random **nonce** (at
+1. `challenge { ed25519PublicKey } → { nonce }`, the server returns a single-use random **nonce** (at
    least 32 bytes, base64) with a short TTL (RECOMMENDED ≤ 2 minutes).
-2. `token { ed25519PublicKey, nonce, signature } → { token, expiresAt }` — the client signs the **raw
+2. `token { ed25519PublicKey, nonce, signature } → { token, expiresAt }`, the client signs the **raw
    nonce bytes** (the bytes obtained by base64-decoding `nonce`) with its Ed25519 private key. The IdP
    MUST verify the signature against `ed25519PublicKey`, MUST reject a reused or expired nonce, and then
    mints a token whose subject is the member id.
@@ -52,15 +51,15 @@ MUST cache tokens keyed by host and MUST NOT present a token issued by one host 
 
 Field names are part of the contract. All values are base64 strings unless typed otherwise.
 
-- **`WrappedKey`** = `{ schemeId, ephemeralPublicKey, iv, ciphertext }` — the repo data key encrypted to
+- **`WrappedKey`** = `{ schemeId, ephemeralPublicKey, iv, ciphertext }`, the repo data key encrypted to
   one member under the named wrap scheme.
 - **`MemberEntry`** = `{ ed25519PublicKey, x25519PublicKey, wrappedDataKey: WrappedKey, keyEpoch: int64,
-  keyBindingSig? }` — a member as the server stores it. `keyBindingSig` is OPTIONAL (§9); `null`/absent
+  keyBindingSig? }`, a member as the server stores it. `keyBindingSig` is OPTIONAL (§9); `null`/absent
   when no binding is published.
-- **`EncryptedEnvelope`** = `{ repoId, payloadVersion: int64, keyEpoch: int64, iv, ciphertext }` — the
+- **`EncryptedEnvelope`** = `{ repoId, payloadVersion: int64, keyEpoch: int64, iv, ciphertext }`, the
   encrypted alt payload at a given version and epoch.
 - **`VaultManifest`** = `{ repoId, schemeId, keyEpoch: int64, payloadVersion: int64,
-  members: MemberEntry[] }` — the non-secret repository metadata.
+  members: MemberEntry[] }`, the non-secret repository metadata.
 
 The data key is per-repo and symmetric. The payload AEAD is AES-256-GCM (12-byte IV, 128-bit tag) or an
 equivalent AEAD named by `schemeId`. The **additional authenticated data (AAD)** bound into every
@@ -76,14 +75,14 @@ two's-complement encodings of `payloadVersion` and `keyEpoch`. A conformant enco
 this way, so that an envelope replayed under a different repo, version, or epoch fails authentication.
 See [`vectors/aad.json`](vectors/aad.json).
 
-### Default wrap scheme — `X25519-HKDF-SHA256-AESGCM-v1`
+### Default wrap scheme: `X25519-HKDF-SHA256-AESGCM-v1`
 
 This is the default `schemeId`. Keys are raw encodings: X25519 keys are the raw 32-byte little-endian
 form (RFC 7748), and the 32-byte data key is the AES-256 key. To **wrap** a data key to a recipient
 whose X25519 public key is `recipientPub`:
 
 1. Generate a fresh ephemeral X25519 key pair `(ephemeralPriv, ephemeralPub)`.
-2. `sharedSecret = X25519(ephemeralPriv, recipientPub)` — the raw 32-byte ECDH output (not hashed).
+2. `sharedSecret = X25519(ephemeralPriv, recipientPub)`, the raw 32-byte ECDH output (not hashed).
 3. `KEK = HKDF-SHA256(ikm = sharedSecret, salt = ephemeralPubRaw, info = UTF8("avp/rdk-wrap/v1"), L = 32)`
    where `ephemeralPubRaw` is the raw 32-byte ephemeral public key and `KEK` is a 32-byte key. (HKDF is
    RFC 5869; the extract step uses 32 zero bytes when the salt is empty, but here the salt is never
@@ -128,7 +127,7 @@ the AAD). An **`AltAccount`** is:
 within that client (for example a client id and a user handle). They are plain, opaque,
 implementer-defined strings; this specification defines only the field names, never their values. They
 let a cross-client repository attribute each alt. Because they live **inside the encrypted payload**, the
-server never sees them — cross-client attribution does not weaken the zero-knowledge guarantee.
+server never sees them, so cross-client attribution does not weaken the zero-knowledge guarantee.
 Implementations SHOULD set them when adding an alt and MUST tolerate their absence (older payloads, or
 clients that do not attribute).
 
@@ -151,25 +150,25 @@ HTTP/JSON to the IdP but MAY be offered over gRPC; the data operations are the v
 
 Semantics:
 
-- **createRepo** — create from a client-built manifest + initial payload. The server MUST reject a
+- **createRepo**, create from a client-built manifest + initial payload. The server MUST reject a
   manifest whose sole member is not the caller, and MUST reject a duplicate `repoId`.
-- **pull** — if `knownPayloadVersion` equals the current version, the server returns
+- **pull**, if `knownPayloadVersion` equals the current version, the server returns
   `{ manifest, unchanged: true }` and SHOULD omit `envelope`; otherwise it returns the manifest and the
   current envelope.
-- **push** — optimistic concurrency: the write applies only if `expectedPayloadVersion` equals the
+- **push**, optimistic concurrency: the write applies only if `expectedPayloadVersion` equals the
   current version; otherwise the server returns `{ accepted: false, conflict: true }` with the current
   version and the client MUST pull, re-apply, and retry. `payloadVersion` is monotonic per repo. If
   `rotatedMembers` is present, the server replaces the member roster atomically with the write (the
   rotation path).
-- **addMember** — record a member whose wrapped key the *client* computed (the server cannot wrap).
-- **removeMember** — in one atomic step: drop `removedMemberId`, replace the roster with
+- **addMember**, record a member whose wrapped key the *client* computed (the server cannot wrap).
+- **removeMember**, in one atomic step: drop `removedMemberId`, replace the roster with
   `rewrappedMembers`, store `rotatedEnvelope`, and set the epoch to `newKeyEpoch`.
-- **fetchMemberKey** — return a member's `MemberEntry` (its public keys and any `keyBindingSig`).
+- **fetchMemberKey**, return a member's `MemberEntry` (its public keys and any `keyBindingSig`).
 
 ### Profiles
 
-- **gRPC** — [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable.
-- **HTTP/JSON** — one path per operation (e.g. `POST /v1/repos`, `POST /v1/repos/{repoId}/pull`, …), JSON
+- **gRPC**, [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable.
+- **HTTP/JSON**, one path per operation (e.g. `POST /v1/repos`, `POST /v1/repos/{repoId}/pull`, …), JSON
   bodies using the proto field names in `camelCase`, the token in `Authorization: Bearer <token>`. The
   conformance schema is [`schema/avp.schema.json`](schema/avp.schema.json). Implementations MAY support
   either or both profiles; the message semantics are identical.
@@ -186,18 +185,17 @@ AVP federates by **portable identity + addressing**, not server-to-server replic
   host-independent).
 - **Portable identity.** A member's Ed25519 keypair authenticates against any conformant server (§3).
   Tokens are per-host (§3); a client MUST scope them by host.
-- **Reaching a repo.** To use a repository, a client connects to its `host` (resolving how to dial it —
-  see discovery below) and authenticates with its own keypair.
+- **Reaching a repo.** To use a repository, a client connects to its `host` (resolving how to dial it, see discovery below) and authenticates with its own keypair.
 
 ### 8.1 Join handshake
 
 Because adding a member is member-initiated (an existing member wraps the data key to the joiner's
 X25519 key), the joiner publishes its keys first. Two base64url-encoded JSON tokens:
 
-1. **Invite request** (joiner → inviter): `{ "v": 1, "ed25519PublicKey", "x25519PublicKey" }` — the
+1. **Invite request** (joiner → inviter): `{ "v": 1, "ed25519PublicKey", "x25519PublicKey" }`, the
    joiner's public keys. The inviter calls `addMember` with them.
 2. **Repo locator** (inviter → joiner): `{ "v": 1, "host", "repoId", "schemeId", "keyEpoch",
-   "issuerJwksUrl"? }` — where the repository lives, plus the IdP whose key bindings to trust (§9).
+   "issuerJwksUrl"? }`, where the repository lives, plus the IdP whose key bindings to trust (§9).
    `schemeId`/`keyEpoch` are hints; the authoritative values come from the pulled manifest.
    `issuerJwksUrl` MAY be absent when the deployment publishes no key binding.
 

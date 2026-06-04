@@ -1,4 +1,4 @@
-# AVP reference server — Python (in-memory)
+# AVP reference server, Python (in-memory)
 
 A tiny, runnable reference server for the [HTTP/JSON profile](../../../SPEC.md), so you can point a
 client at something real while you build it. The standard library plus one dependency

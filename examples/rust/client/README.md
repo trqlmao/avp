@@ -1,4 +1,4 @@
-# AVP reference client — Rust
+# AVP reference client, Rust
 
 A tiny, runnable reference client for the [HTTP/JSON profile](../../../SPEC.md). It drives the full
 lifecycle against a running server so you can watch every operation happen end to end. The source is one
@@ -30,19 +30,19 @@ client at it with `AVP_SERVER_URL` if you prefer.
 
 In one run, with two locally generated members (`alice` and `bob`):
 
-1. **Generate keypairs** — each member is a fresh Ed25519 keypair (`ed25519-dalek`). The base64 raw
+1. **Generate keypairs**, each member is a fresh Ed25519 keypair (`ed25519-dalek`). The base64 raw
    32-byte Ed25519 public key is the member id (SPEC section 2).
-2. **Authenticate** — the `challenge` -> sign nonce -> `token` flow. The client signs the **raw nonce
+2. **Authenticate**, the `challenge` -> sign nonce -> `token` flow. The client signs the **raw nonce
    bytes** (base64-decoded), which is exactly what a conformant server verifies.
-3. **createRepo** — alice creates a repo as its sole member.
-4. **pull** — once at the known version (server reports `unchanged`, omits the envelope) and once from
+3. **createRepo**, alice creates a repo as its sole member.
+4. **pull**, once at the known version (server reports `unchanged`, omits the envelope) and once from
    version 0 (server returns the current envelope).
-5. **push** — writes a new payload version with optimistic concurrency, then deliberately re-pushes at a
+5. **push**, writes a new payload version with optimistic concurrency, then deliberately re-pushes at a
    stale expected version to show the `conflict` response.
-6. **addMember** — alice records bob's member entry.
-7. **fetchMemberKey** — looks bob's entry back up by member id (URL-encoded, because base64 ids contain
+6. **addMember**, alice records bob's member entry.
+7. **fetchMemberKey**, looks bob's entry back up by member id (URL-encoded, because base64 ids contain
    `+ / =`).
-8. **bob pulls** — bob authenticates with his own keypair and syncs the shared repo.
+8. **bob pulls**, bob authenticates with his own keypair and syncs the shared repo.
 
 Each step prints a one-line transcript entry.
 
@@ -63,7 +63,7 @@ Minimal and version-pinned (see [`Cargo.toml`](Cargo.toml)):
 **The envelope and wrapped-key cryptography is out of scope for this example.** This client does **not**
 encrypt anything. It carries the alt payload as an **opaque placeholder ciphertext** and fills each
 member's wrapped data key with a labelled placeholder blob. That is fine for exercising the wire
-contract, because the server is zero-knowledge and never decrypts what it stores — so a placeholder
+contract, because the server is zero-knowledge and never decrypts what it stores, so a placeholder
 ciphertext round-trips identically to a real one.
 
 A production client does the real work the server cannot:
@@ -80,7 +80,7 @@ contract.
 
 ## What is simplified (do not ship this)
 
-- **Placeholder crypto.** As above — no real encryption or key wrapping happens here.
+- **Placeholder crypto.** As above, no real encryption or key wrapping happens here.
 - **No TLS.** It talks plain HTTP to `localhost` by default. A real client uses HTTPS; bearer tokens are
   credentials and the transport MUST be TLS (SPEC section 12).
 - **Single process, no persistence.** It generates fresh keypairs each run and keeps no state.

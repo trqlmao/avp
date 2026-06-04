@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/trqlmao/avp-spec/schema/avp.schema.json",
-  "title": "Alt Vault Protocol — HTTP/JSON profile",
+  "$id": "https://github.com/trqlmao/avp/schema/avp.schema.json",
+  "title": "Alt Vault Protocol: HTTP/JSON profile",
   "description": "JSON message shapes for the AVP HTTP/JSON transport profile. Field names match the proto field names in camelCase. Binary values are base64 strings. See ../SPEC.md.",
   "$defs": {
     "WrappedKey": {

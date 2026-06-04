@@ -4,8 +4,11 @@ An open, vendor-neutral protocol for sharing Minecraft alt accounts across clien
 zero-knowledge sync server.
 
 [![License](https://img.shields.io/badge/license-CC--BY--4.0%20%2F%20MIT-blue.svg)](LICENSE)
-[![no-leak](https://github.com/trqlmao/avp-spec/actions/workflows/no-leak.yml/badge.svg)](https://github.com/trqlmao/avp-spec/actions/workflows/no-leak.yml)
+[![no-leak](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml/badge.svg)](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml)
 [![spec](https://img.shields.io/badge/spec-v0.2%20draft-orange.svg)](SPEC.md)
+
+Read it online at **[avp.trq.lol](https://avp.trq.lol)**, or jump straight to the
+[specification](SPEC.md), the [proto schema](proto/avp.proto), or the [worked examples](examples/).
 
 Members of a shared *alt repository* are identified by a keypair. The alt payload is encrypted on the
 client before it ever leaves the machine, so the server stores only ciphertext, wrapped keys, public
@@ -72,6 +75,20 @@ with representative message bodies, which is the fastest way to see how the piec
 Your client and ours can then share the same repositories. The protocol does not care which client a
 member runs.
 
+### Check yourself against the vectors
+
+The reference conformance runner reproduces every vector in [`vectors/`](vectors/) with Node's `crypto`:
+
+```sh
+cd examples/conformance
+bun install
+bun run test
+```
+
+It reproduces the deterministic and RFC-anchored vectors exactly and round-trips the composition vectors
+(decrypting and unwrapping what a peer produced). Reproduce the same in your language and you are
+conformant.
+
 ## For AI agents
 
 If you are an AI coding agent asked to implement, review, or extend AVP, start from
@@ -122,8 +139,8 @@ or with applicable law, is the implementer's responsibility.
 This repository is dual-licensed:
 
 - **Machine-readable artifacts** (`proto/`, `schema/`, `vectors/`) and the example code under
-  `examples/` are licensed **MIT** — see [`LICENSE`](LICENSE).
-- **Specification prose** (`SPEC.md` and this README) is licensed **CC-BY-4.0** — see
+  `examples/` are licensed **MIT**, see [`LICENSE`](LICENSE).
+- **Specification prose** (`SPEC.md` and this README) is licensed **CC-BY-4.0**, see
   [`LICENSE-docs`](LICENSE-docs).
 
 ## Status

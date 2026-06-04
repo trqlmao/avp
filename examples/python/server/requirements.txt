@@ -1,4 +1,4 @@
-# AVP reference server (Python) — runtime dependency.
+# AVP reference server (Python), runtime dependency.
 # Only the Ed25519 challenge verification needs a third-party package; everything
 # else is the standard library (http.server, json, base64, secrets).
 cryptography==48.0.0

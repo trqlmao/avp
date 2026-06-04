@@ -1,14 +1,14 @@
-# AVP reference server — TypeScript (in-memory)
+# AVP reference server, TypeScript (in-memory)
 
 A tiny, runnable reference server for the [HTTP/JSON profile](../../../SPEC.md), so you can point a
 client at something real while you build it. Node built-ins only; the source is one file,
 [`src/server.ts`](src/server.ts).
 
 ```sh
-npm install
-npm start          # listens on http://localhost:8787 (set PORT to change)
-npm test           # node:test integration suite (real Ed25519 auth, full lifecycle)
-npm run typecheck  # tsc --noEmit
+bun install
+bun run start          # listens on http://localhost:8787 (set PORT to change)
+bun run test           # node:test integration suite (real Ed25519 auth, full lifecycle)
+bun run typecheck  # tsc --noEmit
 ```
 
 ## What it implements

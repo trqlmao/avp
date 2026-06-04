@@ -1,4 +1,4 @@
-// Alt Vault Protocol (AVP) — canonical gRPC schema.
+// Alt Vault Protocol (AVP), canonical gRPC schema.
 //
 // This is the source of truth for the gRPC transport profile. Field numbers and
 // names are stable. The HTTP/JSON profile uses the same field names in camelCase
@@ -11,7 +11,7 @@ syntax = "proto3";
 package avp;
 
 // The zero-knowledge vault service. The server stores and serves only ciphertext,
-// per-member wrapped keys, public keys, counters, and opaque signatures — it can
+// per-member wrapped keys, public keys, counters, and opaque signatures. It can
 // decrypt nothing. Authentication (challenge/token) yields a bearer token carried
 // in transport metadata; it is typically HTTP/JSON to the identity provider but
 // MAY be offered over gRPC using the auth messages below.
