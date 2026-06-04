@@ -1,7 +1,10 @@
-/* avp.trq.lol — a minimal, light, text-first layout. Monospace headings, no
-   accent color (the spec is vendor-neutral). Hand-written; no framework. */
+/* avp.trq.lol: a minimal, text-first layout. Monospace headings, no accent
+   color (the spec is vendor-neutral). Light by default, dark by system
+   preference, with a persistent toggle. Hand-written; no framework. */
 
 :root {
+  /* Light scheme (default). */
+  color-scheme: light;
   --bg: #ffffff;
   --ink: #111111;
   --muted: #555555;
@@ -9,6 +12,7 @@
   --line: #e5e5e5;
   --line-strong: #cfcfcf;
   --code-bg: #f6f6f6;
+  --code-accent: #3a3a3a;
 
   --sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
@@ -18,6 +22,34 @@
   --tracking-label: 0.06em;
 
   --measure: 46rem;
+}
+
+/* Dark scheme. Two triggers: the system preference (unless the reader forced
+   light), and an explicit data-theme="dark" from the toggle. Same values both
+   ways, so they are declared together. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0a0a0a;
+    --ink: #ededed;
+    --muted: #a1a1a1;
+    --faint: #8a8a8a;
+    --line: #1f1f1f;
+    --line-strong: #3a3a3a;
+    --code-bg: #141414;
+    --code-accent: #b9b9b9;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --ink: #ededed;
+  --muted: #a1a1a1;
+  --faint: #8a8a8a;
+  --line: #1f1f1f;
+  --line-strong: #3a3a3a;
+  --code-bg: #141414;
+  --code-accent: #b9b9b9;
 }
 
 * {
@@ -100,6 +132,22 @@ body {
   padding: 0.25rem 0;
 }
 .nav a:hover {
+  color: var(--ink);
+}
+
+.theme-toggle {
+  margin-left: auto;
+  appearance: none;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 0.25rem 0.25rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 1rem;
+  line-height: 1;
+}
+.theme-toggle:hover {
   color: var(--ink);
 }
 
@@ -283,9 +331,9 @@ a:focus-visible,
 /* Subtle, light Rouge syntax highlighting (no chromatic accent). */
 .highlight .c, .highlight .c1, .highlight .cm, .highlight .cs { color: var(--faint); font-style: italic; }
 .highlight .k, .highlight .kd, .highlight .kn, .highlight .kr, .highlight .kt { color: var(--ink); font-weight: 600; }
-.highlight .s, .highlight .s1, .highlight .s2, .highlight .se { color: #3a3a3a; }
+.highlight .s, .highlight .s1, .highlight .s2, .highlight .se { color: var(--code-accent); }
 .highlight .n, .highlight .na, .highlight .nv, .highlight .nf { color: var(--ink); }
-.highlight .mi, .highlight .mf, .highlight .m { color: #3a3a3a; }
+.highlight .mi, .highlight .mf, .highlight .m { color: var(--code-accent); }
 .highlight .o, .highlight .p { color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) {

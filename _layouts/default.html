@@ -26,6 +26,17 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}" />
+
+    <!-- No-flash: apply a saved theme choice before paint. Absent a choice, the
+         CSS prefers-color-scheme media query handles the system default. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -41,6 +52,7 @@
         <a href="{{ '/schema/avp.schema.json' | relative_url }}">Schema</a>
         <a href="{{ '/llms.txt' | relative_url }}">llms.txt</a>
         <a href="https://github.com/trqlmao/avp">GitHub</a>
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch theme" title="Switch theme">◐</button>
       </nav>
     </header>
 
@@ -55,5 +67,34 @@
       <span class="sep" aria-hidden="true">/</span>
       <a href="https://github.com/trqlmao/avp">trqlmao/avp</a>
     </footer>
+
+    <script>
+      (function () {
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+        function effective() {
+          var a = document.documentElement.getAttribute('data-theme');
+          if (a === 'dark' || a === 'light') return a;
+          return mq && mq.matches ? 'dark' : 'light';
+        }
+        function sync() {
+          var dark = effective() === 'dark';
+          btn.setAttribute('aria-pressed', String(dark));
+          btn.title = dark ? 'Switch to light' : 'Switch to dark';
+          btn.setAttribute('aria-label', btn.title);
+        }
+        btn.addEventListener('click', function () {
+          var next = effective() === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', next);
+          try {
+            localStorage.setItem('theme', next);
+          } catch (e) {}
+          sync();
+        });
+        if (mq && mq.addEventListener) mq.addEventListener('change', sync);
+        sync();
+      })();
+    </script>
   </body>
 </html>
