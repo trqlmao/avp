@@ -4,6 +4,14 @@ Notable changes to the Alt Vault Protocol (AVP) and this repository. The format 
 [Keep a Changelog](https://keepachangelog.com/). The protocol version is independent of any
 implementation's version.
 
+## [Unreleased]
+
+### Specification
+
+- Clarified that an issuer MAY require out-of-band authentication and embed deployment-specific claims
+  on the `token` grant, and that a server MAY return implementation-defined resource or policy errors
+  such as quota limits; both non-normative (SPEC sections 3 and 6).
+
 ## [0.2] - 2026-06-01
 
 Initial public draft of the protocol.
