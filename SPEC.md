@@ -47,6 +47,15 @@ membership; it MUST NOT require any account lookup.
 A token is **server-local**: it is minted by, and valid only at, the server that issued it. A client
 MUST cache tokens keyed by host and MUST NOT present a token issued by one host to another (see §8).
 
+**Issuer authentication policy (non-normative).** The `challenge`/`token` flow proves control of the
+Ed25519 identity; it does not prescribe *who* may obtain a token. An issuer MAY require additional,
+out-of-band authentication on the `token` request (for example, an existing account session presented
+as a bearer credential) before minting a keypair token, and MAY embed additional deployment-specific
+claims in the resulting JWT. Such requirements and claims are deployment policy: they do not alter the
+`challenge`/`token` request or response shapes, and a conformant client that lacks the required
+out-of-band credential simply receives an authentication failure. Conformant clients MUST ignore JWT
+claims they do not recognize.
+
 ## 4. Cryptographic envelope
 
 Field names are part of the contract. All values are base64 strings unless typed otherwise.
