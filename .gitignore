@@ -1,3 +1,11 @@
 .DS_Store
 *.log
 node_modules/
+
+# Go reference example build artifacts
+/examples/go/client/client
+/examples/go/client/client.exe
+/examples/go/server/server
+/examples/go/server/server.exe
+*.test
+*.out

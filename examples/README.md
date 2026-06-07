@@ -20,6 +20,14 @@ HTTP/JSON profile against in-memory state and is illustrative, not production.
 | Rust | [`rust/server/`](rust/server/) | [`rust/client/`](rust/client/) |
 | Python | [`python/server/`](python/server/) | [`python/client/`](python/client/) |
 | Java | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
+| Go | [`go/server/`](go/server/) | [`go/client/`](go/client/) |
+
+Most examples carry the envelope and wrapped-key crypto as opaque placeholders (only
+the Ed25519 auth is real); the real constructions live in the
+[`../vectors/`](../vectors/). The [Go example](go/) is the exception: it implements
+the payload AEAD and the X25519 key wrap (SPEC §4) for real, end to end, and verifies
+them byte-for-byte against those vectors, so it doubles as a worked reference for the
+cryptographic core.
 
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
 [`../vectors/`](../vectors/)). More languages are welcome; see
