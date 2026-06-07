@@ -174,6 +174,15 @@ Semantics:
   `rewrappedMembers`, store `rotatedEnvelope`, and set the epoch to `newKeyEpoch`.
 - **fetchMemberKey**, return a member's `MemberEntry` (its public keys and any `keyBindingSig`).
 
+**Implementation-defined errors (non-normative).** Beyond the protocol-defined outcomes
+(optimistic-concurrency `conflict`, *not found*, and membership *permission denied*), a server MAY
+reject any operation with an implementation-defined resource or policy error — for example a quota
+limit (repositories per tenant, members per repository) or an operation disallowed by deployment
+policy. These are distinct from a concurrency `conflict`: a client MUST surface them as terminal
+failures and MUST NOT retry them as if they were a stale-version conflict. Recommended encodings:
+HTTP `429 Too Many Requests` / `403 Forbidden` for the JSON profile; gRPC `RESOURCE_EXHAUSTED` /
+`PERMISSION_DENIED` for the gRPC profile.
+
 ### Profiles
 
 - **gRPC**, [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable.
