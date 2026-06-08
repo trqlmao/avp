@@ -126,7 +126,7 @@ the AAD). An **`AltAccount`** is:
   "type": "MICROSOFT | COOKIE | SESSION | OFFLINE",
   "lastUsed": <int64>,
   "lastUsedBy": "<member id or null>",
-  "ban": { "banned": <bool>, "observedAt": <int64>, "source": "...", "detail": "...", "observedBy": "<member id or null>" } | null,
+  "bans": { "<server id>": { "banned": <bool>, "observedAt": <int64>, "source": "...", "detail": "...", "observedBy": "<member id or null>" }, ... } | null,
   "sourceClient": "<client name or null>",
   "sourceUser": "<user within that client or null>"
 }
@@ -140,8 +140,12 @@ server never sees them, so cross-client attribution does not weaken the zero-kno
 Implementations SHOULD set them when adding an alt and MUST tolerate their absence (older payloads, or
 clients that do not attribute).
 
-`lastUsedBy` / `ban.observedBy` are member ids (base64 Ed25519 keys) or `null`; they let members
-coordinate (who used an alt last, who observed it banned) so a teammate is not handed a banned account.
+`bans` maps a **server id** to the most recent ban observed for the alt on that server, or is `null`
+when the alt has never been observed banned; the server id is a plain, opaque, implementer-defined string
+(the spec defines only the field names). Keying by server lets a cross-client repository track that an
+alt is banned on one server but usable on another. `lastUsedBy` and a ban's `observedBy` are member ids
+(base64 Ed25519 keys) or `null`; they let members coordinate (who used an alt last, who observed it
+banned) so a teammate is not handed an account banned where they want to play.
 
 ## 6. Transport surface
 
