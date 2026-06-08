@@ -160,7 +160,7 @@ export const WRAP_SCHEME_ID = "X25519-HKDF-SHA256-AESGCM-v1";
  * @param keyEpoch - The key-rotation epoch counter.
  * @returns The concatenated AAD bytes.
  */
-export function buildAad(repoId: string, payloadVersion: number | bigint, keyEpoch: number | bigint): Buffer {
+export function buildAad(repoId: string, payloadVersion: number, keyEpoch: number): Buffer {
   const versionBuf = Buffer.alloc(8);
   versionBuf.writeBigInt64BE(BigInt(payloadVersion), 0);
   const epochBuf = Buffer.alloc(8);
@@ -278,8 +278,7 @@ export function wrapDataKey(recipientX25519PubB64: string, dataKey: Buffer): Wra
   const recipientPub = importX25519Public(recipientPubRaw);
 
   // Generate a fresh ephemeral X25519 keypair.
-  const ephemeralPriv = generateX25519().privateKey;
-  const ephemeralPubRaw = x25519PublicRaw(ephemeralPriv);
+  const { privateKey: ephemeralPriv, publicKeyRaw: ephemeralPubRaw } = generateX25519();
 
   // Unhashed shared secret.
   const shared = x25519(ephemeralPriv, recipientPub);
@@ -336,25 +335,4 @@ export function generateX25519(): { privateKey: KeyObject; publicKeyRaw: Buffer 
   const { privateKey } = generateKeyPairSync("x25519");
   const publicKeyRaw = x25519PublicRaw(privateKey);
   return { privateKey, publicKeyRaw };
-}
-
-/**
- * Encodes a raw byte buffer as standard base64 with padding (the AVP wire encoding
- * for all key, IV, and ciphertext fields).
- *
- * @param raw - The bytes to encode.
- * @returns The standard base64 string.
- */
-export function toBase64(raw: Buffer): string {
-  return raw.toString("base64");
-}
-
-/**
- * Decodes a standard base64 string (with or without padding) into a Buffer.
- *
- * @param b64 - The base64 string to decode.
- * @returns The decoded bytes.
- */
-export function fromBase64(b64: string): Buffer {
-  return Buffer.from(b64, "base64");
 }
