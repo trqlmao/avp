@@ -3,13 +3,13 @@
 # This is the route-level companion to schema/avp.schema.json (message shapes) and
 # proto/avp.proto (the canonical gRPC profile). It maps every operation in SPEC §6 to a
 # path, method, status set, and body, so an HTTP stack can scaffold a client or server and
-# render interactive docs. Message schemas are referenced from schema/avp.schema.json — that
+# render interactive docs. Message schemas are referenced from schema/avp.schema.json; that
 # file remains the single source of truth for shapes; do not duplicate them here.
 #
 # OpenAPI 3.1 (JSON Schema 2020-12). SPDX-License-Identifier: MIT
 openapi: 3.1.0
 info:
-  title: Alt Vault Protocol — HTTP/JSON profile
+  title: Alt Vault Protocol (HTTP/JSON profile)
   version: "0.2"
   summary: Zero-knowledge, federated sharing of Minecraft alt accounts.
   description: |
@@ -24,7 +24,7 @@ info:
 
     **Conflict is not an error.** A stale-version `push` returns `200` with
     `PushResponse.conflict = true`, not a 4xx. Every non-2xx body is an
-    [`Error`](schema/avp.schema.json) and is terminal — never retried as a conflict (SPEC §6).
+    [`Error`](schema/avp.schema.json) and is terminal; never retried as a conflict (SPEC §6).
   license:
     name: MIT
     url: https://github.com/trqlmao/avp/blob/main/LICENSE
@@ -145,7 +145,7 @@ paths:
       description: |
         Applies only if `expectedPayloadVersion` equals the current version. A stale write is **not**
         an error: the response is `200` with `accepted = false`, `conflict = true`, and the current
-        version — pull, re-apply, and retry. Present `rotatedMembers` to replace the roster atomically
+        version; pull, re-apply, and retry. Present `rotatedMembers` to replace the roster atomically
         with the write.
       parameters: [{ $ref: "#/components/parameters/RepoId" }]
       requestBody:

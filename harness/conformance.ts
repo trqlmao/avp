@@ -4,7 +4,7 @@
  * Point it at any running AVP server and it exercises the full wire contract end to end, asserting the
  * normative MUSTs from SPEC §3/§6/§10 rather than just printing a transcript: the challenge→token flow
  * and its failure modes, optimistic concurrency (a stale push is a 200 conflict, never a 4xx), membership
- * authorization, key rotation on member removal, and — the whole point — zero-knowledge: the plaintext we
+ * authorization, key rotation on member removal, and (the whole point) zero-knowledge: the plaintext we
  * encrypt never appears in anything the server stores or echoes back.
  *
  * It is server-agnostic: the only AVP-specific code is the client-side crypto, reused from the
@@ -381,7 +381,7 @@ async function main(): Promise<void> {
   let passed = 0;
   for (const r of results) {
     const mark = r.ok ? "PASS" : "FAIL";
-    const tail = r.ok ? "" : `  — ${r.detail}`;
+    const tail = r.ok ? "" : `  (${r.detail})`;
     console.log(`  [${mark}] ${r.section.padEnd(4)} ${r.name}${tail}`);
     if (r.ok) {
       passed += 1;

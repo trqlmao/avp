@@ -176,7 +176,7 @@ Semantics:
 
 **Implementation-defined errors (non-normative).** Beyond the protocol-defined outcomes
 (optimistic-concurrency `conflict`, *not found*, and membership *permission denied*), a server MAY
-reject any operation with an implementation-defined resource or policy error — for example a quota
+reject any operation with an implementation-defined resource or policy error, for example a quota
 limit (repositories per tenant, members per repository) or an operation disallowed by deployment
 policy. These are distinct from a concurrency `conflict`: a client MUST surface them as terminal
 failures and MUST NOT retry them as if they were a stale-version conflict. Recommended encodings:
@@ -207,7 +207,7 @@ which status each operation can return, is [`openapi.yaml`](openapi.yaml).
 | `429` | `quota_exceeded` | A deployment resource limit was hit |
 
 A client MUST treat every error here as **terminal** and MUST NOT retry it as if it were a
-stale-version conflict. The one retryable outcome — optimistic-concurrency conflict — is **not** an
+stale-version conflict. The one retryable outcome (optimistic-concurrency conflict) is **not** an
 error: `push` returns HTTP `200` with `PushResponse { accepted: false, conflict: true }` and the
 current version (§10). The gRPC profile carries the same outcomes as status codes
 (`INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, `NOT_FOUND`, `ALREADY_EXISTS`,
@@ -299,12 +299,12 @@ A conformant server MUST uphold:
 An implementation is conformant if it satisfies every MUST above and reproduces the vectors in
 [`vectors/`](vectors/), indexed by [`vectors/index.json`](vectors/index.json):
 
-- the **deterministic constructions** — the AAD layout (`aad.json`) and the canonical key-binding
+- the **deterministic constructions**: the AAD layout (`aad.json`) and the canonical key-binding
   message (`key-binding-message.json`);
-- the **RFC-anchored primitives** — HKDF-SHA256 (`hkdf.json`), X25519 (`x25519.json`), and Ed25519
+- the **RFC-anchored primitives**: HKDF-SHA256 (`hkdf.json`), X25519 (`x25519.json`), and Ed25519
   sign/verify (`ed25519.json`). The Ed25519 vector anchors the signature used by the challenge→token
   flow (§3): signing the raw nonce bytes is exactly this primitive;
-- the **envelope compositions** — payload AEAD (`payload-aead.json`) and the key wrap/unwrap
+- the **envelope compositions**: payload AEAD (`payload-aead.json`) and the key wrap/unwrap
   (`key-wrap.json`). The payload-AEAD case includes the epoch-tamper assertion (decryption fails when
   the AAD's `keyEpoch` changes), which is the cryptographic core of rotation correctness (§10): a
   stale-epoch envelope cannot authenticate.
