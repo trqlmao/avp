@@ -1,0 +1,22 @@
+// Example-only auth service for the gRPC profile.
+//
+// The canonical proto (../../proto/avp.proto) defines the Vault service plus the
+// challenge/token auth MESSAGES, but no auth service: a token is carried in gRPC
+// metadata, and "MAY be offered over gRPC using the auth messages" (SPEC section 3).
+// This example offers exactly that, reusing the canonical messages, so the whole
+// flow runs over one gRPC channel. It is illustrative, not part of the spec.
+//
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package avp;
+
+import "avp.proto";
+
+// The identity provider's challenge -> token flow (SPEC section 3), offered over gRPC.
+service Auth {
+  // Issue a single-use challenge nonce for an Ed25519 identity.
+  rpc Challenge(ChallengeRequest) returns (AuthChallenge);
+  // Exchange a signed nonce for a bearer token (sent as `authorization` metadata on Vault calls).
+  rpc Token(TokenRequest) returns (AuthToken);
+}

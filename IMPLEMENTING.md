@@ -16,7 +16,8 @@ You are building two things:
 
 The **HTTP/JSON transport profile** (one `POST` per operation, proto field names in `camelCase`,
 `Authorization: Bearer <token>`) is the most portable starting point. A gRPC profile exists (see
-[`proto/avp.proto`](proto/avp.proto)) and is interchangeable at the message level; pick one.
+[`proto/avp.proto`](proto/avp.proto), with a runnable example in [`examples/grpc/`](examples/grpc/)) and
+is interchangeable at the message level; pick one.
 
 Conformance means two things:
 

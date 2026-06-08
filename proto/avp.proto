@@ -2,7 +2,8 @@
 //
 // This is the source of truth for the gRPC transport profile. Field numbers and
 // names are stable. The HTTP/JSON profile uses the same field names in camelCase
-// (see ../schema/avp.schema.json). See ../SPEC.md for semantics.
+// (see ../schema/avp.schema.json). See ../SPEC.md for semantics, and
+// ../examples/grpc/ for a runnable client and server that load this file.
 //
 // SPDX-License-Identifier: MIT
 
