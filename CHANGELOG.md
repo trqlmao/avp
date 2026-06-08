@@ -8,6 +8,11 @@ implementation's version.
 
 ### Specification
 
+- Filled the reserved SPEC section 7 with **Operational limits and retries**: resource limits (with a
+  `413`/`too_large` and `429`/`quota_exceeded` error contract), rate limiting (`Retry-After` and
+  `RateLimit-*` headers), per-operation idempotency and safe-retry rules, and `repoId` charset/length
+  guidance. Added `too_large` to the `$defs/Error` code enum and the `413`/`429` responses (with
+  `Retry-After`/`RateLimit-*` headers) to `openapi.yaml`.
 - Clarified that an issuer MAY require out-of-band authentication and embed deployment-specific claims
   on the `token` grant, and that a server MAY return implementation-defined resource or policy errors
   such as quota limits; both non-normative (SPEC sections 3 and 6).
