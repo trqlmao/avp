@@ -3,17 +3,17 @@
  *
  * It drives the whole wire contract against a running server (the sibling `../server`, or any other
  * conformant HTTP/JSON server) so an implementer can see the full lifecycle end to end: generate an
- * Ed25519 keypair, run the challenge -> sign -> token auth flow, create a repo, pull, push a new
- * version, invite a second member, fetch that member's key, and print a transcript.
+ * Ed25519 + X25519 keypair, run the challenge -> sign -> token auth flow, create a repo, pull, push a
+ * new version, invite a second member, fetch that member's key, and finally have the second member pull,
+ * unwrap the data key, and decrypt the payload.
  *
- * It is intentionally tiny and NOT production code. Crucially, the envelope and wrapped-key crypto is
- * OUT OF SCOPE here: this client carries the alt payload as an opaque placeholder ciphertext and never
- * actually encrypts anything. A real client derives a per-repo data key, AES-256-GCM encrypts the alt
- * payload (binding repoId/payloadVersion/keyEpoch into the AAD), and wraps the data key to each member's
- * X25519 key. See SPEC sections 4-5 and the `lol.trq.alts` reference for that part. The only real crypto
- * here is the Ed25519 challenge signature, which IS part of the wire contract.
+ * The envelope and wrapped-key cryptography here is REAL (SPEC sections 4-5): alice derives a per-repo
+ * data key, AES-256-GCM-encrypts the alt payload binding (repoId, payloadVersion, keyEpoch) into the
+ * AAD, and wraps the data key to each member's X25519 key with X25519 + HKDF-SHA256. The server stays
+ * zero-knowledge throughout; at the end bob recovers exactly what alice stored. The crypto lives in
+ * the sibling `crypto.ts` and is tested against `vectors/*.json` by `crypto.test.ts`.
  *
- * Run: `npm install && npm start` (uses tsx; no runtime dependencies, only Node's built-in crypto).
+ * Run: `bun install && bun run start` (uses tsx; no runtime dependencies, only Node's built-in crypto).
  * Point it at a server with `AVP_SERVER_URL` (default http://localhost:8787).
  *
  * SPDX-License-Identifier: MIT
@@ -26,18 +26,28 @@ import {
   type KeyObject,
 } from "node:crypto";
 
+import {
+  buildAad,
+  decryptPayload,
+  encryptPayload,
+  generateX25519,
+  unwrapDataKey,
+  wrapDataKey,
+  type EncryptedEnvelopeFields,
+  type WrappedKeyFields,
+} from "./crypto.ts";
+
 // ─── Wire types (HTTP/JSON profile) — mirror schema/avp.schema.json ───────
 
 /**
  * A repo data key wrapped to a single member's X25519 public key (SPEC section 5).
  *
- * In a real client this is the output of an X25519 ECDH + HKDF + AES-256-GCM wrap; the server stores and
- * serves it verbatim but can never read it. This example fills every field with a labelled placeholder.
+ * The server stores and serves it verbatim but can never read it.
  */
 interface WrappedKey {
   /** Identifier of the wrapping scheme; must match the manifest's `schemeId`. */
   schemeId: string;
-  /** Base64 ephemeral X25519 public key the sender used for the ECDH (the recipient's half of the wrap). */
+  /** Base64 ephemeral X25519 public key the sender used for the ECDH. */
   ephemeralPublicKey: string;
   /** Base64 AES-GCM nonce/IV used to wrap the data key. */
   iv: string;
@@ -65,9 +75,9 @@ interface MemberEntry {
 /**
  * The encrypted alt payload as stored and transferred (SPEC section 4).
  *
- * The server treats `ciphertext` as opaque. A real client AES-256-GCM-encrypts the payload and binds
- * `(repoId, payloadVersion, keyEpoch)` into the AAD so the ciphertext cannot be replayed under a different
- * identity. This example uses a placeholder ciphertext and performs no encryption.
+ * The server treats `ciphertext` as opaque. This client AES-256-GCM-encrypts the payload and binds
+ * `(repoId, payloadVersion, keyEpoch)` into the AAD so the ciphertext cannot be replayed under a
+ * different identity.
  */
 interface EncryptedEnvelope {
   /** Repo this envelope belongs to. */
@@ -142,48 +152,66 @@ interface AuthToken {
   expiresAt: number;
 }
 
-/** Identifier of the wrapping scheme this example advertises in manifests and wrapped keys. */
+/** The plaintext payload structure carried inside an encrypted envelope. */
+interface Plaintext {
+  alts: Alt[];
+  payloadVersion: number;
+}
+
+/** One stored account inside the (encrypted) payload. */
+interface Alt {
+  uuid: string;
+  username: string;
+  accessToken: string;
+  type: string;
+  lastUsed: number;
+}
+
+/** Identifier of the wrapping scheme this example uses. */
 const SCHEME_ID = "X25519-HKDF-SHA256-AESGCM-v1";
 
-// ─── Ed25519 keypair + identity (SPEC section 3) ──────────────────────────
+// ─── Ed25519 + X25519 keypair + identity (SPEC sections 2, 3) ─────────────────
 
 /**
- * A member identity: an Ed25519 signing keypair plus a placeholder X25519 public key.
+ * A member identity: an Ed25519 signing keypair and a real X25519 wrapping keypair.
  *
- * The raw 32-byte Ed25519 public key, base64-encoded, is the member id (SPEC section 2). The X25519 key
- * would be a real Curve25519 public key in a production client; here it is an opaque placeholder, because
- * this example performs no key wrapping.
+ * The raw 32-byte Ed25519 public key, base64-encoded, is the member id (SPEC section 2).
  */
 interface Identity {
   /** Base64 raw 32-byte Ed25519 public key; this is the member id. */
   ed25519PublicKey: string;
-  /** Base64 placeholder X25519 public key (no real key agreement happens in this example). */
+  /** Base64 raw 32-byte X25519 public key (used to wrap the repo data key to this member). */
   x25519PublicKey: string;
   /** The Ed25519 private key, used only to sign the auth challenge nonce. */
-  privateKey: KeyObject;
+  edPrivateKey: KeyObject;
+  /** The X25519 private key, used to unwrap the repo data key. */
+  xPrivateKey: KeyObject;
 }
 
 /**
- * Generates a fresh Ed25519 identity, extracting the raw 32-byte public key from its SPKI DER.
+ * Generates a fresh identity: an Ed25519 signing keypair plus a real X25519 wrapping keypair.
  *
- * @param label - Human-readable name (e.g. "alice") woven into the placeholder X25519 key so the
- *   transcript stays readable; it has no cryptographic meaning.
- * @returns A new {@link Identity} with a real Ed25519 keypair and a placeholder X25519 public key.
+ * @returns A new {@link Identity} with real keypairs.
  */
-function generateIdentity(label: string): Identity {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const spki = publicKey.export({ format: "der", type: "spki" }) as Buffer;
+function generateIdentity(): Identity {
+  // Ed25519 for auth / member id.
+  const { publicKey: edPub, privateKey: edPriv } = generateKeyPairSync("ed25519");
+  const spki = edPub.export({ format: "der", type: "spki" }) as Buffer;
   // An Ed25519 SPKI document is a 12-byte header followed by the raw 32-byte key.
-  const raw = spki.subarray(spki.length - 32);
+  const edPubRaw = spki.subarray(spki.length - 32);
+
+  // X25519 for data-key wrapping.
+  const { privateKey: xPriv, publicKeyRaw: xPubRaw } = generateX25519();
+
   return {
-    ed25519PublicKey: raw.toString("base64"),
-    // Placeholder, not a real X25519 key — clearly labelled so nobody mistakes it for key material.
-    x25519PublicKey: Buffer.from(`x25519-placeholder-${label}`).toString("base64"),
-    privateKey,
+    ed25519PublicKey: edPubRaw.toString("base64"),
+    x25519PublicKey: xPubRaw.toString("base64"),
+    edPrivateKey: edPriv,
+    xPrivateKey: xPriv,
   };
 }
 
-// ─── HTTP helper ──────────────────────────────────────────────────────────
+// ─── HTTP helper ──────────────────────────────────────────────────────────────
 
 /** Base server URL from `AVP_SERVER_URL` (default localhost:8787), with any trailing slash trimmed. */
 const BASE_URL = (process.env.AVP_SERVER_URL ?? "http://localhost:8787").replace(/\/$/, "");
@@ -217,7 +245,7 @@ async function call<T>(method: string, path: string, body?: unknown, token?: str
   return (text ? JSON.parse(text) : {}) as T;
 }
 
-// ─── Auth flow: challenge -> sign nonce -> token (SPEC section 3) ──────────
+// ─── Auth flow: challenge -> sign nonce -> token (SPEC section 3) ─────────────
 
 /**
  * Runs the keypair challenge flow and returns a bearer token for this identity.
@@ -235,7 +263,7 @@ async function authenticate(identity: Identity): Promise<string> {
   });
   const nonceBytes = Buffer.from(challenge.nonce, "base64");
   // Ed25519 signs the message directly (no pre-hash); pass `null` as the algorithm.
-  const signature = cryptoSign(null, nonceBytes, identity.privateKey).toString("base64");
+  const signature = cryptoSign(null, nonceBytes, identity.edPrivateKey).toString("base64");
   const auth = await call<AuthToken>("POST", "/api/auth/keypair/token", {
     ed25519PublicKey: identity.ed25519PublicKey,
     nonce: challenge.nonce,
@@ -244,65 +272,51 @@ async function authenticate(identity: Identity): Promise<string> {
   return auth.token;
 }
 
-// ─── Placeholder envelope + wrapped key (NOT real crypto) ──────────────────
+// ─── Real envelope + wrapped key crypto ────────────────────────────────────────
 
 /**
- * Builds an opaque placeholder envelope. A real client AES-256-GCM-encrypts the alt payload and binds
- * `(repoId, payloadVersion, keyEpoch)` into the AAD (SPEC section 4). Here `ciphertext` is just a base64
- * blob so the server has something to store; the server never decrypts it, which is the whole point.
+ * Encrypts a plaintext alt payload into an {@link EncryptedEnvelope}, binding
+ * `(repoId, payloadVersion, keyEpoch)` into the AES-256-GCM AAD (SPEC section 4).
  *
+ * @param dataKey - The 32-byte repo data key.
  * @param repoId - Repo the envelope belongs to.
- * @param payloadVersion - Payload version this envelope represents.
- * @param keyEpoch - Key epoch the (notional) payload was encrypted under.
- * @returns An {@link EncryptedEnvelope} with a random IV and a labelled placeholder ciphertext.
+ * @param payloadVersion - Payload version for this write.
+ * @param keyEpoch - Key epoch for this write.
+ * @param plaintext - The plaintext payload.
+ * @returns An {@link EncryptedEnvelope} with a fresh random IV.
  */
-function placeholderEnvelope(repoId: string, payloadVersion: number, keyEpoch: number): EncryptedEnvelope {
-  return {
-    repoId,
-    payloadVersion,
-    keyEpoch,
-    iv: randomBytes(12).toString("base64"),
-    ciphertext: Buffer.from(`opaque-placeholder-payload-v${payloadVersion}`).toString("base64"),
-  };
+function buildEnvelope(
+  dataKey: Buffer,
+  repoId: string,
+  payloadVersion: number,
+  keyEpoch: number,
+  plaintext: Plaintext,
+): EncryptedEnvelope {
+  const body = Buffer.from(JSON.stringify(plaintext), "utf8");
+  return encryptPayload(dataKey, repoId, payloadVersion, keyEpoch, body) as EncryptedEnvelope;
 }
 
 /**
- * Builds an opaque placeholder wrapped data key for a member. A real client runs X25519 ECDH against the
- * member's X25519 key, derives an AES key via HKDF, and AES-256-GCM-encrypts the repo data key. Here it
- * is a labelled placeholder; the server stores and serves it without ever being able to read it.
- *
- * @param memberLabel - Human-readable member name woven into the placeholder fields for transcript
- *   readability; it has no cryptographic meaning.
- * @returns A {@link WrappedKey} advertising {@link SCHEME_ID} with a random IV and labelled placeholders.
- */
-function placeholderWrappedKey(memberLabel: string): WrappedKey {
-  return {
-    schemeId: SCHEME_ID,
-    ephemeralPublicKey: Buffer.from(`ephemeral-x25519-for-${memberLabel}`).toString("base64"),
-    iv: randomBytes(12).toString("base64"),
-    ciphertext: Buffer.from(`wrapped-data-key-for-${memberLabel}`).toString("base64"),
-  };
-}
-
-/**
- * Assembles a {@link MemberEntry} from an identity at a given key epoch.
+ * Assembles a {@link MemberEntry} from an identity, wrapping the shared data key to
+ * the member's X25519 public key (SPEC section 4).
  *
  * @param identity - The member whose public keys populate the entry.
- * @param label - Human-readable member name passed through to {@link placeholderWrappedKey}.
+ * @param dataKey - The 32-byte repo data key to wrap.
  * @param keyEpoch - Key epoch this entry's wrapped key belongs to.
- * @returns A member entry with a placeholder wrapped data key and no key-binding signature.
+ * @returns A member entry with a real wrapped data key and no key-binding signature.
  */
-function memberEntry(identity: Identity, label: string, keyEpoch: number): MemberEntry {
+function buildMemberEntry(identity: Identity, dataKey: Buffer, keyEpoch: number): MemberEntry {
+  const wk = wrapDataKey(identity.x25519PublicKey, dataKey) as WrappedKey;
   return {
     ed25519PublicKey: identity.ed25519PublicKey,
     x25519PublicKey: identity.x25519PublicKey,
-    wrappedDataKey: placeholderWrappedKey(label),
+    wrappedDataKey: wk,
     keyEpoch,
     keyBindingSig: null,
   };
 }
 
-// ─── Transcript ─────────────────────────────────────────────────────────
+// ─── Transcript ───────────────────────────────────────────────────────────────
 
 /**
  * Prints one transcript line with a padded step label so the output columns line up.
@@ -317,10 +331,11 @@ function step(label: string, detail: string): void {
 /**
  * Drives the full AVP lifecycle end to end against a running server and prints a transcript.
  *
- * The steps, in order: generate two local identities (alice, bob); authenticate alice; create a repo with
- * alice as sole member; pull at the known version (unchanged) and from version 0 (envelope returned); push
- * a new version; demonstrate the optimistic-concurrency conflict path with a stale expected version; add
- * bob as a member; fetch bob's stored key entry; then authenticate bob and have him pull the shared repo.
+ * The steps, in order: generate two local identities (alice, bob); authenticate alice; create a repo
+ * with alice as sole member and a real encrypted v1 payload; pull at the known version (unchanged) and
+ * from version 0 (envelope returned); push a real v2 payload; demonstrate the optimistic-concurrency
+ * conflict path with a stale expected version; add bob as a member; fetch bob's stored key entry;
+ * then authenticate bob and have him pull the shared repo, unwrap the data key, and decrypt the payload.
  *
  * @returns A promise that resolves once the full transcript has been printed.
  * @throws Error if any server call returns a non-2xx status (propagated from {@link call}); the top-level
@@ -328,21 +343,26 @@ function step(label: string, detail: string): void {
  */
 async function main(): Promise<void> {
   console.log(`AVP reference client -> ${BASE_URL}`);
-  console.log("(Envelope/wrapped-key crypto is a placeholder; only the Ed25519 auth is real.)\n");
+  console.log("(Envelope and wrapped-key crypto is real; the server stays zero-knowledge.)\n");
 
   // Two members, generated locally. alice creates the repo; bob joins later.
-  const alice = generateIdentity("alice");
-  const bob = generateIdentity("bob");
+  const alice = generateIdentity();
+  const bob = generateIdentity();
   step("members", `alice=${alice.ed25519PublicKey.slice(0, 12)}… bob=${bob.ed25519PublicKey.slice(0, 12)}…`);
 
   // 1. Authenticate alice (challenge -> sign nonce -> token).
   const aliceToken = await authenticate(alice);
   step("auth", `alice token=${aliceToken.slice(0, 12)}…`);
 
-  // 2. createRepo — alice must be the sole member of the manifest she creates.
-  // A real repoId is whatever the deploying client mints; we use a random UUID.
+  // 2. alice mints a per-repo data key and encrypts a real initial payload.
+  const dataKey = randomBytes(32);
   const repoId = randomUuid();
-  const initialEnvelope = placeholderEnvelope(repoId, 1, 0);
+
+  const altsV1: Alt[] = [
+    { uuid: "11111111-1111-4111-8111-111111111111", username: "alice_main", accessToken: "secret-v1", type: "MICROSOFT", lastUsed: 1 },
+  ];
+  const envelopeV1 = buildEnvelope(dataKey, repoId, 1, 0, { alts: altsV1, payloadVersion: 1 });
+
   const createdManifest = await call<VaultManifest>(
     "POST",
     "/v1/repos",
@@ -352,9 +372,9 @@ async function main(): Promise<void> {
         schemeId: SCHEME_ID,
         keyEpoch: 0,
         payloadVersion: 1,
-        members: [memberEntry(alice, "alice", 0)],
+        members: [buildMemberEntry(alice, dataKey, 0)],
       } satisfies VaultManifest,
-      initialEnvelope,
+      initialEnvelope: envelopeV1,
     },
     aliceToken,
   );
@@ -378,14 +398,19 @@ async function main(): Promise<void> {
   );
   step("pull (stale)", `unchanged=${pullFresh.unchanged} envelope=${pullFresh.envelope === null ? "null" : "present"}`);
 
-  // 5. push a new payload version with optimistic concurrency on the current version.
+  // 5. push a real v2 payload (adds alice_alt) with optimistic concurrency on the current version.
+  const altsV2: Alt[] = [
+    ...altsV1,
+    { uuid: "22222222-2222-4222-8222-222222222222", username: "alice_alt", accessToken: "secret-v2", type: "MICROSOFT", lastUsed: 2 },
+  ];
   const nextVersion = createdManifest.payloadVersion + 1;
+  const envelopeV2 = buildEnvelope(dataKey, repoId, nextVersion, 0, { alts: altsV2, payloadVersion: nextVersion });
   const pushResult = await call<PushResponse>(
     "POST",
     `/v1/repos/${encodeURIComponent(repoId)}/push`,
     {
       repoId,
-      envelope: placeholderEnvelope(repoId, nextVersion, 0),
+      envelope: envelopeV2,
       expectedPayloadVersion: createdManifest.payloadVersion,
     },
     aliceToken,
@@ -398,20 +423,18 @@ async function main(): Promise<void> {
     `/v1/repos/${encodeURIComponent(repoId)}/push`,
     {
       repoId,
-      envelope: placeholderEnvelope(repoId, nextVersion + 1, 0),
+      envelope: envelopeV2,
       expectedPayloadVersion: createdManifest.payloadVersion, // stale on purpose
     },
     aliceToken,
   );
   step("push (stale)", `accepted=${conflict.accepted} conflict=${conflict.conflict} serverV=${conflict.payloadVersion}`);
 
-  // 7. addMember — alice (any member may invite, v1 policy) records bob's entry. In a real client bob
-  // would publish his public keys via the join handshake (SPEC section 8.1) and alice would wrap the
-  // data key to bob's X25519 key; here the wrapped key is a placeholder.
+  // 7. addMember — alice wraps the data key to bob's X25519 key and records his entry.
   const withBob = await call<VaultManifest>(
     "POST",
     `/v1/repos/${encodeURIComponent(repoId)}/add-member`,
-    { repoId, member: memberEntry(bob, "bob", 0) },
+    { repoId, member: buildMemberEntry(bob, dataKey, 0) },
     aliceToken,
   );
   step("addMember", `members=${withBob.members.length} (added bob)`);
@@ -426,7 +449,7 @@ async function main(): Promise<void> {
   );
   step("fetchMemberKey", `bob x25519=${bobEntry.x25519PublicKey.slice(0, 12)}… epoch=${bobEntry.keyEpoch}`);
 
-  // 9. bob authenticates with his own keypair and pulls the shared repo.
+  // 9. bob authenticates, pulls, unwraps the data key, and decrypts the payload.
   const bobToken = await authenticate(bob);
   const bobPull = await call<PullResponse>(
     "POST",
@@ -434,9 +457,27 @@ async function main(): Promise<void> {
     { repoId, knownPayloadVersion: 0 },
     bobToken,
   );
-  step("bob pull", `members=${bobPull.manifest.members.length} v=${bobPull.manifest.payloadVersion} envelope=${bobPull.envelope === null ? "null" : "present"}`);
+  if (bobPull.envelope === null) {
+    throw new Error("bob's pull returned no envelope");
+  }
 
-  console.log("\nDone. Full lifecycle exercised against a zero-knowledge server.");
+  // Find bob's own member entry in the manifest to get his wrapped data key.
+  const bobMemberEntry = bobPull.manifest.members.find((m) => m.ed25519PublicKey === bob.ed25519PublicKey);
+  if (!bobMemberEntry) {
+    throw new Error("bob is not in the pulled roster");
+  }
+
+  // Unwrap bob's data key and decrypt the payload.
+  const bobDataKey = unwrapDataKey(bob.xPrivateKey, bobMemberEntry.wrappedDataKey as WrappedKeyFields);
+  const plaintext = decryptPayload(bobDataKey, bobPull.envelope as EncryptedEnvelopeFields);
+  const payload = JSON.parse(plaintext.toString("utf8")) as Plaintext;
+
+  step("bob pull", `v=${bobPull.manifest.payloadVersion} alts=${payload.alts.length} (decrypted)`);
+  for (const alt of payload.alts) {
+    step("  alt", `${alt.username} (${alt.uuid})`);
+  }
+
+  console.log("\nDone. Full lifecycle exercised against a zero-knowledge server; bob decrypted alice's payload.");
 }
 
 /**
@@ -462,6 +503,6 @@ function randomUuid(): string {
 
 main().catch((err) => {
   console.error("\nClient failed:", err instanceof Error ? err.message : err);
-  console.error("Is a server running? Start one with `npm start` in ../server, or set AVP_SERVER_URL.");
+  console.error("Is a server running? Start one with `bun run start` in ../server, or set AVP_SERVER_URL.");
   process.exitCode = 1;
 });
