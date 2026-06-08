@@ -4,7 +4,8 @@
   "kinds": {
     "deterministic": "Pure byte/string construction with no key material; must match exactly.",
     "rfc-primitive": "A cryptographic primitive pinned to a published RFC test vector.",
-    "composition": "Full AVP envelope composition with fixed keys/IVs; reproduce and round-trip (decrypt/unwrap), including the documented failure assertion."
+    "composition": "Full AVP envelope composition with fixed keys/IVs; reproduce and round-trip (decrypt/unwrap), including the documented failure assertion.",
+    "negative": "A valid construction with one mutation that a conformant implementation MUST reject."
   },
   "vectors": [
     {
@@ -82,6 +83,15 @@
       "expects": "decoding base64url yields the object (decode oracle); canonical minified encoding round-trips; avp:// URIs parse to {host, repoId} and format back",
       "shape": "uses top-level `tokens` and `uris` arrays, not `cases`",
       "anchors": ["RFC 4648 §5 (base64url)"]
+    },
+    {
+      "id": "negative",
+      "file": "negative.json",
+      "kind": "negative",
+      "specSection": "4",
+      "construction": "valid payload-aead / key-wrap / ed25519 constructions with one mutation each (flipped tag, bit flip, truncation, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral key, wrong message/public key)",
+      "expects": "each case MUST be rejected: payload-decrypt and key-unwrap fail authentication, ed25519-verify returns false",
+      "generatedBy": "vectors/generate.ts (from the same seeds as the positive vectors)"
     }
   ]
 }

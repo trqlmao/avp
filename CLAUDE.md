@@ -34,7 +34,12 @@ repo with Jekyll. The README is the home page.
   `vectors/README.md`. `vectors/federation.json` is the exception to the crypto
   pattern: base64url join-handshake tokens and `avp://` URI vectors (SPEC §8),
   deterministic encoding rather than crypto, using `tokens`/`uris` arrays not
-  `cases`.
+  `cases`. `vectors/negative.json` is the MUST-reject bank (tampered/truncated/
+  wrong-key/wrong-AAD cases that decryption, unwrap, or verify MUST reject).
+  `vectors/generate.ts` re-derives every vector from documented seeds:
+  `bun vectors/generate.ts --check` is the provenance/drift gate (CI runs it; it
+  also owns `negative.json` via `--write`) and does not rewrite the reviewed
+  positive files.
 - `examples/` are illustrative reference clients and servers (Go, TypeScript,
   Rust, Python, Java) plus a Node conformance runner that also checks
   schema/example/index/openapi consistency. They are not production code.

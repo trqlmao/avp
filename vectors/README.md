@@ -92,3 +92,25 @@ independent sources agreeing byte-for-byte** before being committed:
 An implementation proves conformance by reproducing the deterministic and RFC-anchored vectors exactly,
 and by round-tripping the composition vectors (decrypting/unwrapping what a peer encrypted/wrapped,
 verifying what a peer signed).
+
+## Negative vectors
+
+- [`negative.json`](negative.json), a bank of MUST-reject cases. Each case starts from a valid
+  construction (the seeds of `payload-aead.json`, `key-wrap.json`, and `ed25519.json`) and applies one
+  mutation: a flipped GCM tag, a flipped body bit, truncation, a missing tag, a wrong AAD repoId /
+  payloadVersion / keyEpoch, a wrong data key, a wrong recipient or ephemeral wrap key, a wrong message,
+  or a wrong public key. A conformant implementation MUST reject every case: `payload-decrypt` and
+  `key-unwrap` fail authentication, and `ed25519-verify` returns false. Passing the positive vectors is
+  not enough; an implementation that accepts a tampered or replayed envelope is not conformant. Wire
+  base64 strictness is implementation-specific and is intentionally not tested here.
+
+## Regenerating the vectors
+
+[`generate.ts`](generate.ts) is the reproducible derivation of these files. It reuses the vector-tested
+reference crypto so it cannot drift from the runner.
+
+- `bun vectors/generate.ts --check` re-derives every committed positive vector's value fields from its
+  documented seeds and asserts the committed file matches, then asserts `negative.json` equals the
+  generator's output. This is the provenance and drift gate; CI runs it. It does not rewrite the
+  RFC-anchored and cross-verified positive files (their reviewed prose and formatting are preserved).
+- `bun vectors/generate.ts --write` regenerates `negative.json`, which the generator owns.
