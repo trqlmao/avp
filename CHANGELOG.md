@@ -23,7 +23,7 @@ implementation's version.
 
 - Added a black-box conformance harness in `harness/`: point it at any running server and it drives the
   full wire contract, asserting the normative MUSTs (auth failure modes, optimistic-concurrency
-  conflict, membership authorization, key rotation, and zero-knowledge — the plaintext never surfaces in
+  conflict, membership authorization, key rotation, and zero-knowledge: the plaintext never surfaces in
   what the server stores). Reuses the vector-tested reference crypto.
 - Added a `conformance` CI workflow: reproduces the vectors, lints `openapi.yaml` with Spectral, checks
   that the schema / example bodies / vector index / OpenAPI `$refs` stay consistent, and runs the

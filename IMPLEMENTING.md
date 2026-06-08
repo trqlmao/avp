@@ -182,7 +182,7 @@ Note: `memberId` in the path is the base64 Ed25519 public key. Because it contai
 Every non-2xx response body is an error object: `{ "error": "<message>", "code": "<machine code>",
 "detail": "<optional>" }`. `error` is human-readable (do not parse it); `code` is an optional stable
 token (`unauthorized`, `forbidden`, `not_found`, `duplicate_repo`, `quota_exceeded`, `policy_denied`,
-`bad_request`) you may switch on. Treat all of them as **terminal** — see the concurrency note below for
+`bad_request`) you may switch on. Treat all of them as **terminal**; see the concurrency note below for
 the one outcome that is *not* an error.
 
 Optimistic concurrency: `push` returns `{ "accepted": false, "conflict": true }` with the
@@ -220,7 +220,7 @@ operation the server performs is verifying the Ed25519 challenge signature in th
 
 5. **Black-box your server.** Point the conformance harness in [`harness/`](harness/) at your running
    server (`bun harness/conformance.ts --server http://localhost:PORT`). It drives the whole flow and
-   asserts the normative MUSTs — the auth failure modes, optimistic-concurrency `conflict`, membership
+   asserts the normative MUSTs: the auth failure modes, optimistic-concurrency `conflict`, membership
    authorization, key rotation, and zero-knowledge (the plaintext never surfaces in what the server
    stores). CI runs it against the Go and TypeScript reference servers.
 

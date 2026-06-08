@@ -96,7 +96,7 @@ conformant.
 ### Check your server
 
 The vectors prove your crypto; the black-box harness in [`harness/`](harness/) proves your *server*.
-Point it at any running AVP server and it drives the full wire contract, asserting the normative MUSTs —
+Point it at any running AVP server and it drives the full wire contract, asserting the normative MUSTs:
 the auth failure modes, optimistic-concurrency `conflict`, membership authorization, key rotation, and
 zero-knowledge:
 

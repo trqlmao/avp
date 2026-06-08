@@ -4,8 +4,8 @@ Test vectors an implementation can check itself against. Each file is JSON with 
 or more `cases`. The conformance runner in [`../examples/conformance`](../examples/conformance) loads and
 checks every file here with Node's `crypto`.
 
-[`index.json`](index.json) is a machine-readable index of these files — each entry gives the file, its
-`kind` (deterministic / rfc-primitive / composition), the spec section, and the published RFC anchors —
+[`index.json`](index.json) is a machine-readable index of these files: each entry gives the file, its
+`kind` (deterministic / rfc-primitive / composition), the spec section, and the published RFC anchors,
 so a harness can enumerate the vectors instead of hardcoding filenames.
 
 ## Deterministic construction vectors

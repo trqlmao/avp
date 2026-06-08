@@ -2,7 +2,7 @@
 #
 # Uses go-task (https://taskfile.dev): `task --list`. Each target mirrors the matching
 # .github/workflows/examples-*.yml job, so "green locally" means "green in CI". Each language
-# is independent — run only the toolchains you have installed.
+# is independent; run only the toolchains you have installed.
 #
 # Requirements per target: conformance/typescript -> Bun; go -> Go; python -> Python 3;
 # rust -> Cargo; java -> a JDK. `task test` runs every target and needs them all.
@@ -81,7 +81,7 @@ tasks:
       - cd examples/java/client && javac Crypto.java CryptoVectors.java Client.java && java CryptoVectors
 
   interop:
-    desc: Cross-language wire interop (informational — runs in CI).
+    desc: Cross-language wire interop (informational; runs in CI).
     cmds:
       - |
         echo "The cross-language interop matrix (each lang's client -> Go server, Go client ->"
