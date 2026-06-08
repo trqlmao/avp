@@ -105,6 +105,9 @@ jobs:
               -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 && break
             sleep 0.2
           done
+          curl -fsS -X POST "http://localhost:$PORT/api/auth/keypair/challenge" \
+            -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 \
+            || { echo "server did not start within 20s"; exit 1; }
 
           # Run the language client against the Go server
           case "$LANG_UNDER_TEST" in
@@ -166,6 +169,9 @@ jobs:
               -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 && break
             sleep 0.2
           done
+          curl -fsS -X POST "http://localhost:$PORT/api/auth/keypair/challenge" \
+            -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 \
+            || { echo "server did not start within 20s"; exit 1; }
 
           # Run the Go reference client against the language server
           (cd examples/go/client && AVP_SERVER_URL=http://localhost:$PORT go run .)
