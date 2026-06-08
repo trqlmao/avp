@@ -5,6 +5,10 @@ node_modules/
 # Java compiled class files
 *.class
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Go reference example build artifacts
 /examples/go/client/client
 /examples/go/client/client.exe
