@@ -7,19 +7,26 @@
  * stale), push (accept + conflict paths), invite a second member, fetch that member's key, and have the
  * second member authenticate and pull. Each step prints a one-line transcript entry.
  *
- * It is intentionally tiny and NOT production code. Crucially, the envelope and wrapped-key crypto is
- * OUT OF SCOPE here: this client carries the alt payload as an opaque placeholder ciphertext and never
- * actually encrypts anything. A real client derives a per-repo data key, AES-256-GCM encrypts the alt
- * payload (binding repoId/payloadVersion/keyEpoch into the AAD), and wraps the data key to each member's
- * X25519 key. See SPEC sections 4-5 and the lol.trq.alts reference for that part. The only real crypto
- * here is the Ed25519 challenge signature, which IS part of the wire contract.
+ * It is intentionally tiny and NOT production code. The envelope and wrapped-key crypto IS
+ * real (SPEC sections 4-5): this client derives a per-repo data key, AES-256-GCM encrypts the alt
+ * payload (binding repoId/payloadVersion/keyEpoch into the AAD via Crypto.buildAad), wraps the data
+ * key to each member's X25519 key (X25519 + HKDF-SHA256 + AES-256-GCM, scheme
+ * X25519-HKDF-SHA256-AESGCM-v1), and bob unwraps and decrypts at the end. The crypto is in the
+ * sibling Crypto.java class and is verified byte-for-byte against vectors/*.json by CryptoVectors.java.
+ * The only other real crypto is the Ed25519 challenge signature, which is genuinely part of the wire
+ * contract.
  *
- * Single file, no dependencies: java.net.http.HttpClient for HTTP, the JDK's built-in Ed25519
- * (java.security), and a tiny hand-rolled JSON parser/serializer (mirrors the one in ../server).
+ * Single file, no dependencies beyond Crypto.java: java.net.http.HttpClient for HTTP, the JDK's
+ * built-in Ed25519 / X25519 / AES-GCM providers (java.security / javax.crypto), and a tiny
+ * hand-rolled JSON parser/serializer (mirrors the one in ../server).
  *
- * Run on JDK 17+ with the single-file source launcher:
+ * Run on JDK 17+ after compiling all three files:
  *
- *     java Client.java          # drives the flow against http://localhost:8787
+ *     javac Crypto.java CryptoVectors.java Client.java && java Client
+ *
+ * Or to run the vector tests first:
+ *
+ *     javac Crypto.java CryptoVectors.java Client.java && java CryptoVectors && java Client
  *
  * Point it at a different server with the AVP_SERVER_URL environment variable (default
  * http://localhost:8787).
@@ -38,6 +45,7 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.Signature;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,27 +63,27 @@ import java.util.UUID;
  * that member's key, and finally authenticates the second member and pulls.
  *
  * <p>It is intentionally tiny and is <strong>not</strong> production code. The envelope and wrapped-key
- * cryptography is <strong>out of scope</strong> here: the client carries the alt payload as an opaque
- * placeholder ciphertext and fills each member's wrapped data key with a labelled placeholder blob. That
- * round-trips identically through a zero-knowledge server, which never decrypts what it stores. The only
- * real cryptography is the Ed25519 challenge signature over the raw nonce bytes, which is genuinely part
- * of the wire contract. See SPEC sections 4-5 and the {@code lol.trq.alts} reference for the real
- * envelope crypto. Field shapes follow {@code ../../schema/avp.schema.json}.
+ * cryptography <strong>is real</strong> (SPEC sections 4-5): the client derives a per-repo data key,
+ * AES-256-GCM-encrypts the alt payload binding {@code (repoId, payloadVersion, keyEpoch)} into the AAD,
+ * and wraps the data key to each member's X25519 key via {@code X25519-HKDF-SHA256-AESGCM-v1}. At the
+ * end, bob unwraps and decrypts, recovering exactly what alice stored. The server stays zero-knowledge
+ * throughout. The crypto lives in the sibling {@code Crypto.java} class and is verified byte-for-byte
+ * against {@code vectors/*.json} by {@code CryptoVectors.java}. Field shapes follow
+ * {@code ../../schema/avp.schema.json}.
  *
- * <p>The implementation is a single file with no dependencies: it uses {@link java.net.http.HttpClient}
- * for HTTP, the JDK's built-in Ed25519 provider ({@code java.security}), and a tiny hand-rolled JSON
- * parser/serializer (the {@link Json} nested class, mirroring the one in the reference server).
+ * <p>The implementation uses two files ({@code Crypto.java} for the crypto primitives and
+ * {@code Client.java} for the HTTP lifecycle) with no other dependencies: {@link java.net.http.HttpClient}
+ * for HTTP, the JDK's built-in Ed25519 / X25519 / AES-GCM providers ({@code java.security} /
+ * {@code javax.crypto}), and a tiny hand-rolled JSON parser/serializer (the {@link Json} nested class,
+ * mirroring the one in the reference server).
  *
- * <p>Run on JDK 17+ with the single-file source launcher:
+ * <p>Run on JDK 17+ after compiling:
  *
  * <pre>{@code
- *     java Client.java          // drives the flow against http://localhost:8787
+ *     javac Crypto.java CryptoVectors.java Client.java && java Client
  * }</pre>
  */
 public final class Client {
-
-    /** Identifier of the wrapping scheme this example advertises in manifests and wrapped keys. */
-    private static final String SCHEME_ID = "X25519-HKDF-SHA256-AESGCM-v1";
 
     /** Base server URL from {@code AVP_SERVER_URL} (default localhost:8787), with any trailing slash trimmed. */
     private static final String BASE_URL = resolveBaseUrl();
@@ -86,7 +94,7 @@ public final class Client {
     private static final Base64.Encoder B64 = Base64.getEncoder();
     /** Standard base64 decoder, used to recover the raw nonce bytes for signing. */
     private static final Base64.Decoder B64D = Base64.getDecoder();
-    /** Source of randomness for the placeholder AES-GCM IVs (illustrative; no real encryption happens). */
+    /** Source of randomness for data-key generation. The real IVs are minted inside {@link Crypto}. */
     private static final SecureRandom RANDOM = new SecureRandom();
 
     /** Not instantiable: this class is a runnable entry point, not an object. */
@@ -95,37 +103,46 @@ public final class Client {
     // ─── Identity (SPEC section 3) ────────────────────────────────────────────
 
     /**
-     * A member identity: a real Ed25519 signing keypair plus a placeholder X25519 public key.
+     * A member identity: a real Ed25519 signing keypair and a real X25519 keypair for key wrapping.
      *
      * <p>The raw 32-byte Ed25519 public key, base64-encoded, is the member id (SPEC section 2). The
-     * X25519 key would be a real Curve25519 public key in a production client; here it is an opaque,
-     * clearly-labelled placeholder, because this example performs no key wrapping.
+     * X25519 keypair is used for data-key wrapping (SPEC section 4): alice wraps the repo data key to
+     * each member's X25519 public key; that member's X25519 private key unwraps it.
      *
      * @param ed25519PublicKey the base64 raw 32-byte Ed25519 public key; this is the member id
-     * @param x25519PublicKey a base64 placeholder X25519 public key (no real key agreement happens here)
-     * @param privateKey the Ed25519 private key, used only to sign the auth challenge nonce
+     * @param x25519PublicKey the base64 raw 32-byte X25519 public key for key wrapping
+     * @param ed25519PrivateKey the Ed25519 private key, used only to sign the auth challenge nonce
+     * @param x25519PrivateKey the X25519 private key, used only to unwrap the data key
      */
-    private record Identity(String ed25519PublicKey, String x25519PublicKey, PrivateKey privateKey) {}
+    private record Identity(
+            String ed25519PublicKey,
+            String x25519PublicKey,
+            PrivateKey ed25519PrivateKey,
+            PrivateKey x25519PrivateKey) {}
 
     /**
-     * Generates a fresh Ed25519 identity, extracting the raw 32-byte public key from its SPKI encoding.
+     * Generates a fresh identity: a real Ed25519 signing keypair and a real X25519 keypair.
      *
      * <p>The JDK exports an Ed25519 public key in {@code SubjectPublicKeyInfo} (SPKI) form, whose last 32
-     * bytes are the raw key the protocol uses as the member id.
+     * bytes are the raw key the protocol uses as the member id. The X25519 keypair is used for data-key
+     * wrapping (SPEC section 4).
      *
-     * @param label a human-readable name (e.g. {@code "alice"}) woven into the placeholder X25519 key so
-     *     the transcript stays readable; it carries no cryptographic meaning
-     * @return a new {@link Identity} with a real Ed25519 keypair and a placeholder X25519 public key
-     * @throws Exception if the Ed25519 key generator is unavailable
+     * @param label a human-readable name (e.g. {@code "alice"}) used only in transcript output
+     * @return a new {@link Identity} with real Ed25519 and X25519 keypairs
+     * @throws Exception if a key generator is unavailable
      */
     private static Identity generateIdentity(String label) throws Exception {
-        KeyPair pair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
-        byte[] spki = pair.getPublic().getEncoded();
-        byte[] raw = new byte[32];
-        System.arraycopy(spki, spki.length - 32, raw, 0, 32);
-        // Placeholder, not a real X25519 key — clearly labelled so nobody mistakes it for key material.
-        String x25519 = B64.encodeToString(("x25519-placeholder-" + label).getBytes(StandardCharsets.UTF_8));
-        return new Identity(B64.encodeToString(raw), x25519, pair.getPrivate());
+        // Ed25519 keypair: extract raw 32-byte public key from SPKI (last 32 bytes)
+        KeyPair edPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+        byte[] edSpki = edPair.getPublic().getEncoded();
+        byte[] edRaw = Arrays.copyOfRange(edSpki, edSpki.length - 32, edSpki.length);
+
+        // X25519 keypair for data-key wrapping
+        KeyPair xPair = Crypto.generateX25519KeyPair();
+        byte[] xPubRaw = Crypto.x25519PublicToRaw(xPair.getPublic());
+
+        return new Identity(B64.encodeToString(edRaw), B64.encodeToString(xPubRaw),
+                edPair.getPrivate(), xPair.getPrivate());
     }
 
     // ─── HTTP helper ──────────────────────────────────────────────────────────
@@ -194,7 +211,7 @@ public final class Client {
         String nonce = (String) challenge.get("nonce");
 
         Signature sig = Signature.getInstance("Ed25519");
-        sig.initSign(identity.privateKey());
+        sig.initSign(identity.ed25519PrivateKey());
         sig.update(B64D.decode(nonce));
         String signature = B64.encodeToString(sig.sign());
 
@@ -205,60 +222,46 @@ public final class Client {
         return (String) auth.get("token");
     }
 
-    // ─── Placeholder envelope + wrapped key (NOT real crypto) ──────────────────
+    // ─── Real envelope + wrapped key (SPEC sections 4-5) ─────────────────────────
 
     /**
-     * Builds an opaque placeholder envelope. A real client AES-256-GCM-encrypts the alt payload and binds
-     * {@code (repoId, payloadVersion, keyEpoch)} into the AAD (SPEC section 4). Here {@code ciphertext} is
-     * just a base64 blob so the server has something to store; the server never decrypts it, which is the
-     * whole point.
+     * Encrypts an alt payload as a JSON object and returns a real {@code EncryptedEnvelope} map.
      *
-     * @param repoId the repo the envelope belongs to
-     * @param payloadVersion the payload version this envelope represents
-     * @param keyEpoch the key epoch the (notional) payload was encrypted under
-     * @return an {@code EncryptedEnvelope} map with a random IV and a labelled placeholder ciphertext
+     * <p>The plaintext is {@code {"alts":[...],"payloadVersion":N}}. The data key, repoId, payloadVersion,
+     * and keyEpoch are bound into the AAD so that any tampered counter fails AES-GCM authentication.
+     *
+     * @param dataKey 32-byte per-repo data key
+     * @param repoId the repo identifier
+     * @param payloadVersion the payload version counter
+     * @param keyEpoch the key epoch counter
+     * @param alts list of alt entries (each a map with uuid/username/accessToken/type/lastUsed)
+     * @return a real {@code EncryptedEnvelope} map ready for the wire
      */
-    private static Map<String, Object> placeholderEnvelope(String repoId, long payloadVersion, long keyEpoch) {
-        return orderedMap(
-                "repoId", repoId,
-                "payloadVersion", payloadVersion,
-                "keyEpoch", keyEpoch,
-                "iv", randomIv(),
-                "ciphertext", b64("opaque-placeholder-payload-v" + payloadVersion));
+    private static Map<String, Object> encryptAlts(
+            byte[] dataKey, String repoId, long payloadVersion, long keyEpoch,
+            List<Map<String, Object>> alts) throws Exception {
+        Map<String, Object> payload = orderedMap(
+                "alts", alts,
+                "payloadVersion", payloadVersion);
+        byte[] plaintext = Json.write(payload).getBytes(StandardCharsets.UTF_8);
+        return Crypto.encryptPayload(dataKey, repoId, payloadVersion, keyEpoch, plaintext);
     }
 
     /**
-     * Builds an opaque placeholder wrapped data key for a member. A real client runs X25519 ECDH against
-     * the member's X25519 key, derives an AES key via HKDF-SHA256, and AES-256-GCM-encrypts the repo data
-     * key. Here it is a labelled placeholder; the server stores and serves it without ever being able to
-     * read it.
-     *
-     * @param memberLabel a human-readable member name woven into the placeholder fields for transcript
-     *     readability; it carries no cryptographic meaning
-     * @return a {@code WrappedKey} map advertising {@link #SCHEME_ID} with a random IV and labelled
-     *     placeholders
-     */
-    private static Map<String, Object> placeholderWrappedKey(String memberLabel) {
-        return orderedMap(
-                "schemeId", SCHEME_ID,
-                "ephemeralPublicKey", b64("ephemeral-x25519-for-" + memberLabel),
-                "iv", randomIv(),
-                "ciphertext", b64("wrapped-data-key-for-" + memberLabel));
-    }
-
-    /**
-     * Assembles a {@code MemberEntry} map from an identity at a given key epoch.
+     * Assembles a real {@code MemberEntry} map: wraps the data key to the member's X25519 public key.
      *
      * @param identity the member whose public keys populate the entry
-     * @param label the human-readable member name passed through to {@link #placeholderWrappedKey(String)}
+     * @param dataKey the 32-byte repo data key to wrap to this member
      * @param keyEpoch the key epoch this entry's wrapped key belongs to
-     * @return a member-entry map with a placeholder wrapped data key and a {@code null} key-binding signature
+     * @return a member-entry map with a real wrapped data key and a {@code null} key-binding signature
      */
-    private static Map<String, Object> memberEntry(Identity identity, String label, long keyEpoch) {
+    private static Map<String, Object> memberEntry(Identity identity, byte[] dataKey, long keyEpoch)
+            throws Exception {
+        Map<String, Object> wk = Crypto.wrapDataKey(identity.x25519PublicKey(), dataKey);
         return orderedMap(
                 "ed25519PublicKey", identity.ed25519PublicKey(),
                 "x25519PublicKey", identity.x25519PublicKey(),
-                "wrappedDataKey", placeholderWrappedKey(label),
+                "wrappedDataKey", wk,
                 "keyEpoch", keyEpoch,
                 "keyBindingSig", null);
     }
@@ -280,7 +283,7 @@ public final class Client {
      */
     private static void run(String[] args) throws Exception {
         System.out.println("AVP reference client -> " + BASE_URL);
-        System.out.println("(Envelope/wrapped-key crypto is a placeholder; only the Ed25519 auth is real.)\n");
+        System.out.println("(Envelope and wrapped-key crypto is real; the server stays zero-knowledge.)\n");
 
         // Two members, generated locally. alice creates the repo; bob joins later.
         Identity alice = generateIdentity("alice");
@@ -291,16 +294,27 @@ public final class Client {
         String aliceToken = authenticate(alice);
         step("auth", "alice token=" + truncate(aliceToken));
 
-        // 2. createRepo — alice must be the sole member of the manifest she creates. A real repoId is
-        // whatever the deploying client mints; we use a random UUID.
+        // 2. alice mints a per-repo data key and encrypts the initial alt payload (v1).
+        // The data key never leaves the client; the server sees only the AES-GCM ciphertext.
+        byte[] dataKey = new byte[32];
+        RANDOM.nextBytes(dataKey);
         String repoId = UUID.randomUUID().toString();
-        Map<String, Object> initialEnvelope = placeholderEnvelope(repoId, 1, 0);
+
+        // v1 alt list: alice's main account.
+        List<Map<String, Object>> altsV1 = new ArrayList<>();
+        altsV1.add(orderedMap(
+                "uuid", "11111111-1111-4111-8111-111111111111",
+                "username", "alice_main",
+                "accessToken", "secret-v1",
+                "type", "MICROSOFT",
+                "lastUsed", 1L));
+        Map<String, Object> initialEnvelope = encryptAlts(dataKey, repoId, 1, 0, altsV1);
         Map<String, Object> manifest = orderedMap(
                 "repoId", repoId,
-                "schemeId", SCHEME_ID,
+                "schemeId", Crypto.SCHEME_ID,
                 "keyEpoch", 0L,
                 "payloadVersion", 1L,
-                "members", new ArrayList<>(List.of(memberEntry(alice, "alice", 0))));
+                "members", new ArrayList<>(List.of(memberEntry(alice, dataKey, 0))));
         Map<?, ?> createdManifest = (Map<?, ?>) call("POST", "/v1/repos",
                 orderedMap("manifest", manifest, "initialEnvelope", initialEnvelope), aliceToken);
         long createdVersion = asLong(createdManifest.get("payloadVersion"));
@@ -321,11 +335,18 @@ public final class Client {
         step("pull (stale)", "unchanged=" + pullFresh.get("unchanged")
                 + " envelope=" + (pullFresh.get("envelope") == null ? "null" : "present"));
 
-        // 5. push a new payload version with optimistic concurrency on the current version.
+        // 5. push a real v2 payload (alice adds a second alt) with optimistic concurrency.
         long nextVersion = createdVersion + 1;
+        List<Map<String, Object>> altsV2 = new ArrayList<>(altsV1);
+        altsV2.add(orderedMap(
+                "uuid", "22222222-2222-4222-8222-222222222222",
+                "username", "alice_alt",
+                "accessToken", "secret-v2",
+                "type", "MICROSOFT",
+                "lastUsed", 2L));
         Map<?, ?> pushResult = (Map<?, ?>) call("POST", repoPath + "/push", orderedMap(
                 "repoId", repoId,
-                "envelope", placeholderEnvelope(repoId, nextVersion, 0),
+                "envelope", encryptAlts(dataKey, repoId, nextVersion, 0, altsV2),
                 "expectedPayloadVersion", createdVersion), aliceToken);
         step("push", "accepted=" + pushResult.get("accepted")
                 + " conflict=" + pushResult.get("conflict")
@@ -334,17 +355,15 @@ public final class Client {
         // 6. demonstrate the conflict path: pushing again at the now-stale expected version is rejected.
         Map<?, ?> conflict = (Map<?, ?>) call("POST", repoPath + "/push", orderedMap(
                 "repoId", repoId,
-                "envelope", placeholderEnvelope(repoId, nextVersion + 1, 0),
+                "envelope", encryptAlts(dataKey, repoId, nextVersion + 1, 0, altsV2),
                 "expectedPayloadVersion", createdVersion), aliceToken); // stale on purpose
         step("push (stale)", "accepted=" + conflict.get("accepted")
                 + " conflict=" + conflict.get("conflict")
                 + " serverV=" + asLong(conflict.get("payloadVersion")));
 
-        // 7. addMember — alice (any member may invite, v1 policy) records bob's entry. In a real client
-        // bob would publish his public keys via the join handshake (SPEC section 8.1) and alice would
-        // wrap the data key to bob's X25519 key; here the wrapped key is a placeholder.
+        // 7. addMember — alice wraps the data key to bob's X25519 key and records his entry.
         Map<?, ?> withBob = (Map<?, ?>) call("POST", repoPath + "/add-member",
-                orderedMap("repoId", repoId, "member", memberEntry(bob, "bob", 0)), aliceToken);
+                orderedMap("repoId", repoId, "member", memberEntry(bob, dataKey, 0)), aliceToken);
         step("addMember", "members=" + ((List<?>) withBob.get("members")).size() + " (added bob)");
 
         // 8. fetchMemberKey — look up bob's stored entry by member id. The id is base64, which can contain
@@ -354,16 +373,42 @@ public final class Client {
         step("fetchMemberKey", "bob x25519=" + truncate((String) bobEntry.get("x25519PublicKey"))
                 + " epoch=" + asLong(bobEntry.get("keyEpoch")));
 
-        // 9. bob authenticates with his own keypair and pulls the shared repo.
+        // 9. bob authenticates, pulls, unwraps the data key, and decrypts the payload.
         String bobToken = authenticate(bob);
         Map<?, ?> bobPull = (Map<?, ?>) call("POST", repoPath + "/pull",
                 orderedMap("repoId", repoId, "knownPayloadVersion", 0L), bobToken);
+        if (bobPull.get("envelope") == null) {
+            throw new RuntimeException("bob's pull returned no envelope");
+        }
         Map<?, ?> bobManifest = (Map<?, ?>) bobPull.get("manifest");
         step("bob pull", "members=" + ((List<?>) bobManifest.get("members")).size()
                 + " v=" + asLong(bobManifest.get("payloadVersion"))
-                + " envelope=" + (bobPull.get("envelope") == null ? "null" : "present"));
+                + " envelope=present");
 
-        System.out.println("\nDone. Full lifecycle exercised against a zero-knowledge server.");
+        // Find bob's member entry in the manifest to get his wrapped data key.
+        Map<?, ?> bobMemberEntry = findMember((List<?>) bobManifest.get("members"), bob.ed25519PublicKey());
+        if (bobMemberEntry == null) {
+            throw new RuntimeException("bob is not in the pulled roster");
+        }
+        Map<?, ?> wrappedDataKey = (Map<?, ?>) bobMemberEntry.get("wrappedDataKey");
+
+        // Unwrap the data key with bob's X25519 private key.
+        byte[] bobDataKey = Crypto.unwrapDataKey(bob.x25519PrivateKey(), wrappedDataKey);
+
+        // Decrypt the envelope payload.
+        Map<?, ?> envelope = (Map<?, ?>) bobPull.get("envelope");
+        byte[] plaintext = Crypto.decryptPayload(bobDataKey, envelope);
+
+        // Parse and print the decrypted alts.
+        Map<?, ?> payload = (Map<?, ?>) Json.parse(new String(plaintext, StandardCharsets.UTF_8));
+        List<?> alts = (List<?>) payload.get("alts");
+        step("bob decrypt", "v=" + asLong(payload.get("payloadVersion")) + " alts=" + alts.size() + " (decrypted)");
+        for (Object altObj : alts) {
+            Map<?, ?> alt = (Map<?, ?>) altObj;
+            step("  alt", alt.get("username") + " (" + alt.get("uuid") + ")");
+        }
+
+        System.out.println("\nDone. Full lifecycle exercised against a zero-knowledge server; bob decrypted alice's payload.");
     }
 
     /**
@@ -378,13 +423,31 @@ public final class Client {
             run(args);
         } catch (Exception e) {
             System.err.println("\nClient failed: " + e.getMessage());
-            System.err.println("Is a server running? Start one with `java Server.java` in ../server, "
-                    + "or set AVP_SERVER_URL.");
+            System.err.println("Is a server running? Start one with `java Server.java` in ../server "
+                    + "(or `go run .` in examples/go/server), or set AVP_SERVER_URL.");
             System.exit(1);
         }
     }
 
     // ─── Small helpers ──────────────────────────────────────────────────────────
+
+    /**
+     * Finds a member entry in the manifest roster by the member's Ed25519 public key.
+     *
+     * @param members the list of member entries from a manifest
+     * @param ed25519PublicKey the target member's public key (base64)
+     * @return the matching member entry map, or {@code null} if not found
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<?, ?> findMember(List<?> members, String ed25519PublicKey) {
+        for (Object m : members) {
+            Map<?, ?> entry = (Map<?, ?>) m;
+            if (ed25519PublicKey.equals(entry.get("ed25519PublicKey"))) {
+                return entry;
+            }
+        }
+        return null;
+    }
 
     /**
      * Prints one transcript line with a padded step label so the output columns line up.
@@ -404,30 +467,6 @@ public final class Client {
      */
     private static String truncate(String value) {
         return value.length() <= 12 ? value : value.substring(0, 12) + "…";
-    }
-
-    /**
-     * Base64-encodes a UTF-8 string into a labelled placeholder blob.
-     *
-     * @param label the human-readable label to encode (never real key material)
-     * @return the standard-alphabet base64 of {@code label}'s UTF-8 bytes
-     */
-    private static String b64(String label) {
-        return B64.encodeToString(label.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /**
-     * Generates a fresh base64 placeholder AES-GCM IV (12 random bytes).
-     *
-     * <p>No encryption happens in this example; the IV exists only so the envelope/wrapped-key shapes are
-     * well-formed for the server to store.
-     *
-     * @return 12 random bytes, standard-alphabet base64-encoded
-     */
-    private static String randomIv() {
-        byte[] iv = new byte[12];
-        RANDOM.nextBytes(iv);
-        return B64.encodeToString(iv);
     }
 
     /**

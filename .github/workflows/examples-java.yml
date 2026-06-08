@@ -26,6 +26,8 @@ jobs:
         run: |
           javac Server.java SmokeTest.java
           java SmokeTest
-      - name: Compile the client
+      - name: Compile and run the client crypto vectors
         working-directory: examples/java/client
-        run: javac Client.java
+        run: |
+          javac Crypto.java CryptoVectors.java Client.java
+          java CryptoVectors

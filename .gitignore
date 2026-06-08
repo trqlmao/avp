@@ -2,6 +2,9 @@
 *.log
 node_modules/
 
+# Java compiled class files
+*.class
+
 # Go reference example build artifacts
 /examples/go/client/client
 /examples/go/client/client.exe
