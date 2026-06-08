@@ -1,0 +1,323 @@
+# OpenAPI description of the AVP HTTP/JSON transport profile.
+#
+# This is the route-level companion to schema/avp.schema.json (message shapes) and
+# proto/avp.proto (the canonical gRPC profile). It maps every operation in SPEC §6 to a
+# path, method, status set, and body, so an HTTP stack can scaffold a client or server and
+# render interactive docs. Message schemas are referenced from schema/avp.schema.json — that
+# file remains the single source of truth for shapes; do not duplicate them here.
+#
+# OpenAPI 3.1 (JSON Schema 2020-12). SPDX-License-Identifier: MIT
+openapi: 3.1.0
+info:
+  title: Alt Vault Protocol — HTTP/JSON profile
+  version: "0.2"
+  summary: Zero-knowledge, federated sharing of Minecraft alt accounts.
+  description: |
+    The HTTP/JSON transport profile for AVP. One path per operation, JSON bodies whose field
+    names are the proto field names in `camelCase`, and a bearer token in `Authorization` for
+    every route except the two auth routes. See [SPEC.md](SPEC.md) for normative semantics and
+    [IMPLEMENTING.md](IMPLEMENTING.md) for an implementer guide.
+
+    **Two services, possibly two hosts.** The auth routes (`/api/auth/keypair/*`) are served by
+    the identity provider (IdP); the `/v1/repos/*` routes are the vault server. They may be the
+    same origin or different ones. Tokens are server-local (SPEC §3): cache them keyed by host.
+
+    **Conflict is not an error.** A stale-version `push` returns `200` with
+    `PushResponse.conflict = true`, not a 4xx. Every non-2xx body is an
+    [`Error`](schema/avp.schema.json) and is terminal — never retried as a conflict (SPEC §6).
+  license:
+    name: MIT
+    url: https://github.com/trqlmao/avp/blob/main/LICENSE
+externalDocs:
+  description: Specification
+  url: https://github.com/trqlmao/avp/blob/main/SPEC.md
+
+servers:
+  - url: https://{host}
+    description: Any conformant AVP host (IdP and/or vault).
+    variables:
+      host:
+        default: vault.example
+
+tags:
+  - name: auth
+    description: Challenge→token identity flow (IdP). No bearer token required.
+  - name: vault
+    description: Repository operations (vault server). Bearer token required.
+  - name: discovery
+    description: Optional unauthenticated server metadata.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/auth/keypair/challenge:
+    post:
+      tags: [auth]
+      operationId: challenge
+      summary: Request a single-use challenge nonce for an Ed25519 identity.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/ChallengeRequest" }
+      responses:
+        "200":
+          description: A fresh single-use nonce with a short TTL.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/AuthChallenge" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/auth/keypair/token:
+    post:
+      tags: [auth]
+      operationId: token
+      summary: Exchange a signed nonce for a bearer token.
+      description: |
+        Sign the **raw nonce bytes** (base64-decode `nonce` first) with the Ed25519 private key.
+        A common mistake is signing the base64 string; the server rejects it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/TokenRequest" }
+      responses:
+        "200":
+          description: A bearer token scoped to this host and the caller's memberships.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/AuthToken" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/repos:
+    post:
+      tags: [vault]
+      operationId: createRepo
+      summary: Create a repository from a client-built manifest and initial payload.
+      description: The manifest's sole member MUST be the caller; a duplicate `repoId` is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/CreateRepoRequest" }
+      responses:
+        "200":
+          description: The stored manifest.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/repos/{repoId}/pull:
+    post:
+      tags: [vault]
+      operationId: pull
+      summary: Fetch the current manifest and (if changed) the payload envelope.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/PullRequest" }
+      responses:
+        "200":
+          description: |
+            The manifest plus `unchanged`. When `knownPayloadVersion` equals the current version,
+            `unchanged` is `true` and `envelope` is omitted; otherwise `envelope` is present.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/PullResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/repos/{repoId}/push:
+    post:
+      tags: [vault]
+      operationId: push
+      summary: Write a new payload using optimistic concurrency.
+      description: |
+        Applies only if `expectedPayloadVersion` equals the current version. A stale write is **not**
+        an error: the response is `200` with `accepted = false`, `conflict = true`, and the current
+        version — pull, re-apply, and retry. Present `rotatedMembers` to replace the roster atomically
+        with the write.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/PushRequest" }
+      responses:
+        "200":
+          description: |
+            Write outcome. `accepted = true` on success; `accepted = false, conflict = true` on a
+            stale-version conflict (retryable). Both carry the authoritative `payloadVersion`/`keyEpoch`.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/PushResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
+
+  /v1/repos/{repoId}/add-member:
+    post:
+      tags: [vault]
+      operationId: addMember
+      summary: Record a member whose wrapped key the client computed.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/MemberAddRequest" }
+      responses:
+        "200":
+          description: The updated manifest.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/repos/{repoId}/remove-member:
+    post:
+      tags: [vault]
+      operationId: removeMember
+      summary: Remove a member, applying the accompanying key rotation atomically.
+      description: |
+        In one atomic step: drop `removedMemberId`, replace the roster with `rewrappedMembers`, store
+        `rotatedEnvelope`, and set the epoch to `newKeyEpoch`. The removed member's old wrapped key
+        cannot derive the new epoch's data key.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/MemberRemoveRequest" }
+      responses:
+        "200":
+          description: The updated manifest at the new epoch.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/repos/{repoId}/member/{memberId}:
+    get:
+      tags: [vault]
+      operationId: fetchMemberKey
+      summary: Look up a single member's public-key entry.
+      description: |
+        `memberId` is the base64 Ed25519 public key. Because it contains `+`, `/`, and `=`, it MUST be
+        percent-encoded, and the server MUST route on the *escaped* path (do not unescape before matching
+        the path separator).
+      parameters:
+        - { $ref: "#/components/parameters/RepoId" }
+        - { $ref: "#/components/parameters/MemberId" }
+      responses:
+        "200":
+          description: The member entry (public keys and any key-binding signature).
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/MemberEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /.well-known/avp:
+    get:
+      tags: [discovery]
+      operationId: discovery
+      summary: Optional server metadata for resolving an avp:// address (SPEC §8.2).
+      security: []
+      responses:
+        "200":
+          description: Which transport profile(s) the server speaks and which IdP to trust.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Discovery" }
+        "404":
+          description: The server publishes no discovery document.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The token from `/api/auth/keypair/token`, server-local (SPEC §3).
+
+  parameters:
+    RepoId:
+      name: repoId
+      in: path
+      required: true
+      description: The opaque repository id, percent-encoded.
+      schema: { type: string }
+    MemberId:
+      name: memberId
+      in: path
+      required: true
+      description: The base64 Ed25519 member id, percent-encoded (contains `+` `/` `=`).
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed body or parameters.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "invalid JSON body", code: bad_request }
+    Unauthorized:
+      description: Missing/invalid token, or an expired or reused challenge nonce.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "missing or unknown bearer token", code: unauthorized }
+    Forbidden:
+      description: Authenticated but not a member, or disallowed by deployment policy.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "caller is not a member", code: forbidden }
+    NotFound:
+      description: Repo or member not found.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "repo not found", code: not_found }
+    Conflict:
+      description: A repository with this id already exists.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "repo already exists", code: duplicate_repo }
+    QuotaExceeded:
+      description: A deployment resource limit was hit. Terminal; do not retry as a conflict.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "repository quota exceeded", code: quota_exceeded }
+
+  schemas:
+    Discovery:
+      type: object
+      description: Body of GET /.well-known/avp (SPEC §8.2).
+      required: [profiles]
+      properties:
+        profiles:
+          type: array
+          items: { type: string, enum: [grpc, http-json] }
+          description: Transport profile(s) the server speaks.
+        issuerJwksUrl:
+          type: string
+          description: The IdP key set whose member key bindings to trust (§9).

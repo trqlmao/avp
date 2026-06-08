@@ -1,0 +1,77 @@
+{
+  "description": "Machine-readable index of AVP conformance vectors. A harness can enumerate this instead of hardcoding filenames. Prose explanation: vectors/README.md. Each entry: file (relative to vectors/), kind, specSection, and the published anchors a conformant implementation must reproduce.",
+  "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+  "kinds": {
+    "deterministic": "Pure byte/string construction with no key material; must match exactly.",
+    "rfc-primitive": "A cryptographic primitive pinned to a published RFC test vector.",
+    "composition": "Full AVP envelope composition with fixed keys/IVs; reproduce and round-trip (decrypt/unwrap), including the documented failure assertion."
+  },
+  "vectors": [
+    {
+      "id": "aad",
+      "file": "aad.json",
+      "kind": "deterministic",
+      "specSection": "4",
+      "construction": "UTF8(repoId) || 0x1F || int64BE(payloadVersion) || int64BE(keyEpoch)",
+      "expects": "AAD bytes as lowercase hex",
+      "anchors": []
+    },
+    {
+      "id": "key-binding-message",
+      "file": "key-binding-message.json",
+      "kind": "deterministic",
+      "specSection": "9",
+      "construction": "utf8(ed25519PublicKey + \"|\" + x25519PublicKey)",
+      "expects": "the canonical message as a UTF-8 string",
+      "anchors": []
+    },
+    {
+      "id": "hkdf",
+      "file": "hkdf.json",
+      "kind": "rfc-primitive",
+      "primitive": "HKDF-SHA256",
+      "specSection": "4",
+      "expects": "prkHex (extract) and okmHex (expand)",
+      "anchors": ["RFC 5869 Appendix A.1", "RFC 5869 Appendix A.3 (zero-length salt)"]
+    },
+    {
+      "id": "x25519",
+      "file": "x25519.json",
+      "kind": "rfc-primitive",
+      "primitive": "X25519",
+      "specSection": "4",
+      "expects": "raw 32-byte little-endian shared secret, unhashed",
+      "anchors": ["RFC 7748 §5.2", "RFC 7748 §6.1 (reused by key-wrap)"]
+    },
+    {
+      "id": "ed25519",
+      "file": "ed25519.json",
+      "kind": "rfc-primitive",
+      "primitive": "Ed25519",
+      "specSection": "3",
+      "expects": "public key derived from seed; deterministic signature reproduced and verified",
+      "anchors": ["RFC 8032 §7.1 TEST 2", "RFC 8032 §7.1 TEST 3"],
+      "note": "Anchors the challenge -> token signature: signing the raw nonce bytes is this primitive."
+    },
+    {
+      "id": "payload-aead",
+      "file": "payload-aead.json",
+      "kind": "composition",
+      "specSection": "4",
+      "construction": "AES-256-GCM, 12-byte IV, 16-byte tag appended; AAD = aad construction",
+      "expects": "re-encrypt equals committed ciphertext; decrypt recovers plaintext",
+      "failureAssertion": "decryption MUST fail when the AAD keyEpoch is changed (rollback/replay protection; anchors rotation correctness, SPEC §10)",
+      "anchors": ["RFC 5116 AES-256-GCM"]
+    },
+    {
+      "id": "key-wrap",
+      "file": "key-wrap.json",
+      "kind": "composition",
+      "specSection": "4",
+      "construction": "X25519-HKDF-SHA256-AESGCM-v1: KEK = HKDF-SHA256(ikm=X25519(eph,recip), salt=ephPubRaw, info=UTF8(\"avp/rdk-wrap/v1\")); AES-256-GCM(KEK, iv, aad=UTF8(\"avp/rdk-wrap/v1\"), dataKey)",
+      "expects": "recompute shared secret + KEK; re-wrap equals committed ciphertext; unwrap recovers the data key",
+      "note": "recipientPrivateKeyB64, sharedSecretHex, kekHex are checker aids, NOT part of the wire WrappedKey",
+      "anchors": ["RFC 7748 §6.1 (recipient = Alice, ephemeral = Bob)"]
+    }
+  ]
+}

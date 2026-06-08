@@ -183,6 +183,36 @@ failures and MUST NOT retry them as if they were a stale-version conflict. Recom
 HTTP `429 Too Many Requests` / `403 Forbidden` for the JSON profile; gRPC `RESOURCE_EXHAUSTED` /
 `PERMISSION_DENIED` for the gRPC profile.
 
+### Errors
+
+In the HTTP/JSON profile, any non-`2xx` response body is an **error object**:
+
+```json
+{ "error": "<human-readable message>", "code": "<machine code>", "detail": "<optional context>" }
+```
+
+`error` is a human-readable message and is always present; clients MUST NOT parse it. `code` is an
+OPTIONAL stable machine-readable token (see the table) a client MAY switch on; when absent, the client
+falls back to the HTTP status. `detail` is OPTIONAL extra context. The schema is
+[`schema/avp.schema.json`](schema/avp.schema.json) `#/$defs/Error`; the full route surface, including
+which status each operation can return, is [`openapi.yaml`](openapi.yaml).
+
+| Status | `code` | Meaning |
+|---|---|---|
+| `400` | `bad_request` | Malformed body or parameters |
+| `401` | `unauthorized` | Missing/invalid token, or an expired/reused challenge nonce |
+| `403` | `forbidden` | Authenticated but not a member, or an operation disallowed by policy (`policy_denied`) |
+| `404` | `not_found` | Repo or member does not exist |
+| `409` | `duplicate_repo` | `createRepo` with an id that already exists |
+| `429` | `quota_exceeded` | A deployment resource limit was hit |
+
+A client MUST treat every error here as **terminal** and MUST NOT retry it as if it were a
+stale-version conflict. The one retryable outcome — optimistic-concurrency conflict — is **not** an
+error: `push` returns HTTP `200` with `PushResponse { accepted: false, conflict: true }` and the
+current version (§10). The gRPC profile carries the same outcomes as status codes
+(`INVALID_ARGUMENT`, `UNAUTHENTICATED`, `PERMISSION_DENIED`, `NOT_FOUND`, `ALREADY_EXISTS`,
+`RESOURCE_EXHAUSTED`).
+
 ### Profiles
 
 - **gRPC**, [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable.
@@ -267,8 +297,22 @@ A conformant server MUST uphold:
 ## 11. Conformance
 
 An implementation is conformant if it satisfies every MUST above and reproduces the vectors in
-[`vectors/`](vectors/) (canonical AAD/binding-message construction, challenge/sign/token, key wrap/unwrap,
-and rotation). See [`vectors/README.md`](vectors/README.md).
+[`vectors/`](vectors/), indexed by [`vectors/index.json`](vectors/index.json):
+
+- the **deterministic constructions** — the AAD layout (`aad.json`) and the canonical key-binding
+  message (`key-binding-message.json`);
+- the **RFC-anchored primitives** — HKDF-SHA256 (`hkdf.json`), X25519 (`x25519.json`), and Ed25519
+  sign/verify (`ed25519.json`). The Ed25519 vector anchors the signature used by the challenge→token
+  flow (§3): signing the raw nonce bytes is exactly this primitive;
+- the **envelope compositions** — payload AEAD (`payload-aead.json`) and the key wrap/unwrap
+  (`key-wrap.json`). The payload-AEAD case includes the epoch-tamper assertion (decryption fails when
+  the AAD's `keyEpoch` changes), which is the cryptographic core of rotation correctness (§10): a
+  stale-epoch envelope cannot authenticate.
+
+See [`vectors/README.md`](vectors/README.md). Dedicated end-to-end vectors for the challenge→token
+exchange and the multi-step `removeMember` rotation are a welcome addition (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md)); today those paths are covered by the primitives above plus the
+cross-language wire interop in [`examples/`](examples/).
 
 ## 12. Security considerations and open items
 

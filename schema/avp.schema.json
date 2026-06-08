@@ -221,6 +221,28 @@
         "keyEpoch": { "type": ["integer", "null"] },
         "issuerJwksUrl": { "type": ["string", "null"] }
       }
+    },
+    "Error": {
+      "type": "object",
+      "description": "Error response body for the HTTP/JSON profile (SPEC §6). Returned with any non-2xx status. A stale-version push is NOT an error: it is a 200 PushResponse with conflict=true.",
+      "required": ["error"],
+      "properties": {
+        "error": { "type": "string", "description": "human-readable message; not machine-parsed" },
+        "code": {
+          "type": "string",
+          "description": "stable machine-readable code; absence means unspecified",
+          "enum": [
+            "unauthorized",
+            "forbidden",
+            "not_found",
+            "duplicate_repo",
+            "quota_exceeded",
+            "policy_denied",
+            "bad_request"
+          ]
+        },
+        "detail": { "type": "string", "description": "optional extra context, e.g. a parse error" }
+      }
     }
   }
 }
