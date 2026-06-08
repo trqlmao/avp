@@ -25,6 +25,8 @@ jobs:
         run: |
           cargo build --verbose
           cargo test --verbose
-      - name: Build the client
+      - name: Build and test the client
         working-directory: examples/rust/client
-        run: cargo build --verbose
+        run: |
+          cargo build --verbose
+          cargo test --verbose
