@@ -5,15 +5,13 @@ A runnable reference [client](client/) and [server](server/) for the
 the [TypeScript](../typescript/), [Rust](../rust/), [Python](../python/), and
 [Java](../java/) examples and is wire-compatible with all of them.
 
-**This example implements the real cryptography end to end.** The other reference
-clients deliberately carry the alt payload and wrapped keys as opaque placeholders
-(only the Ed25519 auth is real); the real envelope and key-wrap constructions live
-only in the [conformance vectors](../../vectors/). This Go example closes that gap:
-it is a runnable, dependency-free, vector-verified reference for the parts of SPEC
-§4 and §9 that are easiest to get subtly wrong — the AAD byte layout, the
-HKDF-salted X25519 key wrap, the unhashed shared secret, and AES-256-GCM tag
-handling. The server stays **zero-knowledge** the whole time: it stores ciphertext
-and wrapped keys, and decrypts nothing.
+**This example implements the real cryptography end to end** and is dependency-free
+(pure standard library). Like every sibling example, it is verified byte-for-byte
+against the [conformance vectors](../../vectors/); it is a worked, runnable reference
+for the parts of SPEC §4 and §9 that are easiest to get subtly wrong — the AAD byte
+layout, the HKDF-salted X25519 key wrap, the unhashed shared secret, and AES-256-GCM
+tag handling. The server stays **zero-knowledge** the whole time: it stores
+ciphertext and wrapped keys, and decrypts nothing.
 
 ## Layout
 

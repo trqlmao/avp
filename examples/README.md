@@ -1,10 +1,11 @@
 # Examples
 
 A worked end-to-end flow, representative message bodies, and runnable reference implementations, to make
-the spec concrete. Everything here is **illustrative**: hosts are `vault.example`, members are `alice`
-and `bob`, and the base64 key and ciphertext values are placeholders, not real cryptographic output. See
-[`../SPEC.md`](../SPEC.md) for the normative rules and [`../vectors/`](../vectors/) for byte-exact
-construction vectors.
+the spec concrete. The prose below is **illustrative**: hosts are `vault.example`, members are `alice`
+and `bob`, and the base64 key and ciphertext values shown in the worked flow are fixtures, not real
+cryptographic output. The runnable implementations, by contrast, do the real crypto (see Implementations
+below). See [`../SPEC.md`](../SPEC.md) for the normative rules and [`../vectors/`](../vectors/) for
+byte-exact construction vectors.
 
 Field names below are the HTTP/JSON profile (proto field names in `camelCase`); the gRPC profile carries
 the same fields.
