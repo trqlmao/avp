@@ -20,16 +20,31 @@ repo with Jekyll. The README is the home page.
 - `proto/avp.proto` is the **canonical** message definition. Field numbers and
   names are stable; add fields, never renumber or rename them.
 - `schema/avp.schema.json` mirrors the proto for the HTTP/JSON profile: the same
-  field names in `camelCase`. Keep it in sync with the proto and SPEC.
+  field names in `camelCase`. Keep it in sync with the proto and SPEC. It also
+  holds the HTTP error body (`$defs/Error` = `{ error, code?, detail? }`).
+- `openapi.yaml` is the OpenAPI 3.1 description of the HTTP/JSON profile (paths,
+  methods, status codes, error responses). It does not redefine message shapes:
+  it `$ref`s them from `schema/avp.schema.json`, which stays the single source of
+  truth. Keep its routes and status set aligned with SPEC §6.
 - `vectors/` are conformance test vectors, RFC-anchored and three-way verified
   (published RFCs + a reference implementation + the Node runner all agree
   byte-for-byte). **Never edit a vector value without re-verifying all three.**
-  See `vectors/README.md`.
-- `examples/` are illustrative reference clients and servers (TypeScript, Rust,
-  Python, Java) plus a Node conformance runner. They are not production code.
+  `vectors/index.json` is a machine-readable index of the files (kind, spec
+  section, RFC anchors); keep it in sync when adding or removing a vector. See
+  `vectors/README.md`.
+- `examples/` are illustrative reference clients and servers (Go, TypeScript,
+  Rust, Python, Java) plus a Node conformance runner that also checks
+  schema/example/index/openapi consistency. They are not production code.
+- `harness/` is the black-box conformance suite: point it at any running server
+  (`bun harness/conformance.ts --server URL`) and it drives the full wire
+  contract, asserting the SPEC §3/§6/§10 MUSTs (auth failure modes,
+  optimistic-concurrency conflict, membership authorization, key rotation,
+  zero-knowledge). It reuses the vector-tested example crypto; it is the
+  executable check for a *server*, the vectors are the check for the *crypto*.
 
-When you change one of `SPEC.md` / `proto/avp.proto` / `schema/avp.schema.json`,
-check whether the other two need the matching change. They describe one protocol.
+When you change one of `SPEC.md` / `proto/avp.proto` / `schema/avp.schema.json` /
+`openapi.yaml`, check whether the others need the matching change. They describe
+one protocol.
 
 ## Hard rules
 
@@ -61,9 +76,16 @@ AI). The committer is the responsible author.
 
 ## Build and test
 
-- Conformance runner (checks the vectors): `cd examples/conformance && bun install && bun run test`.
-- Per-language example CIs live in `.github/workflows/examples-{node,rust,java,python}.yml`;
-  each builds and tests its example client/server.
+- Conformance runner (vectors + schema/example/index/openapi consistency):
+  `cd examples/conformance && bun install && bun run test`.
+- Black-box a server: start one, then `bun harness/conformance.ts --server http://localhost:PORT`.
+- One-command local run: `Taskfile.yml` (go-task). `task test` runs the conformance
+  runner and every language's example tests; `task harness` / `task openapi-lint` run
+  the server harness and the Spectral lint. Each target mirrors a CI job.
+- CI workflows in `.github/workflows/`: per-language `examples-{go,node,rust,java,python}.yml`,
+  the cross-language `examples-interop.yml`, and `conformance.yml` (vector runner +
+  Spectral lint of `openapi.yaml` + schema-consistency + the black-box harness against
+  the Go and TypeScript reference servers). `no-leak.yml` is the vendor-neutrality gate.
 - The Pages site builds on push (no local step required). If you want to preview
   it locally and have Ruby, `bundle exec jekyll serve` renders `_layouts/default.html`
   with `assets/css/style.css`.
