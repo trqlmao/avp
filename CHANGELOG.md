@@ -18,9 +18,17 @@ implementation's version.
   exists: the Ed25519 primitive anchors the challenge signature and the payload-AEAD epoch-tamper case
   anchors rotation correctness; dedicated challenge/token and rotation vectors are noted as welcome
   additions rather than implied to already exist.
+- Specified that the federation tokens (SPEC section 8.1) use minified JSON in the member order shown as
+  the RECOMMENDED encoding, while a decoder MUST accept any valid JSON object with the required members.
+- Added `THREATMODEL.md`, the adversary model (network, honest-but-curious and malicious server, insider,
+  removed member, compromised IdP, stolen token/key), cryptographic assumptions, non-goals, and residual
+  risks; linked from SPEC section 12 and `SECURITY.md`.
 
 ### Repository
 
+- Added `vectors/federation.json` and a conformance test for it: the base64url join-handshake tokens
+  (invite request, repo locator) as a decode oracle plus canonical-encode round-trip, and `avp://`
+  repository URI parse/format (SPEC section 8). Indexed in `vectors/index.json`.
 - Added a black-box conformance harness in `harness/`: point it at any running server and it drives the
   full wire contract, asserting the normative MUSTs (auth failure modes, optimistic-concurrency
   conflict, membership authorization, key rotation, and zero-knowledge: the plaintext never surfaces in

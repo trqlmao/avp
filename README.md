@@ -57,7 +57,9 @@ A browser or Node client can implement AVP with no gRPC toolchain at all.
 | [`openapi.yaml`](openapi.yaml) | OpenAPI 3.1 route description for the HTTP/JSON profile. |
 | [`vectors/`](vectors/) | Conformance test vectors (indexed by [`vectors/index.json`](vectors/index.json)). |
 | [`examples/`](examples/) | A worked end-to-end flow, representative message bodies, and runnable reference implementations. |
+| [`harness/`](harness/) | Black-box conformance suite: run it against any server to assert the wire-contract MUSTs. |
 | [`Taskfile.yml`](Taskfile.yml) | One-command local runner: `task test` runs the conformance suite and every example. |
+| [`THREATMODEL.md`](THREATMODEL.md) | What AVP defends against, what it does not, and the residual risks. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to help. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability. |
 | [`llms.txt`](llms.txt) | Structured entry point for LLMs and AI agents. |

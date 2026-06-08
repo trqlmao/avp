@@ -1,0 +1,59 @@
+{
+  "description": "Federation join-handshake tokens (SPEC section 8.1) and avp:// repository URIs (SPEC section 8). Tokens are base64url (RFC 4648 section 5, no padding) over compact JSON. Each token case is a decode oracle: decoding `base64url` MUST yield `decoded`. `canonicalJson` is the recommended minified encoding (members in the order shown, no insignificant whitespace); a conformant encoder SHOULD reproduce it, and `base64url` is its base64url form. The avp-uri cases pin parse and format of avp://<host>/<repoId>, where the host is the authority (host or host:port) and repoId is the exact opaque id (the id never encodes the host).",
+  "tokens": [
+    {
+      "name": "invite-request",
+      "schema": "InviteRequest",
+      "direction": "joiner -> inviter",
+      "decoded": {
+        "v": 1,
+        "ed25519PublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "x25519PublicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "canonicalJson": "{\"v\":1,\"ed25519PublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"x25519PublicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\"}",
+      "base64url": "eyJ2IjoxLCJlZDI1NTE5UHVibGljS2V5IjoiRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRT0iLCJ4MjU1MTlQdWJsaWNLZXkiOiJJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJPSJ9"
+    },
+    {
+      "name": "repo-locator-full",
+      "schema": "RepoLocator",
+      "direction": "inviter -> joiner",
+      "decoded": {
+        "v": 1,
+        "host": "vault.example",
+        "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
+        "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+        "keyEpoch": 0,
+        "issuerJwksUrl": "https://idp.example/.well-known/jwks.json"
+      },
+      "canonicalJson": "{\"v\":1,\"host\":\"vault.example\",\"repoId\":\"3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f\",\"schemeId\":\"X25519-HKDF-SHA256-AESGCM-v1\",\"keyEpoch\":0,\"issuerJwksUrl\":\"https://idp.example/.well-known/jwks.json\"}",
+      "base64url": "eyJ2IjoxLCJob3N0IjoidmF1bHQuZXhhbXBsZSIsInJlcG9JZCI6IjNiMWY5YzY0LTBiMmEtNGYxZS05YzNkLTFhMmIzYzRkNWU2ZiIsInNjaGVtZUlkIjoiWDI1NTE5LUhLREYtU0hBMjU2LUFFU0dDTS12MSIsImtleUVwb2NoIjowLCJpc3N1ZXJKd2tzVXJsIjoiaHR0cHM6Ly9pZHAuZXhhbXBsZS8ud2VsbC1rbm93bi9qd2tzLmpzb24ifQ"
+    },
+    {
+      "name": "repo-locator-minimal",
+      "schema": "RepoLocator",
+      "direction": "inviter -> joiner",
+      "note": "Optional schemeId/keyEpoch/issuerJwksUrl absent; host carries a port.",
+      "decoded": {
+        "v": 1,
+        "host": "vault.example:8443",
+        "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f"
+      },
+      "canonicalJson": "{\"v\":1,\"host\":\"vault.example:8443\",\"repoId\":\"3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f\"}",
+      "base64url": "eyJ2IjoxLCJob3N0IjoidmF1bHQuZXhhbXBsZTo4NDQzIiwicmVwb0lkIjoiM2IxZjljNjQtMGIyYS00ZjFlLTljM2QtMWEyYjNjNGQ1ZTZmIn0"
+    }
+  ],
+  "uris": [
+    {
+      "name": "plain-host",
+      "uri": "avp://vault.example/3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
+      "host": "vault.example",
+      "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f"
+    },
+    {
+      "name": "host-with-port",
+      "uri": "avp://vault.example:8443/3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
+      "host": "vault.example:8443",
+      "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f"
+    }
+  ]
+}
