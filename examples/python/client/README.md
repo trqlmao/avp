@@ -10,6 +10,7 @@ python -m venv .venv && . .venv/bin/activate   # optional; Windows: .venv\Script
 pip install -r requirements.txt
 python client.py                                # drives the flow against http://localhost:8787
 python -m py_compile client.py                  # syntax check
+python -m unittest test_crypto.py -v            # vector tests (must all pass)
 ```
 
 Requires Python 3.9+.
@@ -42,39 +43,36 @@ In one run, with two locally generated members (`alice` and `bob`):
 6. **addMember**, alice records bob's member entry.
 7. **fetchMemberKey**, looks bob's entry back up by member id (URL-encoded, because base64 ids contain
    `+ / =`).
-8. **bob pulls**, bob authenticates with his own keypair and syncs the shared repo.
+8. **bob pulls and decrypts**, bob authenticates with his own keypair, pulls the shared repo,
+   unwraps the data key from his member entry, and decrypts the payload, recovering exactly what
+   alice stored.
 
 Each step prints a one-line transcript entry.
 
-## What is a placeholder (read this)
+## The crypto is real
 
-**The envelope and wrapped-key cryptography is out of scope for this example.** This client does **not**
-encrypt anything. It carries the alt payload as an **opaque placeholder ciphertext** and fills each
-member's wrapped data key with a labelled placeholder blob. That is fine for exercising the wire
-contract, because the server is zero-knowledge and never decrypts what it stores, so a placeholder
-ciphertext round-trips identically to a real one.
+Unlike placeholder clients, this one does the real envelope work (SPEC sections 4-5) using the
+sibling [`crypto`](crypto.py) module:
 
-A production client does the real work the server cannot:
+- derives a per-repo symmetric **data key**,
+- **AES-256-GCM** encrypts the alt payload, binding `(repoId, payloadVersion, keyEpoch)` into the
+  AAD (SPEC section 4),
+- **wraps** the data key to each member's X25519 public key via X25519 + HKDF-SHA256, and unwraps
+  it again on the receiving side.
 
-- derive a per-repo symmetric **data key**,
-- **AES-256-GCM** encrypt the alt payload, binding `(repoId, payloadVersion, keyEpoch)` into the AAD
-  (SPEC section 4),
-- **wrap** the data key to each member's X25519 public key via X25519 + HKDF-SHA256, and
-- rotate the key epoch on member removal.
-
-See SPEC sections 4–5 and the `lol.trq.alts` reference implementation for that part. The **only** real
-cryptography in this example is the Ed25519 challenge signature, which is genuinely part of the wire
-contract.
+Those constructions are checked byte-for-byte against the
+[conformance vectors](../../../vectors/) by `test_crypto.py`, so this client genuinely
+interoperates rather than only round-tripping its own placeholders.
 
 ## What is simplified (do not ship this)
 
 This example is **illustrative, not production**. Specifically:
 
-- **Placeholder crypto.** As above, no real encryption or key wrapping happens here. The IVs are
-  fixed placeholders, not random nonces, because nothing is actually encrypted.
-- **No TLS.** It talks plain HTTP to `localhost` by default. A real client uses HTTPS; bearer tokens are
-  credentials and the transport MUST be TLS (SPEC section 12).
+- **No TLS.** It talks plain HTTP to `localhost` by default. A real client uses HTTPS; bearer tokens
+  are credentials and the transport MUST be TLS (SPEC section 12).
 - **Single process, no persistence.** It generates fresh keypairs each run and keeps no state.
+- **No key rotation on removal.** The lifecycle here does not exercise `removeMember`; a real client
+  rotates the key epoch and re-wraps the data key to the remaining members when someone leaves.
 - **No anti-MITM key-binding verification.** A production client SHOULD (and, off a host it does not
-  operate, MUST) verify `MemberEntry.keyBindingSig` before wrapping a data key to a served member entry
-  (SPEC section 9). This example skips that step.
+  operate, MUST) verify `MemberEntry.keyBindingSig` before wrapping a data key to a served member
+  entry (SPEC section 9). This example skips that step.

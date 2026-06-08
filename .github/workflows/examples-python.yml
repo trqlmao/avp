@@ -30,4 +30,5 @@ jobs:
         working-directory: examples/python/client
         run: |
           pip install -r requirements.txt
-          python -m py_compile client.py
+          python -m py_compile client.py crypto.py
+          python -m unittest test_crypto.py

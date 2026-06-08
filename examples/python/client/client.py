@@ -2,19 +2,22 @@
 
 It drives the whole wire contract against a running server (the sibling ``../server``, or any other
 conformant HTTP/JSON server) so an implementer can see the full lifecycle end to end: generate an
-Ed25519 keypair, run the challenge -> sign -> token auth flow, create a repo, pull, push a new
-version, invite a second member, fetch that member's key, and print a transcript.
+Ed25519 keypair and an X25519 keypair, run the challenge -> sign -> token auth flow, create a repo,
+pull, push a new version, invite a second member, fetch that member's key, and have the second member
+pull, unwrap, and decrypt the payload.
 
-It is intentionally tiny and NOT production code. Crucially, the envelope and wrapped-key crypto is
-OUT OF SCOPE here: this client carries the alt payload as an opaque placeholder ciphertext and never
-actually encrypts anything. A real client derives a per-repo data key, AES-256-GCM encrypts the alt
-payload (binding repoId/payloadVersion/keyEpoch into the AAD), and wraps the data key to each member's
-X25519 key. See SPEC sections 4-5 and the ``lol.trq.alts`` reference for that part. The only real
-crypto here is the Ed25519 challenge signature, which IS part of the wire contract.
+The envelope and wrapped-key crypto is REAL (SPEC sections 4-5): alice derives a per-repo data key,
+AES-256-GCM-encrypts the alt payload binding (repoId, payloadVersion, keyEpoch) into the AAD, and
+wraps the data key to each member's X25519 key. The server stays zero-knowledge throughout, so bob
+recovers exactly what alice stored. The crypto lives in the sibling ``crypto`` module and is verified
+against ../../../vectors by ``test_crypto.py``.
+
+It is intentionally tiny and NOT production code. The only non-standard library dependency is the
+``cryptography`` package (Ed25519 signing + X25519 + AES-GCM).
 
 Run: ``pip install -r requirements.txt && python client.py`` (standard library for HTTP, the
-``cryptography`` package for Ed25519). Point it at a server with the ``AVP_SERVER_URL`` environment
-variable (default ``http://localhost:8787``).
+``cryptography`` package for all key material). Point it at a server with the ``AVP_SERVER_URL``
+environment variable (default ``http://localhost:8787``).
 
 SPDX-License-Identifier: MIT
 """
@@ -31,62 +34,58 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+import crypto
 
 # --- Constants --------------------------------------------------------------
-
-#: Identifier of the wrapping scheme this example advertises in manifests and wrapped keys.
-SCHEME_ID = "X25519-HKDF-SHA256-AESGCM-v1"
 
 #: Base server URL from ``AVP_SERVER_URL`` (default localhost:8787), with any trailing slash trimmed.
 BASE_URL = os.environ.get("AVP_SERVER_URL", "http://localhost:8787").rstrip("/")
 
 
-# --- Ed25519 keypair + identity (SPEC section 3) ----------------------------
+# --- Ed25519 + X25519 keypair identity (SPEC sections 3 and 4) -------------
 
 
 @dataclass
 class Identity:
-    """A member identity: an Ed25519 signing keypair plus a placeholder X25519 public key.
+    """A member identity: an Ed25519 signing keypair and an X25519 key-wrapping keypair.
 
     The raw 32-byte Ed25519 public key, base64-encoded, is the member id (SPEC section 2). The
-    X25519 key would be a real Curve25519 public key in a production client; here it is an opaque
-    placeholder, because this example performs no key wrapping.
+    X25519 private key is used to unwrap the repo data key on pull; its base64 raw public key is
+    published in the member entry so others can wrap the data key to this member.
 
     Attributes:
         ed25519_public_key: Base64 raw 32-byte Ed25519 public key; this is the member id.
-        x25519_public_key: Base64 placeholder X25519 public key (no real key agreement happens).
-        private_key: The Ed25519 private key, used only to sign the auth challenge nonce.
+        x25519_public_key: Base64 raw 32-byte X25519 public key for data-key wrapping.
+        ed25519_private_key: The Ed25519 private key, used only to sign the auth challenge nonce.
+        x25519_private_key: The X25519 private key, used only to unwrap a received data key.
     """
 
     ed25519_public_key: str
     x25519_public_key: str
-    private_key: Ed25519PrivateKey
+    ed25519_private_key: Ed25519PrivateKey
+    x25519_private_key: X25519PrivateKey
 
 
-def generate_identity(label: str) -> Identity:
-    """Generate a fresh Ed25519 identity with a labelled placeholder X25519 public key.
+def generate_identity() -> Identity:
+    """Generate a fresh Ed25519 + X25519 identity.
 
-    The ``cryptography`` library exposes the raw 32-byte public key directly via
-    ``public_bytes_raw()`` (RFC 8032), which is exactly the encoding the member id uses.
-
-    Args:
-        label: Human-readable name (e.g. ``"alice"``) woven into the placeholder X25519 key so the
-            transcript stays readable; it has no cryptographic meaning.
+    The ``cryptography`` library exposes the raw 32-byte public keys directly via
+    ``public_bytes_raw()`` (RFC 8032 / RFC 7748), which is exactly the encoding the member id and
+    member entry X25519 field use.
 
     Returns:
-        A new :class:`Identity` with a real Ed25519 keypair and a placeholder X25519 public key.
+        A new :class:`Identity` with real Ed25519 and X25519 keypairs.
     """
-    private_key = Ed25519PrivateKey.generate()
-    raw_public = private_key.public_key().public_bytes_raw()
+    ed_priv = Ed25519PrivateKey.generate()
+    x_priv = X25519PrivateKey.generate()
     return Identity(
-        ed25519_public_key=base64.b64encode(raw_public).decode("ascii"),
-        # Placeholder, not a real X25519 key — clearly labelled so nobody mistakes it for key material.
-        x25519_public_key=base64.b64encode(f"x25519-placeholder-{label}".encode("utf-8")).decode("ascii"),
-        private_key=private_key,
+        ed25519_public_key=base64.b64encode(ed_priv.public_key().public_bytes_raw()).decode("ascii"),
+        x25519_public_key=base64.b64encode(x_priv.public_key().public_bytes_raw()).decode("ascii"),
+        ed25519_private_key=ed_priv,
+        x25519_private_key=x_priv,
     )
 
 
@@ -138,7 +137,7 @@ def authenticate(identity: Identity) -> str:
     """Run the keypair challenge flow and return a bearer token for this identity.
 
     The client signs the RAW nonce bytes (the bytes obtained by base64-decoding the ``nonce``), not
-    the base64 text — this is the part conformant servers verify. Ed25519 signs the message directly
+    the base64 text -- this is the part conformant servers verify. Ed25519 signs the message directly
     (no pre-hash).
 
     Args:
@@ -156,7 +155,7 @@ def authenticate(identity: Identity) -> str:
         {"ed25519PublicKey": identity.ed25519_public_key},
     )
     nonce_bytes = base64.b64decode(challenge["nonce"])
-    signature = base64.b64encode(identity.private_key.sign(nonce_bytes)).decode("ascii")
+    signature = base64.b64encode(identity.ed25519_private_key.sign(nonce_bytes)).decode("ascii")
     auth = call(
         "POST",
         "/api/auth/keypair/token",
@@ -169,88 +168,25 @@ def authenticate(identity: Identity) -> str:
     return auth["token"]
 
 
-# --- Placeholder envelope + wrapped key (NOT real crypto) -------------------
+# --- Member entry with real wrapped data key --------------------------------
 
 
-def placeholder_iv() -> str:
-    """Return a base64 placeholder for a 12-byte AES-GCM IV.
-
-    No real encryption happens in this example, so the bytes need not be random for security; they
-    are filled deterministically so the transcript stays reproducible while still being well-formed.
-
-    Returns:
-        A base64 string standing in for a 12-byte AEAD nonce/IV.
-    """
-    return base64.b64encode(b"iv-placeholder").decode("ascii")
-
-
-def placeholder_envelope(repo_id: str, payload_version: int, key_epoch: int) -> dict[str, Any]:
-    """Build an opaque placeholder :class:`EncryptedEnvelope`.
-
-    A real client AES-256-GCM-encrypts the alt payload and binds ``(repoId, payloadVersion,
-    keyEpoch)`` into the AAD (SPEC section 4). Here ``ciphertext`` is just a base64 blob so the
-    server has something to store; the server never decrypts it, which is the whole point.
+def member_entry(identity: Identity, data_key: bytes, key_epoch: int) -> dict[str, Any]:
+    """Assemble a MemberEntry with the data key really wrapped to the identity's X25519 key.
 
     Args:
-        repo_id: Repo the envelope belongs to.
-        payload_version: Payload version this envelope represents.
-        key_epoch: Key epoch the (notional) payload was encrypted under.
-
-    Returns:
-        An envelope dict with a placeholder IV and a labelled placeholder ciphertext.
-    """
-    return {
-        "repoId": repo_id,
-        "payloadVersion": payload_version,
-        "keyEpoch": key_epoch,
-        "iv": placeholder_iv(),
-        "ciphertext": base64.b64encode(
-            f"opaque-placeholder-payload-v{payload_version}".encode("utf-8")
-        ).decode("ascii"),
-    }
-
-
-def placeholder_wrapped_key(member_label: str) -> dict[str, Any]:
-    """Build an opaque placeholder :class:`WrappedKey` for a member.
-
-    A real client runs X25519 ECDH against the member's X25519 key, derives an AES key via
-    HKDF, and AES-256-GCM-encrypts the repo data key. Here it is a labelled placeholder; the server
-    stores and serves it without ever being able to read it.
-
-    Args:
-        member_label: Human-readable member name woven into the placeholder fields for transcript
-            readability; it has no cryptographic meaning.
-
-    Returns:
-        A wrapped-key dict advertising :data:`SCHEME_ID` with a placeholder IV and labelled fields.
-    """
-    return {
-        "schemeId": SCHEME_ID,
-        "ephemeralPublicKey": base64.b64encode(
-            f"ephemeral-x25519-for-{member_label}".encode("utf-8")
-        ).decode("ascii"),
-        "iv": placeholder_iv(),
-        "ciphertext": base64.b64encode(
-            f"wrapped-data-key-for-{member_label}".encode("utf-8")
-        ).decode("ascii"),
-    }
-
-
-def member_entry(identity: Identity, label: str, key_epoch: int) -> dict[str, Any]:
-    """Assemble a :class:`MemberEntry` from an identity at a given key epoch.
-
-    Args:
-        identity: The member whose public keys populate the entry.
-        label: Human-readable member name passed through to :func:`placeholder_wrapped_key`.
+        identity: The member whose public keys populate the entry; the X25519 public key is the
+            wrap recipient.
+        data_key: The 32-byte repo data key to wrap to this member's X25519 key.
         key_epoch: Key epoch this entry's wrapped key belongs to.
 
     Returns:
-        A member-entry dict with a placeholder wrapped data key and no key-binding signature.
+        A member-entry dict with a real X25519-HKDF-SHA256-AESGCM-v1 wrapped data key.
     """
     return {
         "ed25519PublicKey": identity.ed25519_public_key,
         "x25519PublicKey": identity.x25519_public_key,
-        "wrappedDataKey": placeholder_wrapped_key(label),
+        "wrappedDataKey": crypto.wrap_data_key(identity.x25519_public_key, data_key),
         "keyEpoch": key_epoch,
         "keyBindingSig": None,
     }
@@ -272,47 +208,61 @@ def step(label: str, detail: str) -> None:
 def main() -> None:
     """Drive the full AVP lifecycle end to end against a running server and print a transcript.
 
-    The steps, in order: generate two local identities (alice, bob); authenticate alice; create a
-    repo with alice as sole member; pull at the known version (unchanged) and from version 0
-    (envelope returned); push a new version; demonstrate the optimistic-concurrency conflict path
-    with a stale expected version; add bob as a member; fetch bob's stored key entry; then
-    authenticate bob and have him pull the shared repo.
+    The steps, in order: generate two local identities (alice, bob); authenticate alice; mint a
+    per-repo data key; create a repo with alice as sole member (real encrypted payload); pull at the
+    known version (unchanged) and from version 0 (envelope returned); push a new version; demonstrate
+    the optimistic-concurrency conflict path; add bob as a member (data key wrapped to bob's X25519
+    key); fetch bob's stored key entry; authenticate bob, pull, unwrap the data key, and decrypt the
+    payload to recover the alt list.
 
     Raises:
         RuntimeError: If any server call returns a non-2xx status (propagated from :func:`call`);
             the ``__main__`` guard turns this into a non-zero exit code.
     """
     print(f"AVP reference client -> {BASE_URL}")
-    print("(Envelope/wrapped-key crypto is a placeholder; only the Ed25519 auth is real.)\n")
+    print("(Envelope and wrapped-key crypto is real; the server stays zero-knowledge.)\n")
 
     # Two members, generated locally. alice creates the repo; bob joins later.
-    alice = generate_identity("alice")
-    bob = generate_identity("bob")
+    alice = generate_identity()
+    bob = generate_identity()
     step(
         "members",
-        f"alice={alice.ed25519_public_key[:12]}… bob={bob.ed25519_public_key[:12]}…",
+        f"alice={alice.ed25519_public_key[:12]}... bob={bob.ed25519_public_key[:12]}...",
     )
 
     # 1. Authenticate alice (challenge -> sign nonce -> token).
     alice_token = authenticate(alice)
-    step("auth", f"alice token={alice_token[:12]}…")
+    step("auth", f"alice token={alice_token[:12]}...")
 
-    # 2. createRepo — alice must be the sole member of the manifest she creates.
-    # A real repoId is whatever the deploying client mints; we use a random UUID.
+    # 2. alice mints a per-repo data key and encrypts a real initial payload.
+    data_key = os.urandom(32)
     repo_id = str(uuid.uuid4())
-    initial_envelope = placeholder_envelope(repo_id, 1, 0)
+
+    alts_v1 = [
+        {
+            "uuid": "11111111-1111-4111-8111-111111111111",
+            "username": "alice_main",
+            "accessToken": "secret-v1",
+            "type": "MICROSOFT",
+            "lastUsed": 1,
+        }
+    ]
+    envelope_v1 = crypto.encrypt_payload(
+        data_key, repo_id, 1, 0, json.dumps({"alts": alts_v1, "payloadVersion": 1}).encode("utf-8")
+    )
+
     created_manifest = call(
         "POST",
         "/v1/repos",
         {
             "manifest": {
                 "repoId": repo_id,
-                "schemeId": SCHEME_ID,
+                "schemeId": crypto.WRAP_SCHEME_ID,
                 "keyEpoch": 0,
                 "payloadVersion": 1,
-                "members": [member_entry(alice, "alice", 0)],
+                "members": [member_entry(alice, data_key, 0)],
             },
-            "initialEnvelope": initial_envelope,
+            "initialEnvelope": envelope_v1,
         },
         alice_token,
     )
@@ -324,7 +274,7 @@ def main() -> None:
 
     encoded_repo = urllib.parse.quote(repo_id, safe="")
 
-    # 3. pull at the version we already know — server reports unchanged and omits the envelope.
+    # 3. pull at the version we already know -- server reports unchanged and omits the envelope.
     pull_same = call(
         "POST",
         f"/v1/repos/{encoded_repo}/pull",
@@ -337,7 +287,7 @@ def main() -> None:
         f"envelope={'null' if pull_same.get('envelope') is None else 'present'}",
     )
 
-    # 4. pull from version 0 — server returns the current envelope.
+    # 4. pull from version 0 -- server returns the current envelope.
     pull_fresh = call(
         "POST",
         f"/v1/repos/{encoded_repo}/pull",
@@ -350,14 +300,26 @@ def main() -> None:
         f"envelope={'null' if pull_fresh.get('envelope') is None else 'present'}",
     )
 
-    # 5. push a new payload version with optimistic concurrency on the current version.
+    # 5. push a real v2 payload with optimistic concurrency on the current version.
     next_version = created_manifest["payloadVersion"] + 1
+    alts_v2 = alts_v1 + [
+        {
+            "uuid": "22222222-2222-4222-8222-222222222222",
+            "username": "alice_alt",
+            "accessToken": "secret-v2",
+            "type": "MICROSOFT",
+            "lastUsed": 2,
+        }
+    ]
+    envelope_v2 = crypto.encrypt_payload(
+        data_key, repo_id, next_version, 0, json.dumps({"alts": alts_v2, "payloadVersion": next_version}).encode("utf-8")
+    )
     push_result = call(
         "POST",
         f"/v1/repos/{encoded_repo}/push",
         {
             "repoId": repo_id,
-            "envelope": placeholder_envelope(repo_id, next_version, 0),
+            "envelope": envelope_v2,
             "expectedPayloadVersion": created_manifest["payloadVersion"],
         },
         alice_token,
@@ -374,7 +336,9 @@ def main() -> None:
         f"/v1/repos/{encoded_repo}/push",
         {
             "repoId": repo_id,
-            "envelope": placeholder_envelope(repo_id, next_version + 1, 0),
+            "envelope": crypto.encrypt_payload(
+                data_key, repo_id, next_version + 1, 0, b'{"alts":[]}'
+            ),
             "expectedPayloadVersion": created_manifest["payloadVersion"],  # stale on purpose
         },
         alice_token,
@@ -385,18 +349,16 @@ def main() -> None:
         f"serverV={conflict['payloadVersion']}",
     )
 
-    # 7. addMember — alice (any member may invite, v1 policy) records bob's entry. In a real client
-    # bob would publish his public keys via the join handshake (SPEC section 8.1) and alice would
-    # wrap the data key to bob's X25519 key; here the wrapped key is a placeholder.
+    # 7. addMember -- alice wraps the data key to bob's X25519 key and records his entry.
     with_bob = call(
         "POST",
         f"/v1/repos/{encoded_repo}/add-member",
-        {"repoId": repo_id, "member": member_entry(bob, "bob", 0)},
+        {"repoId": repo_id, "member": member_entry(bob, data_key, 0)},
         alice_token,
     )
     step("addMember", f"members={len(with_bob['members'])} (added bob)")
 
-    # 8. fetchMemberKey — look up bob's stored entry by member id. The id is base64, which can
+    # 8. fetchMemberKey -- look up bob's stored entry by member id. The id is base64, which can
     # contain + / =, so it MUST be URL-encoded in the path.
     bob_entry = call(
         "GET",
@@ -406,10 +368,11 @@ def main() -> None:
     )
     step(
         "fetchMemberKey",
-        f"bob x25519={bob_entry['x25519PublicKey'][:12]}… epoch={bob_entry['keyEpoch']}",
+        f"bob x25519={bob_entry['x25519PublicKey'][:12]}... epoch={bob_entry['keyEpoch']}",
     )
 
-    # 9. bob authenticates with his own keypair and pulls the shared repo.
+    # 9. bob authenticates with his own keypair, pulls the shared repo, unwraps the data key, and
+    # decrypts the payload to recover the alt list.
     bob_token = authenticate(bob)
     bob_pull = call(
         "POST",
@@ -423,13 +386,30 @@ def main() -> None:
         f"envelope={'null' if bob_pull.get('envelope') is None else 'present'}",
     )
 
-    print("\nDone. Full lifecycle exercised against a zero-knowledge server.")
+    # Find bob's member entry in the pulled manifest to retrieve his wrapped data key.
+    bob_manifest_entry = next(
+        (m for m in bob_pull["manifest"]["members"] if m["ed25519PublicKey"] == bob.ed25519_public_key),
+        None,
+    )
+    if bob_manifest_entry is None:
+        raise RuntimeError("bob is not in the pulled roster")
+    if bob_pull.get("envelope") is None:
+        raise RuntimeError("bob's pull returned no envelope")
+
+    dk = crypto.unwrap_data_key(bob.x25519_private_key, bob_manifest_entry["wrappedDataKey"])
+    plaintext = json.loads(crypto.decrypt_payload(dk, bob_pull["envelope"]))
+    alts = plaintext.get("alts", [])
+    step("bob decrypt", f"v={plaintext.get('payloadVersion')} alts={len(alts)} (decrypted)")
+    for alt in alts:
+        step("  alt", f"{alt['username']} ({alt['uuid']})")
+
+    print("\nDone. Full lifecycle exercised against a zero-knowledge server; bob decrypted alice's payload.")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as err:  # noqa: BLE001 — reference client: surface the failure and exit non-zero
+    except Exception as err:  # noqa: BLE001 -- reference client: surface the failure and exit non-zero
         print(f"\nClient failed: {err}")
         print(
             "Is a server running? Start one with `python server.py` in ../server, "
