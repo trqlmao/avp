@@ -6,6 +6,8 @@ This repository is the specification, not an implementation. It defines the wire
 
 Notes for implementers: field names are normative; do not rename or renumber them. The additional-authenticated-data layout and the canonical key-binding message are fixed byte constructions with deterministic test vectors. The server must never receive plaintext alts, passphrases, identity seeds, or the data key. Provenance fields carry implementer-defined values at runtime and are never part of the spec text.
 
+For a single fetch with the full text of the guide, specification, and threat model inline, see [llms-full.txt](https://raw.githubusercontent.com/trqlmao/avp/main/llms-full.txt).
+
 ## Implementer guide
 
 - [Implementing AVP (IMPLEMENTING.md)](https://raw.githubusercontent.com/trqlmao/avp/main/IMPLEMENTING.md): The entry point for building a conformant client and server. Covers identity and auth, the full cryptographic envelope (AAD, payload AEAD, HKDF, key wrap), the wire contract, and the conformance checklist. Start here.
