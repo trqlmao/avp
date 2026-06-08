@@ -2,7 +2,7 @@
   "name": "avp-conformance",
   "version": "0.0.0",
   "private": true,
-  "description": "Conformance runner for the Alt Vault Protocol deterministic vectors (SPEC sections 4 and 9). Illustrative, not production.",
+  "description": "Conformance runner for the Alt Vault Protocol vectors (SPEC sections 4 and 9) plus schema/example/index/openapi consistency checks. Illustrative, not production.",
   "type": "module",
   "license": "MIT",
   "scripts": {
@@ -11,7 +11,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "ajv": "^8.17.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "yaml": "^2.6.0"
   }
 }

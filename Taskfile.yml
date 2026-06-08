@@ -26,12 +26,25 @@ tasks:
       - task: java
 
   conformance:
-    desc: Reproduce every vector in vectors/ with the Node conformance runner.
+    desc: Reproduce every vector in vectors/ and check schema/example/index/openapi consistency.
     dir: examples/conformance
     cmds:
       - bun install --frozen-lockfile
       - bun run typecheck
       - bun run test
+
+  openapi-lint:
+    desc: Lint openapi.yaml with Spectral.
+    cmds:
+      - bunx @stoplight/spectral-cli@6 lint openapi.yaml --ruleset .spectral.yaml --fail-severity error
+
+  harness:
+    desc: Run the black-box conformance harness against a server (AVP_SERVER_URL=http://host:port task harness).
+    dir: harness
+    cmds:
+      - bun conformance.ts --server "{{.AVP_SERVER_URL}}"
+    env:
+      AVP_SERVER_URL: '{{.AVP_SERVER_URL | default "http://localhost:8787"}}'
 
   go:
     desc: Vet, test, and build the Go client and server.

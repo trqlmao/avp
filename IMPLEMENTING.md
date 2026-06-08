@@ -218,6 +218,12 @@ operation the server performs is verifying the Ed25519 challenge signature in th
    [`.github/workflows/examples-interop.yml`](.github/workflows/examples-interop.yml) workflow
    does this for all five reference examples and is a useful model.
 
+5. **Black-box your server.** Point the conformance harness in [`harness/`](harness/) at your running
+   server (`bun harness/conformance.ts --server http://localhost:PORT`). It drives the whole flow and
+   asserts the normative MUSTs — the auth failure modes, optimistic-concurrency `conflict`, membership
+   authorization, key rotation, and zero-knowledge (the plaintext never surfaces in what the server
+   stores). CI runs it against the Go and TypeScript reference servers.
+
 ## 7. Reference implementations
 
 All five examples implement the real envelope and key-wrap crypto, each verified byte-for-byte

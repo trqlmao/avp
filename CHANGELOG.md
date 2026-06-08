@@ -21,6 +21,14 @@ implementation's version.
 
 ### Repository
 
+- Added a black-box conformance harness in `harness/`: point it at any running server and it drives the
+  full wire contract, asserting the normative MUSTs (auth failure modes, optimistic-concurrency
+  conflict, membership authorization, key rotation, and zero-knowledge — the plaintext never surfaces in
+  what the server stores). Reuses the vector-tested reference crypto.
+- Added a `conformance` CI workflow: reproduces the vectors, lints `openapi.yaml` with Spectral, checks
+  that the schema / example bodies / vector index / OpenAPI `$refs` stay consistent, and runs the
+  black-box harness against the Go and TypeScript reference servers. The vector runner now also runs in
+  CI for the first time.
 - Added `openapi.yaml`, an OpenAPI 3.1 description of the HTTP/JSON profile (paths, status codes, error
   responses) that references the JSON Schema shapes, so the route surface is machine-readable and
   stub-generatable.
