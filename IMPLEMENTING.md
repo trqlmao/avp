@@ -150,7 +150,9 @@ data key to that member entry.
 ### Routes (HTTP/JSON profile)
 
 All bodies are JSON with proto field names in `camelCase`. Routes other than the two auth routes
-require `Authorization: Bearer <token>`.
+require `Authorization: Bearer <token>`. The machine-readable route description, with every status code
+and the error body, is [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1); generate a client or server stub
+from it if your stack supports it.
 
 | Method + path | Request -> Response |
 |---|---|
@@ -176,6 +178,12 @@ Note: `memberId` in the path is the base64 Ed25519 public key. Because it contai
 | `403` | Token is valid but the caller is not a member of the repo |
 | `404` | Repo or member not found |
 | `409` | Duplicate `repoId` on create |
+
+Every non-2xx response body is an error object: `{ "error": "<message>", "code": "<machine code>",
+"detail": "<optional>" }`. `error` is human-readable (do not parse it); `code` is an optional stable
+token (`unauthorized`, `forbidden`, `not_found`, `duplicate_repo`, `quota_exceeded`, `policy_denied`,
+`bad_request`) you may switch on. Treat all of them as **terminal** — see the concurrency note below for
+the one outcome that is *not* an error.
 
 Optimistic concurrency: `push` returns `{ "accepted": false, "conflict": true }` with the
 current version when `expectedPayloadVersion` does not match. A client must pull, re-apply, and

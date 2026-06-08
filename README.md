@@ -41,7 +41,9 @@ stack:
 - **gRPC profile.** [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are
   stable.
 - **HTTP/JSON profile.** One HTTP path per operation, JSON bodies whose field names are the proto field
-  names in `camelCase`, and a Bearer token in `Authorization`. See [`schema/avp.schema.json`](schema/avp.schema.json).
+  names in `camelCase`, and a Bearer token in `Authorization`. Message shapes are
+  [`schema/avp.schema.json`](schema/avp.schema.json); the full route surface (paths, status codes, error
+  bodies) is [`openapi.yaml`](openapi.yaml).
 
 A browser or Node client can implement AVP with no gRPC toolchain at all.
 
@@ -51,9 +53,11 @@ A browser or Node client can implement AVP with no gRPC toolchain at all.
 |------|----------|
 | [`SPEC.md`](SPEC.md) | The normative protocol specification. |
 | [`proto/avp.proto`](proto/avp.proto) | Canonical Protocol Buffers schema (gRPC profile). |
-| [`schema/avp.schema.json`](schema/avp.schema.json) | JSON Schema (HTTP/JSON profile). |
-| [`vectors/`](vectors/) | Conformance test vectors. |
-| [`examples/`](examples/) | A worked end-to-end flow, representative message bodies, and a runnable reference server. |
+| [`schema/avp.schema.json`](schema/avp.schema.json) | JSON Schema message shapes (HTTP/JSON profile). |
+| [`openapi.yaml`](openapi.yaml) | OpenAPI 3.1 route description for the HTTP/JSON profile. |
+| [`vectors/`](vectors/) | Conformance test vectors (indexed by [`vectors/index.json`](vectors/index.json)). |
+| [`examples/`](examples/) | A worked end-to-end flow, representative message bodies, and runnable reference implementations. |
+| [`Taskfile.yml`](Taskfile.yml) | One-command local runner: `task test` runs the conformance suite and every example. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to help. |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability. |
 | [`llms.txt`](llms.txt) | Structured entry point for LLMs and AI agents. |

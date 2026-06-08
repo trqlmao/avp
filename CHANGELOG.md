@@ -11,9 +11,23 @@ implementation's version.
 - Clarified that an issuer MAY require out-of-band authentication and embed deployment-specific claims
   on the `token` grant, and that a server MAY return implementation-defined resource or policy errors
   such as quota limits; both non-normative (SPEC sections 3 and 6).
+- Defined the HTTP/JSON error body `{ error, code?, detail? }` and a status→code table, and stated that
+  every non-2xx is terminal while a stale-version `push` is a `200` with `conflict: true` (SPEC section
+  6); added `$defs/Error` to the JSON Schema.
+- Reworded the conformance section (SPEC section 11) to map each requirement to the vector that actually
+  exists: the Ed25519 primitive anchors the challenge signature and the payload-AEAD epoch-tamper case
+  anchors rotation correctness; dedicated challenge/token and rotation vectors are noted as welcome
+  additions rather than implied to already exist.
 
 ### Repository
 
+- Added `openapi.yaml`, an OpenAPI 3.1 description of the HTTP/JSON profile (paths, status codes, error
+  responses) that references the JSON Schema shapes, so the route surface is machine-readable and
+  stub-generatable.
+- Added `vectors/index.json`, a machine-readable index of the conformance vectors (file, kind, spec
+  section, RFC anchors) so a harness can enumerate them without hardcoding filenames.
+- Added a root `Taskfile.yml` (go-task): `task test` runs the conformance suite and every language's
+  example tests in one command, mirroring the CI jobs.
 - Added a Go reference client and server, and upgraded the TypeScript, Python, Java, and Rust reference
   clients to implement the real envelope and key-wrap crypto (previously opaque placeholders). Every
   example is verified byte-for-byte against the conformance vectors.

@@ -31,7 +31,9 @@ server, and the Go reference client runs against each language's server. Go and 
 are the fullest worked references for the cryptographic core.
 
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
-[`../vectors/`](../vectors/)). More languages are welcome; see
+[`../vectors/`](../vectors/)). From the repo root, [`task test`](../Taskfile.yml) (go-task) runs the
+conformance suite and every language's example tests in one command; per-language targets
+(`task go`, `task rust`, …) run just one toolchain. More languages are welcome; see
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## The cast
