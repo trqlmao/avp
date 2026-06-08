@@ -178,12 +178,19 @@ Note: `memberId` in the path is the base64 Ed25519 public key. Because it contai
 | `403` | Token is valid but the caller is not a member of the repo |
 | `404` | Repo or member not found |
 | `409` | Duplicate `repoId` on create |
+| `413` | Request body exceeds a server size limit (SPEC §7.1) |
+| `429` | Rate or resource limit hit; honor `Retry-After` (SPEC §7.2) |
 
 Every non-2xx response body is an error object: `{ "error": "<message>", "code": "<machine code>",
 "detail": "<optional>" }`. `error` is human-readable (do not parse it); `code` is an optional stable
-token (`unauthorized`, `forbidden`, `not_found`, `duplicate_repo`, `quota_exceeded`, `policy_denied`,
-`bad_request`) you may switch on. Treat all of them as **terminal**; see the concurrency note below for
-the one outcome that is *not* an error.
+token (`unauthorized`, `forbidden`, `not_found`, `duplicate_repo`, `quota_exceeded`, `too_large`,
+`policy_denied`, `bad_request`) you may switch on. Treat all of them as **terminal**; see the concurrency
+note below for the one outcome that is *not* an error.
+
+Retries and limits are covered in SPEC §7: `pull`/`fetchMemberKey` are idempotent reads, `push` is
+guarded by `expectedPayloadVersion` so a retry never double-applies, `createRepo` is idempotent on
+`repoId` (a retry returns `409`, which you treat as success), and `addMember` is idempotent on member id.
+On `429`, honor `Retry-After` and back off with jitter.
 
 Optimistic concurrency: `push` returns `{ "accepted": false, "conflict": true }` with the
 current version when `expectedPayloadVersion` does not match. A client must pull, re-apply, and

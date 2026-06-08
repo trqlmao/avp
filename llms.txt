@@ -12,7 +12,7 @@ Notes for implementers: field names are normative; do not rename or renumber the
 
 ## Specification
 
-- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, federation, anti-MITM key binding, invariants, conformance, and security considerations.
+- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, operational limits and retries, federation, anti-MITM key binding, invariants, conformance, and security considerations.
 - [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
 - [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile, including the error body (`$defs/Error`).
 - [OpenAPI (openapi.yaml)](https://raw.githubusercontent.com/trqlmao/avp/main/openapi.yaml): OpenAPI 3.1 route description of the HTTP/JSON profile: paths, methods, status codes, and error responses, referencing the JSON Schema shapes.

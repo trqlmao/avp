@@ -237,6 +237,7 @@
             "not_found",
             "duplicate_repo",
             "quota_exceeded",
+            "too_large",
             "policy_denied",
             "bad_request"
           ]

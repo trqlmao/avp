@@ -113,6 +113,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
 
   /v1/repos/{repoId}/pull:
     post:
@@ -164,6 +166,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
         "429": { $ref: "#/components/responses/QuotaExceeded" }
 
   /v1/repos/{repoId}/add-member:
@@ -302,11 +305,32 @@ components:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "repo already exists", code: duplicate_repo }
     QuotaExceeded:
-      description: A deployment resource limit was hit. Terminal; do not retry as a conflict.
+      description: |
+        A deployment resource limit or rate limit was hit (SPEC §7). Terminal; do not retry as a conflict.
+        Honor `Retry-After` before retrying an idempotent operation.
+      headers:
+        Retry-After:
+          description: Seconds to wait, or an HTTP-date, before retrying (SPEC §7.2).
+          schema: { type: string }
+        RateLimit-Limit:
+          description: Optional request quota for the window (SPEC §7.2).
+          schema: { type: integer }
+        RateLimit-Remaining:
+          description: Optional requests remaining in the window.
+          schema: { type: integer }
+        RateLimit-Reset:
+          description: Optional seconds until the window resets.
+          schema: { type: integer }
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "repository quota exceeded", code: quota_exceeded }
+    TooLarge:
+      description: The request body exceeds a deployment size limit (SPEC §7.1). Terminal.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "payload too large", code: too_large }
 
   schemas:
     Discovery:

@@ -221,7 +221,60 @@ current version (§10). The gRPC profile carries the same outcomes as status cod
   conformance schema is [`schema/avp.schema.json`](schema/avp.schema.json). Implementations MAY support
   either or both profiles; the message semantics are identical.
 
-## 7. (reserved)
+## 7. Operational limits and retries
+
+Operational guidance for a deployment. Except where a MUST is stated, these are RECOMMENDED practice
+rather than new wire contract; a server states its actual limits out of band (its documentation or its
+discovery document, §8.2).
+
+### 7.1 Resource limits
+
+A server SHOULD bound, per its deployment policy, at least the size of an `EncryptedEnvelope`, the number
+of members in a repository, and the number of repositories per tenant. When an operation would exceed a
+limit, the server MUST reject it with a terminal resource error, not an optimistic-concurrency `conflict`
+(§6 Errors): HTTP `413` (`too_large`) for an oversize body, or `429` (`quota_exceeded`) or `403`
+(`policy_denied`) for a count or policy limit; gRPC `RESOURCE_EXHAUSTED` or `PERMISSION_DENIED`. A client
+MUST surface these as failures and MUST NOT retry them as a stale-version conflict.
+
+As non-normative starting points, a payload on the order of a few megabytes, a few hundred members, and a
+per-tenant repository count in the low thousands are generous for the alt-sharing use case; deployments
+tune these to their needs.
+
+### 7.2 Rate limiting
+
+A server MAY rate-limit any operation. When it does, it SHOULD return `429` with a `Retry-After` header
+(delay-seconds or an HTTP-date) and MAY include the `RateLimit-Limit`, `RateLimit-Remaining`, and
+`RateLimit-Reset` headers. A client SHOULD honor `Retry-After` before retrying, and SHOULD apply its own
+backoff with jitter when it is absent. A rate-limit rejection is terminal for that attempt, not a
+conflict.
+
+### 7.3 Idempotency and retries
+
+A client MAY retry an operation whose response it did not receive (for example after a dropped
+connection). The protocol is designed so that this is safe:
+
+- `pull` and `fetchMemberKey` are reads and are idempotent.
+- `push` is guarded by `expectedPayloadVersion` (§6). A retry either applies once (if the first attempt
+  did not) or returns `conflict` with the current version (if it did), so a push never double-applies; the
+  client reconciles by pulling.
+- `createRepo` is idempotent on `repoId`: a retry after a successful create returns `409`
+  (`duplicate_repo`), and a client SHOULD treat a duplicate on its own create as success.
+- `addMember` SHOULD be idempotent on the member id: re-adding a member already present, with the same
+  keys, is a no-op that returns the current manifest.
+- `removeMember` carries the post-rotation state (the new roster, envelope, and epoch). Re-sending the
+  identical request before any intervening write sets the repository to the same target state and is
+  therefore idempotent. A client that cannot confirm the outcome SHOULD `pull` and compare the epoch
+  rather than blindly re-sending, because a removal that races another member's write must be recomputed
+  against the newer version.
+
+### 7.4 Repository identifiers
+
+A `repoId` is an opaque, server-minted, non-empty string that MUST NOT encode the host (§8). A server
+SHOULD mint it from the URL-unreserved characters (RFC 3986: `A-Z a-z 0-9 - . _ ~`, for example a UUID or
+a base64url token) and SHOULD keep it at most 255 characters, so it needs no special handling in a path.
+Regardless of how it is minted, because a `repoId` (and a base64 member id) can contain characters that
+are reserved in a URI, a client MUST percent-encode it in a path segment and a server MUST route on the
+escaped path (§6).
 
 ## 8. Federation
 
