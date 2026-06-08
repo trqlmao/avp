@@ -312,7 +312,13 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
   the AAD's `keyEpoch` changes), which is the cryptographic core of rotation correctness (§10): a
   stale-epoch envelope cannot authenticate;
 - the **federation encodings**: the join-handshake tokens (§8.1) and `avp://` URIs (§8) in
-  `federation.json`, base64url and JSON constructions with no key material.
+  `federation.json`, base64url and JSON constructions with no key material;
+- the **negative cases**: `negative.json`, valid constructions with one mutation each that a conformant
+  implementation MUST reject (payload-decrypt and key-unwrap fail authentication, ed25519-verify returns
+  false). Reproducing the positive vectors is necessary but not sufficient.
+
+Every committed vector is reproducible from documented seeds by [`vectors/generate.ts`](vectors/generate.ts)
+(`--check` re-derives and asserts them; it also owns `negative.json`).
 
 See [`vectors/README.md`](vectors/README.md). A **server** additionally proves conformance by passing the
 black-box harness in [`harness/`](harness/), which drives the full wire contract and asserts the MUSTs of

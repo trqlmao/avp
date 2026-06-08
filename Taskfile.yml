@@ -19,6 +19,7 @@ tasks:
     desc: Run the conformance suite and every language's example tests.
     cmds:
       - task: conformance
+      - task: vectors-check
       - task: go
       - task: typescript
       - task: python
@@ -32,6 +33,11 @@ tasks:
       - bun install --frozen-lockfile
       - bun run typecheck
       - bun run test
+
+  vectors-check:
+    desc: Re-derive every vector from its documented seeds (provenance and drift gate).
+    cmds:
+      - bun vectors/generate.ts --check
 
   openapi-lint:
     desc: Lint openapi.yaml with Spectral.

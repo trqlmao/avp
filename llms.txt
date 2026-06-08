@@ -35,6 +35,7 @@ Notes for implementers: field names are normative; do not rename or renumber the
 - [Payload AEAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/payload-aead.json): AES-256-GCM payload encryption with the AVP AAD composition.
 - [Key-wrap vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-wrap.json): Full X25519-HKDF-SHA256-AESGCM-v1 wrap composition anchored to RFC 7748.
 - [Federation vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/federation.json): Base64url join-handshake tokens (invite request, repo locator) and avp:// repository URIs (SPEC section 8); decode oracle plus canonical-encode and URI parse/format.
+- [Negative vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/negative.json): MUST-reject bank (flipped tag, truncation, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral key, wrong message/public key); a conformant implementation rejects every case.
 
 ## Project
 

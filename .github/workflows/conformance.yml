@@ -43,6 +43,8 @@ jobs:
         run: bun run --cwd examples/conformance typecheck
       - name: Reproduce vectors and check artifact consistency
         run: bun run --cwd examples/conformance test
+      - name: Re-derive vectors from seeds (provenance and drift gate)
+        run: bun vectors/generate.ts --check
 
   openapi:
     name: openapi lint

@@ -26,6 +26,14 @@ implementation's version.
 
 ### Repository
 
+- Added `vectors/negative.json`, a MUST-reject bank, and a conformance test for it: valid payload-aead,
+  key-wrap, and ed25519 constructions with one mutation each (flipped tag, bit flip, truncation, missing
+  tag, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral wrap key, wrong message/public
+  key). Each MUST be rejected; reproducing the positive vectors is necessary but not sufficient.
+- Added `vectors/generate.ts`, a reproducible derivation of every vector from documented seeds.
+  `--check` re-derives the committed positive vectors and asserts they match (the provenance and drift
+  gate, run in CI and by `task test`), and owns `negative.json` via `--write`. It reuses the vector-tested
+  reference crypto so it cannot drift from the runner.
 - Added `vectors/federation.json` and a conformance test for it: the base64url join-handshake tokens
   (invite request, repo locator) as a decode oracle plus canonical-encode round-trip, and `avp://`
   repository URI parse/format (SPEC section 8). Indexed in `vectors/index.json`.
