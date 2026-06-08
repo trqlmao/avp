@@ -6,6 +6,12 @@ implementation's version.
 
 ## [Unreleased]
 
+## [0.3] - 2026-06-08
+
+Conformance tooling, a threat model, operational limits, and a runnable gRPC reference. The wire contract
+is unchanged from 0.2, so existing 0.2 clients and servers stay conformant; the bump reflects the new
+normative operational-limits section and error contract plus the matured repository surface.
+
 ### Specification
 
 - Filled the reserved SPEC section 7 with **Operational limits and retries**: resource limits (with a
