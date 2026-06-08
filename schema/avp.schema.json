@@ -77,7 +77,16 @@
         "type": { "type": "string", "enum": ["MICROSOFT", "COOKIE", "SESSION", "OFFLINE"] },
         "lastUsed": { "type": "integer" },
         "lastUsedBy": { "type": ["string", "null"], "description": "member id or null" },
-        "ban": { "oneOf": [{ "$ref": "#/$defs/BanInfo" }, { "type": "null" }] },
+        "bans": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/BanInfo" },
+              "description": "ban records keyed by server id"
+            },
+            { "type": "null" }
+          ]
+        },
         "sourceClient": { "type": ["string", "null"], "description": "client an alt was added from" },
         "sourceUser": { "type": ["string", "null"], "description": "user within sourceClient" }
       }

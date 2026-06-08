@@ -6,6 +6,14 @@ implementation's version.
 
 ## [Unreleased]
 
+### Specification
+
+- Changed the payload `AltAccount.ban` (a single ban object or `null`) to `bans`, a map from a server id
+  to that server's most recent ban observation, or `null` (SPEC section 5, schema `$defs/AltAccount`).
+  This lets a cross-client repository track that an alt is banned on one server but usable on another.
+  The change is to the encrypted payload schema (server-invisible); it affects only client-to-client
+  payload compatibility.
+
 ## [0.3] - 2026-06-08
 
 Conformance tooling, a threat model, operational limits, and a runnable gRPC reference. The wire contract

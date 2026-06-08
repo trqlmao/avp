@@ -13,7 +13,7 @@ and epoch counters, and opaque signatures. The threat model follows from that si
 In rough order of sensitivity:
 
 1. **The alt plaintext.** The account credentials inside the encrypted payload (`accessToken`, and the
-   `username`, `uuid`, `ban`, and provenance fields around it). This is what AVP exists to protect.
+   `username`, `uuid`, `bans`, and provenance fields around it). This is what AVP exists to protect.
 2. **The repository data key.** The per-repo symmetric AES-256 key that encrypts the payload. Anyone who
    holds it can read every alt in the repo.
 3. **Member private keys.** Each member's Ed25519 identity key (authenticates, and is the member id) and
