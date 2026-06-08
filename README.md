@@ -39,7 +39,7 @@ The same messages are defined for two interchangeable encodings, so you can pick
 stack:
 
 - **gRPC profile.** [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are
-  stable.
+  stable. A runnable client and server live in [`examples/grpc/`](examples/grpc/).
 - **HTTP/JSON profile.** One HTTP path per operation, JSON bodies whose field names are the proto field
   names in `camelCase`, and a Bearer token in `Authorization`. Message shapes are
   [`schema/avp.schema.json`](schema/avp.schema.json); the full route surface (paths, status codes, error

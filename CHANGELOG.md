@@ -31,6 +31,10 @@ implementation's version.
 
 ### Repository
 
+- Added `examples/grpc/`, a runnable gRPC reference client and server that load the canonical
+  `proto/avp.proto` dynamically (no codegen) and exercise all six `Vault` RPCs plus a challenge/token
+  `Auth` service over one gRPC channel, with the real envelope crypto reused from the TypeScript example.
+  The `examples-grpc` workflow runs it end to end. The canonical proto previously had no running code.
 - Added `vectors/negative.json`, a MUST-reject bank, and a conformance test for it: valid payload-aead,
   key-wrap, and ed25519 constructions with one mutation each (flipped tag, bit flip, truncation, missing
   tag, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral wrap key, wrong message/public

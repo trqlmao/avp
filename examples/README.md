@@ -30,6 +30,11 @@ by the `examples-interop` workflow: each language's client runs against the Go r
 server, and the Go reference client runs against each language's server. Go and TypeScript
 are the fullest worked references for the cryptographic core.
 
+For the **gRPC profile**, [`grpc/`](grpc/) is a runnable client and server that load the canonical
+[`../proto/avp.proto`](../proto/avp.proto) directly and exercise all six `Vault` RPCs over a gRPC channel
+(the `examples-grpc` workflow runs it end to end). The message objects and crypto are identical to the
+HTTP/JSON examples; only the transport differs.
+
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
 [`../vectors/`](../vectors/)). From the repo root, [`task test`](../Taskfile.yml) (go-task) runs the
 conformance suite and every language's example tests in one command; per-language targets

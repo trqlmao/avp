@@ -41,7 +41,9 @@ repo with Jekyll. The README is the home page.
   also owns `negative.json` via `--write`) and does not rewrite the reviewed
   positive files.
 - `examples/` are illustrative reference clients and servers (Go, TypeScript,
-  Rust, Python, Java) plus a Node conformance runner that also checks
+  Rust, Python, Java) for the HTTP/JSON profile, plus `examples/grpc/` (a
+  TypeScript client and server that load the canonical proto for the gRPC
+  profile) and a Node conformance runner that also checks
   schema/example/index/openapi consistency. They are not production code.
 - `harness/` is the black-box conformance suite: point it at any running server
   (`bun harness/conformance.ts --server URL`) and it drives the full wire
