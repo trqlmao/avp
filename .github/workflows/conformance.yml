@@ -1,0 +1,116 @@
+name: conformance
+
+# Executable conformance:
+#   - vectors: reproduce vectors/ and check schema/example/index/openapi consistency (examples/conformance)
+#   - openapi: lint openapi.yaml with Spectral
+#   - black-box: drive the full wire contract against the Go and TypeScript reference servers (harness/)
+
+on:
+  push:
+    paths:
+      - "examples/**"
+      - "harness/**"
+      - "schema/**"
+      - "vectors/**"
+      - "openapi.yaml"
+      - ".spectral.yaml"
+      - ".github/workflows/conformance.yml"
+  pull_request:
+    paths:
+      - "examples/**"
+      - "harness/**"
+      - "schema/**"
+      - "vectors/**"
+      - "openapi.yaml"
+      - ".spectral.yaml"
+      - ".github/workflows/conformance.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  vectors:
+    name: vectors + schema consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - name: Install
+        run: bun install --frozen-lockfile --cwd examples/conformance
+      - name: Typecheck
+        run: bun run --cwd examples/conformance typecheck
+      - name: Reproduce vectors and check artifact consistency
+        run: bun run --cwd examples/conformance test
+
+  openapi:
+    name: openapi lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - name: Spectral lint
+        run: bunx @stoplight/spectral-cli@6 lint openapi.yaml --ruleset .spectral.yaml --fail-severity error
+
+  black-box:
+    name: black-box (${{ matrix.server }} server)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [go, typescript]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # The harness runs under Bun (no install: only node:crypto + global fetch).
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        if: matrix.server == 'go'
+        with:
+          go-version: "1.22"
+
+      - name: Install TypeScript server deps
+        if: matrix.server == 'typescript'
+        run: bun install --frozen-lockfile --cwd examples/typescript/server
+
+      - name: Run the harness against the ${{ matrix.server }} reference server
+        env:
+          SERVER: ${{ matrix.server }}
+        run: |
+          set -e
+          PORT=19101
+
+          case "$SERVER" in
+            go)
+              (cd examples/go/server && PORT=$PORT go run .) &
+              SRV_PID=$!
+              ;;
+            typescript)
+              (cd examples/typescript/server && PORT=$PORT bun run start) &
+              SRV_PID=$!
+              ;;
+          esac
+
+          # Poll until the server accepts connections (up to 20 s).
+          for i in $(seq 1 100); do
+            curl -fsS -X POST "http://localhost:$PORT/api/auth/keypair/challenge" \
+              -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          curl -fsS -X POST "http://localhost:$PORT/api/auth/keypair/challenge" \
+            -H 'content-type: application/json' -d '{}' >/dev/null 2>&1 \
+            || { echo "server did not start within 20s"; exit 1; }
+
+          bun harness/conformance.ts --server "http://localhost:$PORT"
+          HARNESS_EXIT=$?
+
+          kill $SRV_PID 2>/dev/null || true
+          wait $SRV_PID 2>/dev/null || true
+
+          exit $HARNESS_EXIT

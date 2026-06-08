@@ -1,0 +1,8 @@
+# Spectral ruleset for linting openapi.yaml (the HTTP/JSON profile description).
+# Extends the built-in OpenAPI rules; a couple of doc-style rules are relaxed because the
+# normative descriptions live in SPEC.md, not in per-operation prose here.
+extends: ["spectral:oas"]
+rules:
+  oas3-unused-component: off # message schemas live in schema/avp.schema.json, referenced externally
+  info-contact: off # reporting channel is SECURITY.md / the issue tracker, not a contact block
+  operation-tag-defined: warn

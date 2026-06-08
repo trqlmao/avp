@@ -21,6 +21,7 @@ Notes for implementers: field names are normative; do not rename or renumber the
 
 - [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
 - [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): Five runnable reference implementations (Go, TypeScript, Rust, Python, Java), each with a client and in-memory HTTP/JSON server, all implementing the real envelope and key-wrap crypto verified against the conformance vectors. Cross-language wire compatibility is tested by the examples-interop workflow.
+- [Conformance harness](https://raw.githubusercontent.com/trqlmao/avp/main/harness/README.md): A black-box conformance suite — point it at any running server and it drives the full wire contract, asserting the normative MUSTs (auth failure modes, optimistic-concurrency conflict, membership authorization, key rotation, zero-knowledge).
 
 ## Conformance vectors
 

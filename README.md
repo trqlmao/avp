@@ -93,6 +93,22 @@ It reproduces the deterministic and RFC-anchored vectors exactly and round-trips
 (decrypting and unwrapping what a peer produced). Reproduce the same in your language and you are
 conformant.
 
+### Check your server
+
+The vectors prove your crypto; the black-box harness in [`harness/`](harness/) proves your *server*.
+Point it at any running AVP server and it drives the full wire contract, asserting the normative MUSTs —
+the auth failure modes, optimistic-concurrency `conflict`, membership authorization, key rotation, and
+zero-knowledge:
+
+```sh
+bun harness/conformance.ts --server http://localhost:8787
+```
+
+It prints `PASS`/`FAIL` per check and exits non-zero on any failure. CI
+([`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) runs it against the Go and
+TypeScript reference servers, lints [`openapi.yaml`](openapi.yaml), and checks that the schema, example
+bodies, and vector index stay consistent.
+
 ## For AI agents
 
 If you are an AI coding agent asked to implement, review, or extend AVP, start from

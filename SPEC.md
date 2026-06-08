@@ -309,10 +309,13 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
   the AAD's `keyEpoch` changes), which is the cryptographic core of rotation correctness (§10): a
   stale-epoch envelope cannot authenticate.
 
-See [`vectors/README.md`](vectors/README.md). Dedicated end-to-end vectors for the challenge→token
-exchange and the multi-step `removeMember` rotation are a welcome addition (see
-[`CONTRIBUTING.md`](CONTRIBUTING.md)); today those paths are covered by the primitives above plus the
-cross-language wire interop in [`examples/`](examples/).
+See [`vectors/README.md`](vectors/README.md). A **server** additionally proves conformance by passing the
+black-box harness in [`harness/`](harness/), which drives the full wire contract and asserts the MUSTs of
+§3, §6, and §10 (the auth failure modes, optimistic-concurrency `conflict`, membership authorization, key
+rotation, and zero-knowledge). Dedicated end-to-end vectors for the challenge→token exchange and the
+multi-step `removeMember` rotation are a welcome addition (see [`CONTRIBUTING.md`](CONTRIBUTING.md));
+today those paths are covered by the primitives above, the harness, and the cross-language wire interop
+in [`examples/`](examples/).
 
 ## 12. Security considerations and open items
 
