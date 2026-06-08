@@ -72,6 +72,16 @@
       "expects": "recompute shared secret + KEK; re-wrap equals committed ciphertext; unwrap recovers the data key",
       "note": "recipientPrivateKeyB64, sharedSecretHex, kekHex are checker aids, NOT part of the wire WrappedKey",
       "anchors": ["RFC 7748 §6.1 (recipient = Alice, ephemeral = Bob)"]
+    },
+    {
+      "id": "federation",
+      "file": "federation.json",
+      "kind": "deterministic",
+      "specSection": "8",
+      "construction": "base64url (no padding) over compact JSON for the join-handshake tokens (InviteRequest, RepoLocator); avp://<host>/<repoId> for the repository URI",
+      "expects": "decoding base64url yields the object (decode oracle); canonical minified encoding round-trips; avp:// URIs parse to {host, repoId} and format back",
+      "shape": "uses top-level `tokens` and `uris` arrays, not `cases`",
+      "anchors": ["RFC 4648 §5 (base64url)"]
     }
   ]
 }

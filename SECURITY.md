@@ -11,6 +11,9 @@ machine-readable artifacts that could lead implementers to build something insec
 Vulnerabilities in a specific client, server, or library that implements AVP belong to that project, not
 here. Please report those to the relevant project.
 
+[`THREATMODEL.md`](THREATMODEL.md) describes what AVP defends against, what it does not, and the known
+residual risks. A report that sharpens or breaks part of that model is exactly what is most useful here.
+
 ## Reporting
 
 Please report security issues **privately**, not in a public issue or pull request.

@@ -248,7 +248,10 @@ X25519 key), the joiner publishes its keys first. Two base64url-encoded JSON tok
    `issuerJwksUrl` MAY be absent when the deployment publishes no key binding.
 
 Tokens are base64url (RFC 4648 §5, no padding) over the compact JSON above. They carry only public data
-and are safe to relay over any channel.
+and are safe to relay over any channel. The RECOMMENDED encoding is minified JSON with members in the
+order shown; a decoder MUST accept any valid JSON object that carries the required members, regardless of
+member order or insignificant whitespace. See [`vectors/federation.json`](vectors/federation.json) for
+byte-exact token and `avp://` URI vectors.
 
 ### 8.2 Discovery (optional)
 
@@ -307,7 +310,9 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 - the **envelope compositions**: payload AEAD (`payload-aead.json`) and the key wrap/unwrap
   (`key-wrap.json`). The payload-AEAD case includes the epoch-tamper assertion (decryption fails when
   the AAD's `keyEpoch` changes), which is the cryptographic core of rotation correctness (§10): a
-  stale-epoch envelope cannot authenticate.
+  stale-epoch envelope cannot authenticate;
+- the **federation encodings**: the join-handshake tokens (§8.1) and `avp://` URIs (§8) in
+  `federation.json`, base64url and JSON constructions with no key material.
 
 See [`vectors/README.md`](vectors/README.md). A **server** additionally proves conformance by passing the
 black-box harness in [`harness/`](harness/), which drives the full wire contract and asserts the MUSTs of
@@ -318,6 +323,9 @@ today those paths are covered by the primitives above, the harness, and the cros
 in [`examples/`](examples/).
 
 ## 12. Security considerations and open items
+
+[`THREATMODEL.md`](THREATMODEL.md) gives the full adversary model (what AVP defends, what it does not, and
+the residual risks). The open items below are the unresolved pieces of it.
 
 - **Algorithm negotiation.** `schemeId` names the AEAD/KDF/wrap scheme; the choreography for upgrading a
   repository's scheme over its lifetime is not yet specified.

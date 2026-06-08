@@ -34,10 +34,12 @@ Notes for implementers: field names are normative; do not rename or renumber the
 - [Ed25519 vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/ed25519.json): RFC 8032 Ed25519 vectors anchoring the signature primitive.
 - [Payload AEAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/payload-aead.json): AES-256-GCM payload encryption with the AVP AAD composition.
 - [Key-wrap vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-wrap.json): Full X25519-HKDF-SHA256-AESGCM-v1 wrap composition anchored to RFC 7748.
+- [Federation vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/federation.json): Base64url join-handshake tokens (invite request, repo locator) and avp:// repository URIs (SPEC section 8); decode oracle plus canonical-encode and URI parse/format.
 
 ## Project
 
 - [README](https://raw.githubusercontent.com/trqlmao/avp/main/README.md): Overview, implementer guide, and ways to help.
+- [Threat model](https://raw.githubusercontent.com/trqlmao/avp/main/THREATMODEL.md): What AVP defends against, the adversary model (network, honest-but-curious and malicious server, insider, removed member, compromised IdP, stolen token/key), cryptographic assumptions, non-goals, and residual risks.
 - [Contributing guide](https://raw.githubusercontent.com/trqlmao/avp/main/CONTRIBUTING.md): How to propose changes and the vendor-neutrality rule.
 - [Security policy](https://raw.githubusercontent.com/trqlmao/avp/main/SECURITY.md): How to report a vulnerability privately.
 

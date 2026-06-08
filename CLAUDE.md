@@ -31,7 +31,10 @@ repo with Jekyll. The README is the home page.
   byte-for-byte). **Never edit a vector value without re-verifying all three.**
   `vectors/index.json` is a machine-readable index of the files (kind, spec
   section, RFC anchors); keep it in sync when adding or removing a vector. See
-  `vectors/README.md`.
+  `vectors/README.md`. `vectors/federation.json` is the exception to the crypto
+  pattern: base64url join-handshake tokens and `avp://` URI vectors (SPEC §8),
+  deterministic encoding rather than crypto, using `tokens`/`uris` arrays not
+  `cases`.
 - `examples/` are illustrative reference clients and servers (Go, TypeScript,
   Rust, Python, Java) plus a Node conformance runner that also checks
   schema/example/index/openapi consistency. They are not production code.
@@ -41,6 +44,9 @@ repo with Jekyll. The README is the home page.
   optimistic-concurrency conflict, membership authorization, key rotation,
   zero-knowledge). It reuses the vector-tested example crypto; it is the
   executable check for a *server*, the vectors are the check for the *crypto*.
+- `THREATMODEL.md` is the adversary model (what AVP defends, what it does not, the
+  residual risks). Keep it consistent with SPEC §10 invariants and §12 open items
+  when the security posture changes.
 
 When you change one of `SPEC.md` / `proto/avp.proto` / `schema/avp.schema.json` /
 `openapi.yaml`, check whether the others need the matching change. They describe

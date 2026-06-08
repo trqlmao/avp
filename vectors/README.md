@@ -19,6 +19,14 @@ this repository:
 - [`key-binding-message.json`](key-binding-message.json), the canonical key-binding message from
   SPEC §9: `utf8(ed25519PublicKey + "|" + x25519PublicKey)`. Each case gives the inputs and the expected
   message as a UTF-8 string.
+- [`federation.json`](federation.json), the federation handshake and addressing from SPEC §8. Unlike the
+  others it uses top-level `tokens` and `uris` arrays rather than `cases`. Each token case (the invite
+  request and the repo locator) is a **decode oracle**: base64url-decoding `base64url` MUST yield
+  `decoded`. `canonicalJson` is the recommended minified encoding (members in the order shown) and
+  `base64url` is its base64url (RFC 4648 §5, no padding) form; the runner round-trips both directions and
+  validates `decoded` against its schema `$def`. Each `avp://` URI case pins parse and format of
+  `avp://<host>/<repoId>` (the host is the authority, with an optional port; the repoId is the single
+  opaque path segment).
 
 ## Cryptographic primitive vectors (RFC-anchored)
 
