@@ -6,6 +6,10 @@ This repository is the specification, not an implementation. It defines the wire
 
 Notes for implementers: field names are normative; do not rename or renumber them. The additional-authenticated-data layout and the canonical key-binding message are fixed byte constructions with deterministic test vectors. The server must never receive plaintext alts, passphrases, identity seeds, or the data key. Provenance fields carry implementer-defined values at runtime and are never part of the spec text.
 
+## Implementer guide
+
+- [Implementing AVP (IMPLEMENTING.md)](https://raw.githubusercontent.com/trqlmao/avp/main/IMPLEMENTING.md): The entry point for building a conformant client and server. Covers identity and auth, the full cryptographic envelope (AAD, payload AEAD, HKDF, key wrap), the wire contract, and the conformance checklist. Start here.
+
 ## Specification
 
 - [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, federation, anti-MITM key binding, invariants, conformance, and security considerations.
@@ -15,13 +19,18 @@ Notes for implementers: field names are normative; do not rename or renumber the
 ## Examples
 
 - [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
-- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): runnable in-memory HTTP/JSON servers (TypeScript, Rust, Python, Java), a TypeScript client, and a conformance runner over the vectors, organized as `examples/<language>/<client|server>/`. Illustrative, not production.
+- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): Five runnable reference implementations (Go, TypeScript, Rust, Python, Java), each with a client and in-memory HTTP/JSON server, all implementing the real envelope and key-wrap crypto verified against the conformance vectors. Cross-language wire compatibility is tested by the examples-interop workflow.
 
 ## Conformance vectors
 
 - [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
 - [AAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/aad.json): Deterministic additional-authenticated-data construction (SPEC section 4).
 - [Key-binding message vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-binding-message.json): Deterministic canonical key-binding message (SPEC section 9).
+- [HKDF vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/hkdf.json): RFC 5869 HKDF-SHA256 test cases anchoring the key-derivation primitive.
+- [X25519 vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/x25519.json): RFC 7748 X25519 ECDH vectors anchoring the key-agreement primitive.
+- [Ed25519 vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/ed25519.json): RFC 8032 Ed25519 vectors anchoring the signature primitive.
+- [Payload AEAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/payload-aead.json): AES-256-GCM payload encryption with the AVP AAD composition.
+- [Key-wrap vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-wrap.json): Full X25519-HKDF-SHA256-AESGCM-v1 wrap composition anchored to RFC 7748.
 
 ## Project
 

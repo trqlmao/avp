@@ -22,12 +22,12 @@ HTTP/JSON profile against in-memory state and is illustrative, not production.
 | Java | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
 | Go | [`go/server/`](go/server/) | [`go/client/`](go/client/) |
 
-Most examples carry the envelope and wrapped-key crypto as opaque placeholders (only
-the Ed25519 auth is real); the real constructions live in the
-[`../vectors/`](../vectors/). The [Go example](go/) is the exception: it implements
-the payload AEAD and the X25519 key wrap (SPEC §4) for real, end to end, and verifies
-them byte-for-byte against those vectors, so it doubles as a worked reference for the
-cryptographic core.
+All five examples implement the real envelope and key-wrap crypto (payload AEAD and
+X25519-HKDF-SHA256-AESGCM-v1), each verified byte-for-byte against
+[`../vectors/`](../vectors/). Cross-language wire compatibility is checked continuously
+by the `examples-interop` workflow: each language's client runs against the Go reference
+server, and the Go reference client runs against each language's server. Go and TypeScript
+are the fullest worked references for the cryptographic core.
 
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
 [`../vectors/`](../vectors/)). More languages are welcome; see
