@@ -6,6 +6,18 @@ implementation's version.
 
 ## [Unreleased]
 
+## [0.4] - 2026-07-28
+
+Refresh-token sharing, gated by a per-repository opt-in, plus a per-server ban map. The transport
+surface, the cryptographic envelope, and every conformance vector are unchanged from 0.3, so a 0.3
+server needs no cryptographic work to serve 0.4 clients. Two things do not carry over silently. The
+payload's single `ban` object became the `bans` map keyed by server id, a client-to-client payload change
+the server never sees. And because the JSON Schema sets `additionalProperties: false` on both
+`VaultManifest` and `AltAccount`, a peer validating against the 0.3 schema **rejects** the new fields
+rather than ignoring them, so interoperating with a 0.4 peer means adopting the 0.4 schema. Servers
+additionally MUST persist and return `shareRefreshTokens` (SPEC section 5.1): one that drops it disables
+refresh-token sharing for every member of every repository it hosts, and does so without an error.
+
 ### Specification
 
 - Changed the payload `AltAccount.ban` (a single ban object or `null`) to `bans`, a map from a server id

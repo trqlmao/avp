@@ -10,7 +10,7 @@
 openapi: 3.1.0
 info:
   title: Alt Vault Protocol (HTTP/JSON profile)
-  version: "0.3"
+  version: "0.4"
   summary: Zero-knowledge, federated sharing of Minecraft alt accounts.
   description: |
     The HTTP/JSON transport profile for AVP. One path per operation, JSON bodies whose field

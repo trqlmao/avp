@@ -5,7 +5,7 @@ zero-knowledge sync server.
 
 [![License](https://img.shields.io/badge/license-CC--BY--4.0%20%2F%20MIT-blue.svg)](LICENSE)
 [![no-leak](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml/badge.svg)](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml)
-[![spec](https://img.shields.io/badge/spec-v0.3%20draft-orange.svg)](SPEC.md)
+[![spec](https://img.shields.io/badge/spec-v0.4%20draft-orange.svg)](SPEC.md)
 
 Read it online at **[avp.trq.lol](https://avp.trq.lol)**, or jump straight to the
 [specification](SPEC.md), the [proto schema](proto/avp.proto), or the [worked examples](examples/).
@@ -167,7 +167,7 @@ This repository is dual-licensed:
 
 ## Status
 
-Draft v0.3 of the protocol. The wire contract is stable. Open items are tracked in `SPEC.md` §Security
+Draft v0.4 of the protocol. The wire contract is stable. Open items are tracked in `SPEC.md` §Security
 considerations.
 
 ## Activity
