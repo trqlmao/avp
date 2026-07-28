@@ -88,6 +88,15 @@ interface VaultManifest {
   payloadVersion: number;
   /** Every current member of the repo. */
   members: MemberEntry[];
+  /**
+   * Optional refresh-token sharing policy (SPEC section 5.1); absent means
+   * `false` (withhold). The server persists and echoes it without interpreting
+   * it. This server stores the parsed manifest object as sent, so the field
+   * round-trips whether or not it is declared here; a server that copies the
+   * manifest field by field into a fixed record must remember to carry it, or
+   * it discards the policy while still answering 200.
+   */
+  shareRefreshTokens?: boolean;
 }
 
 // ─── In-memory state ──────────────────────────────────────────────────────

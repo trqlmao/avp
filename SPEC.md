@@ -68,7 +68,9 @@ Field names are part of the contract. All values are base64 strings unless typed
 - **`EncryptedEnvelope`** = `{ repoId, payloadVersion: int64, keyEpoch: int64, iv, ciphertext }`, the
   encrypted alt payload at a given version and epoch.
 - **`VaultManifest`** = `{ repoId, schemeId, keyEpoch: int64, payloadVersion: int64,
-  members: MemberEntry[] }`, the non-secret repository metadata.
+  members: MemberEntry[], shareRefreshTokens?: bool }`, the non-secret repository metadata.
+  `shareRefreshTokens` is OPTIONAL and defaults to `false`; it is the repository's refresh-token
+  sharing policy, and a server MUST persist and return it (§5.1).
 
 The data key is per-repo and symmetric. The payload AEAD is AES-256-GCM (12-byte IV, 128-bit tag) or an
 equivalent AEAD named by `schemeId`. The **additional authenticated data (AAD)** bound into every
@@ -123,6 +125,8 @@ the AAD). An **`AltAccount`** is:
   "uuid": "<player uuid>",
   "username": "<last known name>",
   "accessToken": "<credential>",
+  "refreshToken": "<durable credential or null>",
+  "expiresAt": <int64>,
   "type": "MICROSOFT | COOKIE | SESSION | OFFLINE",
   "lastUsed": <int64>,
   "lastUsedBy": "<member id or null>",
@@ -131,6 +135,17 @@ the AAD). An **`AltAccount`** is:
   "sourceUser": "<user within that client or null>"
 }
 ```
+
+**Credentials.** `accessToken` is the credential an implementation replays to use the account, and is
+REQUIRED. `refreshToken` and `expiresAt` are OPTIONAL and describe it: `refreshToken` is a longer-lived
+credential that can mint a fresh `accessToken` without a full interactive re-authentication, and
+`expiresAt` is the epoch-millisecond expiry of `accessToken`, where absent or `0` means unknown. Both are
+plain, opaque, implementer-defined values; this specification defines only the field names, never their
+format or how they are obtained. Like the provenance fields they live **inside the encrypted payload**, so
+the server never sees them. Implementations MUST tolerate their absence (older payloads, accounts that
+have no refresh token, and every payload written for a repository that does not share them, §5.1).
+Whether a `refreshToken` may be written into a repository at all is governed by
+`VaultManifest.shareRefreshTokens`, not by the account.
 
 **Provenance.** `sourceClient` / `sourceUser` identify which client an alt was added from and the user
 within that client (for example a client id and a user handle). They are plain, opaque,
@@ -146,6 +161,68 @@ when the alt has never been observed banned; the server id is a plain, opaque, i
 alt is banned on one server but usable on another. `lastUsedBy` and a ban's `observedBy` are member ids
 (base64 Ed25519 keys) or `null`; they let members coordinate (who used an alt last, who observed it
 banned) so a teammate is not handed an account banned where they want to play.
+
+### 5.1 Refresh-token sharing policy
+
+An `accessToken` buys a bounded session; a `refreshToken` buys durable access to the underlying account
+until it is revoked at the provider that issued it. Sharing the second is a materially larger decision
+than sharing the first, so a repository opts in to it explicitly rather than inheriting it.
+
+`VaultManifest.shareRefreshTokens` is that opt-in: OPTIONAL, boolean, and **`false` by default**. It is
+non-secret repository metadata and sits in the manifest beside `schemeId`, `keyEpoch`, and
+`payloadVersion`. It is not a secret, is not derived from one, and does not weaken the zero-knowledge
+guarantee: it says whether a class of field may be present inside the ciphertext, never what that field
+contains.
+
+**A server MUST persist and return it.** A server MUST store `shareRefreshTokens` as sent on
+`createRepo`, MUST preserve its value across every later `push`, `addMember`, and `removeMember`, and MUST
+return it in every `VaultManifest` it serves. A server MUST NOT drop it, and MUST NOT substitute a default
+for a value it was given.
+
+This is the requirement easiest to miss, because missing it fails silently and in the direction of quiet
+data loss rather than a visible error. A server that deserializes the manifest into a fixed record and
+discards unknown keys answers `200` to a `createRepo` that enabled the policy, having thrown the policy
+away. The next `pull` returns a manifest in which the field is simply absent; every client reads that
+absence as `false` (below) and strips refresh tokens from every payload it writes from then on. The
+repository owner sees a successful write and a repository that quietly withholds the credentials it was
+configured to share, with no error at any step and nothing in the manifest to point at. A server that
+stores the manifest as an opaque document is unaffected by construction. A server that models the
+manifest as a typed record MUST add this field before any repository it hosts can be opted in.
+
+**A client MUST tolerate its absence.** A client MUST accept a manifest carrying no `shareRefreshTokens`
+and an `AltAccount` carrying no `refreshToken` and no `expiresAt`; all three are absent from every
+repository and payload written before this version. A client MUST treat the policy as enabled **only** on
+an explicit `true`, and MUST read an absent, `null`, or otherwise unreadable value as `false`. The
+fail-closed reading is normative: a client that cannot determine the policy withholds, and MUST NOT infer
+permission from silence.
+
+**A client MUST strip when the policy is `false`.** For a repository whose `shareRefreshTokens` is not
+`true`, a client MUST NOT include `refreshToken` or `expiresAt` in any `AltAccount` of a payload it
+encrypts for that repository, and MUST remove both fields from every `AltAccount` of a payload it decrypts
+from that repository before that payload reaches the rest of the client. Stripping on **read** as well as
+on write is what makes the policy hold: a member running a modified or older build can put a refresh token
+into a payload the policy forbids, and read-side stripping means every conformant member discards it
+instead of storing it and re-sharing it on its own next write. A client that stripped only on write would
+honor the policy for its own writes and silently launder every other member's.
+
+**The policy binds members, not the host.** `shareRefreshTokens` is served by the sync server, and it is
+covered by neither a signature nor the payload AAD (§4). A compromised or malicious host can therefore
+flip it from `false` to `true`. Clients that open the repository afterwards build a permissive context,
+stop stripping, and upload refresh tokens on their next push, and the owner who deliberately left the
+policy off receives no signal that it changed. The opt-in constrains what conformant members do with a
+policy they are served, and nothing more. Closing this requires an **authenticated manifest**: an owner
+signature over at least `(repoId, keyEpoch, shareRefreshTokens)`, verified by every member before the
+policy is honored, plus local pinning of the last-seen policy so that a `false` to `true` transition
+requires explicit confirmation instead of taking effect silently. That is a protocol addition, and it is
+deferred to a future version (§12). Until it lands, enabling the policy trusts the host not to rewrite it,
+in addition to trusting the members. See [`THREATMODEL.md`](THREATMODEL.md) (A4).
+
+**Sharing is irrevocable.** Once a refresh token has reached a member's disk it cannot be recalled. Key
+rotation and `removeMember` (§10) protect future payloads only; they do not reach a credential a member
+has already decrypted and stored, exactly as they do not reach an already-decrypted `accessToken`
+(`THREATMODEL.md` A6: there is no backward secrecy). Setting `shareRefreshTokens` back to `false` stops
+future sharing and undoes none of the sharing already done. The only effective revocation is upstream, at
+the provider that issued the token.
 
 ## 6. Transport surface
 
@@ -392,6 +469,14 @@ the residual risks). The open items below are the unresolved pieces of it.
 
 - **Algorithm negotiation.** `schemeId` names the AEAD/KDF/wrap scheme; the choreography for upgrading a
   repository's scheme over its lifetime is not yet specified.
+- **Manifest authentication.** The manifest is served unsigned and is bound by neither a signature nor the
+  payload AAD, so the host can rewrite its non-secret metadata undetected. This matters most for
+  `shareRefreshTokens` (§5.1), where flipping `false` to `true` induces conformant clients to upload
+  refresh tokens the owner chose to withhold. An owner signature over at least
+  `(repoId, keyEpoch, shareRefreshTokens)`, plus local pinning so a policy loosening needs explicit
+  confirmation, would bind it; the choreography (who signs, how the signing key is published and rotated,
+  how ownership transfers, how it interacts with the `addMember` "any member may invite" policy) is not
+  yet specified.
 - **Cross-IdP trust (federation).** §9 lets a client verify member key bindings against a single IdP
   named out of band (the repo locator's `issuerJwksUrl`). In full federation the signing IdP is itself
   per-server; trusting bindings across multiple IdPs (pinned-issuer sets, web-of-trust) is deferred.

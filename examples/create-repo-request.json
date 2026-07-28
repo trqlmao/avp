@@ -4,6 +4,7 @@
     "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
     "keyEpoch": 0,
     "payloadVersion": 1,
+    "shareRefreshTokens": false,
     "members": [
       {
         "ed25519PublicKey": "YWxpY2UtZWQyNTUxOS1wdWJsaWMta2V5",

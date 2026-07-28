@@ -12,8 +12,11 @@ and epoch counters, and opaque signatures. The threat model follows from that si
 
 In rough order of sensitivity:
 
-1. **The alt plaintext.** The account credentials inside the encrypted payload (`accessToken`, and the
-   `username`, `uuid`, `bans`, and provenance fields around it). This is what AVP exists to protect.
+1. **The alt plaintext.** The account credentials inside the encrypted payload (`accessToken`, the
+   OPTIONAL `refreshToken` where a repository shares one, and the `username`, `uuid`, `bans`, and
+   provenance fields around it). This is what AVP exists to protect. A `refreshToken` is the most
+   sensitive value AVP ever carries: it grants durable access to the underlying account rather than one
+   bounded session, which is why sharing it is a per-repository opt-in that defaults to off (SPEC §5.1).
 2. **The repository data key.** The per-repo symmetric AES-256 key that encrypts the payload. Anyone who
    holds it can read every alt in the repo.
 3. **Member private keys.** Each member's Ed25519 identity key (authenticates, and is the member id) and
@@ -89,6 +92,17 @@ but a client with no independent reference cannot, on its own, distinguish "no n
 "the server is hiding it." Detecting equivocation or stale-state attacks requires out-of-band comparison
 or version pinning, which AVP does not currently specify.
 
+A malicious server can also **rewrite the manifest's non-secret metadata**, which is served unsigned and
+is bound by neither a signature nor the payload AAD. The consequential case is the refresh-token sharing
+policy (SPEC §5.1): a host that flips `shareRefreshTokens` from `false` to `true` induces conformant
+clients opening the repository afterwards to stop stripping and to upload refresh tokens on their next
+push, and the owner who deliberately left the policy off gets no signal that it changed. The policy binds
+**members, not the host**: it constrains what conformant members do with a policy they are served. Closing
+this needs an authenticated manifest (an owner signature over at least `repoId`, `keyEpoch`, and the
+policy) plus local pinning, so that a `false` to `true` transition requires explicit confirmation rather
+than taking effect silently. That is deferred (SPEC §12). Until it lands, enabling refresh-token sharing
+extends trust to the host as well as to the members, and the credentials it exposes are durable ones.
+
 ### A5. Malicious or careless member (insider)
 
 *Capability:* a current member with the data key.
@@ -99,7 +113,9 @@ concurrency (a member cannot silently clobber a concurrent write).
 
 *Residual:* a member can exfiltrate every alt they can see, and under the v1 policy any member may invite
 another (the `addMember` authorization is "any member"). Treat repository membership as a full grant of
-read access to everything in that repository, present and future, until the member is removed.
+read access to everything in that repository, present and future, until the member is removed. Where
+`shareRefreshTokens` is on (SPEC §5.1), that grant is also durable: a refresh token a member copies keeps
+working until it is revoked upstream, long after their access to the repository ends.
 
 ### A6. Removed member
 
@@ -111,7 +127,11 @@ AAD makes a stale-epoch envelope fail authentication. They lose access to all **
 
 *Residual:* there is **no backward secrecy**. A removed member keeps every alt they already decrypted
 while a member. Rotation protects new data, not old. Rotate credentials (the alts themselves) out of band
-if a departure requires revoking access to data already shared.
+if a departure requires revoking access to data already shared. A shared `refreshToken` (SPEC §5.1) is the
+worst case: an `accessToken` a departed member kept expires on its own, while a refresh token keeps
+minting new ones until it is revoked at the provider that issued it. Neither key rotation nor turning
+`shareRefreshTokens` back off reaches a credential already on someone's disk; only upstream revocation
+does.
 
 ### A7. Compromised IdP
 
@@ -185,6 +205,9 @@ security review:
 
 - **Freshness and equivocation against a malicious server** (A4): no in-protocol mechanism proves a
   client is seeing the latest, non-forked state.
+- **Unauthenticated manifest metadata** (A4): the manifest is served unsigned and unbound to the payload
+  AAD, so the refresh-token sharing policy (SPEC §5.1) binds members rather than the host. An
+  authenticated manifest plus policy pinning is deferred (SPEC §12).
 - **Single-issuer trust** (A7): cross-IdP trust is unspecified.
 - **No backward secrecy** (A6): removal does not revoke already-seen data.
 - **Metadata exposure to the server** (A3).

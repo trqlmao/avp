@@ -13,6 +13,46 @@ implementation's version.
   This lets a cross-client repository track that an alt is banned on one server but usable on another.
   The change is to the encrypted payload schema (server-invisible); it affects only client-to-client
   payload compatibility.
+- Added optional `VaultManifest.shareRefreshTokens` (boolean, default `false`), a per-repository opt-in
+  to sharing refresh tokens (SPEC section 5.1, `proto` field 6, schema `$defs/VaultManifest`). It is
+  non-secret repository metadata that the server stores and serves alongside `schemeId`, `keyEpoch`, and
+  `payloadVersion`. **A server MUST persist and return it.** A server that deserializes the manifest into
+  a fixed record and drops unknown keys answers `200` while discarding the policy; the next `pull` then
+  reports the field absent, every client reads that absence as `false`, and refresh tokens are stripped
+  from that point on, leaving the owner with a successful write and a repository that silently withholds.
+- Added optional `AltAccount.refreshToken` (string or `null`) and `AltAccount.expiresAt` (int64 epoch
+  millis; absent or `0` means unknown) to the encrypted payload (SPEC section 5, schema
+  `$defs/AltAccount`). A refresh token buys durable access to the underlying account rather than one
+  bounded session, so it is carried only where the repository policy allows it. The server never sees
+  either field.
+- Specified the client duties around the policy (SPEC section 5.1): clients MUST tolerate the absence of
+  all three fields and MUST read an absent, `null`, or unreadable `shareRefreshTokens` as `false` (fail
+  closed, never open), and MUST strip `refreshToken`/`expiresAt` from payloads for a repository whose
+  policy is not `true` on **read** as well as on write, so the policy holds even when a peer runs a
+  modified build. Sharing is irrevocable: key rotation and `removeMember` protect future payloads only,
+  and revocation is upstream at the issuing provider exclusively.
+- Stated the limitation honestly rather than implying the policy is enforced: `shareRefreshTokens` is
+  served by the sync server bound by neither a signature nor the payload AAD, so a compromised or
+  malicious host can flip it and induce clients to upload refresh tokens on their next push with no
+  signal to the owner who left it off. The policy binds members, not the host. Recorded as a new
+  **Manifest authentication** open item (SPEC section 12) and in `THREATMODEL.md` (assets, A4, A5, A6,
+  and the residual-risk list); closing it needs an owner-signed manifest plus local policy pinning and is
+  deferred to a future version.
+
+### Repository
+
+- Fixed the Go reference implementation, which declared `VaultManifest` as a fixed struct and so silently
+  dropped `shareRefreshTokens`: exactly the defect the specification now forbids. Added the field with
+  its `json` tag (no `omitempty`, so the server always states the policy) plus two regression tests, one
+  asserting the policy survives create, pull, push, and `addMember` in the raw response JSON, and one
+  asserting a manifest sent without the key reads back as `false`. The Go server itself needed no change:
+  it stores the manifest whole and mutates only counters and roster.
+- Added `shareRefreshTokens` to the worked `create-repo-request.json` and `pull-response.json` bodies, so
+  the example flow shows the policy being sent and returned. Documented the field on the TypeScript
+  reference server's `VaultManifest` interface, and added a **Manifest passthrough rule** to
+  `IMPLEMENTING.md` section 5 next to the zero-knowledge rule. The Java, Python, and Rust reference
+  servers hold the manifest as an untyped map/dict/`Value` and the gRPC example loads the canonical proto
+  dynamically, so all four carry the new field with no code change.
 
 ## [0.3] - 2026-06-08
 

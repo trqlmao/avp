@@ -51,7 +51,12 @@
         "schemeId": { "type": "string" },
         "keyEpoch": { "type": "integer" },
         "payloadVersion": { "type": "integer" },
-        "members": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } }
+        "members": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } },
+        "shareRefreshTokens": {
+          "type": "boolean",
+          "default": false,
+          "description": "optional repository policy (SPEC 5.1): may members share AltAccount.refreshToken through this repository? Absent means false (withhold). A server MUST persist this and return it in every manifest it serves; dropping it silently disables sharing for every member."
+        }
       }
     },
     "BanInfo": {
@@ -74,6 +79,14 @@
         "uuid": { "type": "string" },
         "username": { "type": "string" },
         "accessToken": { "type": "string" },
+        "refreshToken": {
+          "type": ["string", "null"],
+          "description": "optional durable credential that can mint a fresh accessToken; present only when the repository's shareRefreshTokens is true (SPEC 5.1)"
+        },
+        "expiresAt": {
+          "type": "integer",
+          "description": "optional epoch-millis expiry of accessToken; absent or 0 means unknown"
+        },
         "type": { "type": "string", "enum": ["MICROSOFT", "COOKIE", "SESSION", "OFFLINE"] },
         "lastUsed": { "type": "integer" },
         "lastUsedBy": { "type": ["string", "null"], "description": "member id or null" },

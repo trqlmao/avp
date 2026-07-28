@@ -204,6 +204,20 @@ fields verbatim, as opaque base64 strings. It never decrypts them. The only cryp
 operation the server performs is verifying the Ed25519 challenge signature in the
 `token` step.
 
+### Manifest passthrough rule
+
+Store and return the whole manifest, including `shareRefreshTokens` (SPEC §5.1). If your server models
+the manifest as a typed record rather than an opaque document, that record needs a field for it, and
+every write path (`push`, `addMember`, `removeMember`) must leave the value alone while it updates the
+counters and roster.
+
+Getting this wrong is the quietest bug in the protocol. A deserializer that drops unknown keys answers
+`200` to a `createRepo` that turned sharing on, having thrown the policy away. Nothing errors. The next
+`pull` reports the field absent, every client correctly reads that absence as `false`, and refresh tokens
+are stripped from every payload from then on, so the owner sees a repository that silently withholds what
+they configured it to share. Clients have the mirror-image duty: read an absent policy as `false`, never
+`true`, and strip `refreshToken` and `expiresAt` on decrypt as well as on encrypt.
+
 ## 6. Conformance checklist
 
 1. **Reproduce the deterministic vectors byte-for-byte.** The AAD layout

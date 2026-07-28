@@ -66,6 +66,14 @@ message VaultManifest {
   int64 key_epoch = 3;
   int64 payload_version = 4;
   repeated MemberEntry members = 5;
+  // The repository's refresh-token sharing policy (SPEC §5.1): may members share
+  // an account's refresh token through this repository? Default false, which is
+  // also the proto3 default and the reading a client MUST apply when the field is
+  // absent (withhold). A server MUST persist this and return it in every manifest
+  // it serves: a server that drops it answers OK while discarding the policy, and
+  // every client then reads the absence as false and strips refresh tokens from
+  // that point on, with no error anywhere.
+  bool share_refresh_tokens = 6;
 }
 
 message CreateRepoRequest {

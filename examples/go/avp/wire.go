@@ -42,13 +42,22 @@ type EncryptedEnvelope struct {
 }
 
 // VaultManifest is the public, unencrypted description of a repository: its scheme,
-// the current version and epoch counters, and the member roster.
+// the current version and epoch counters, the member roster, and the refresh-token
+// sharing policy.
+//
+// ShareRefreshTokens is why a typed manifest needs care (SPEC §5.1). A server that
+// models the manifest as a fixed record and omits this field drops it: the create
+// answers 200 having discarded the policy, the next pull reports it absent, every
+// client reads that absence as false, and refresh tokens are stripped from then on
+// with no error at any step. It is serialized without omitempty so the server
+// always states the policy explicitly rather than leaving it to be inferred.
 type VaultManifest struct {
-	RepoID         string        `json:"repoId"`
-	SchemeID       string        `json:"schemeId"`
-	KeyEpoch       int64         `json:"keyEpoch"`
-	PayloadVersion int64         `json:"payloadVersion"`
-	Members        []MemberEntry `json:"members"`
+	RepoID             string        `json:"repoId"`
+	SchemeID           string        `json:"schemeId"`
+	KeyEpoch           int64         `json:"keyEpoch"`
+	PayloadVersion     int64         `json:"payloadVersion"`
+	Members            []MemberEntry `json:"members"`
+	ShareRefreshTokens bool          `json:"shareRefreshTokens"`
 }
 
 // Plaintext is the decrypted payload carried inside an EncryptedEnvelope.
