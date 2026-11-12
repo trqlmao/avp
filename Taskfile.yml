@@ -4,8 +4,7 @@
 # .github/workflows/examples-*.yml job, so "green locally" means "green in CI". Each language
 # is independent; run only the toolchains you have installed.
 #
-# Requirements per target: conformance/typescript -> Bun; go -> Go; python -> Python 3;
-# rust -> Cargo; java -> a JDK. `task test` runs every target and needs them all.
+# Requirements per target: conformance -> Bun; rust -> Cargo; java -> a JDK. `task test` runs every target and needs them all.
 version: "3"
 
 tasks:
@@ -20,9 +19,6 @@ tasks:
     cmds:
       - task: conformance
       - task: vectors-check
-      - task: go
-      - task: typescript
-      - task: python
       - task: rust
       - task: java
 
@@ -52,28 +48,6 @@ tasks:
     env:
       AVP_SERVER_URL: '{{.AVP_SERVER_URL | default "http://localhost:8787"}}'
 
-  go:
-    desc: Vet, test, and build the Go client and server.
-    dir: examples/go
-    cmds:
-      - go vet ./...
-      - go test ./...
-      - go build ./...
-
-  typescript:
-    desc: Typecheck and test the TypeScript client and server.
-    cmds:
-      - for: { var: PROJECTS }
-        cmd: cd examples/typescript/{{.ITEM}} && bun install --frozen-lockfile && bun run typecheck && (grep -q '"test"' package.json && bun run test || echo "no test script in {{.ITEM}}")
-    vars:
-      PROJECTS: client server
-
-  python:
-    desc: Byte-compile and unit-test the Python client and server.
-    cmds:
-      - cd examples/python/server && pip install -r requirements.txt && python -m py_compile server.py test_server.py && python -m unittest test_server.py
-      - cd examples/python/client && pip install -r requirements.txt && python -m py_compile client.py crypto.py && python -m unittest test_crypto.py
-
   rust:
     desc: Build and test the Rust client and server.
     cmds:
@@ -90,8 +64,8 @@ tasks:
     desc: Cross-language wire interop (informational; runs in CI).
     cmds:
       - |
-        echo "The cross-language interop matrix (each lang's client -> Go server, Go client ->"
-        echo "each lang's server) runs in .github/workflows/examples-interop.yml. Reproducing the"
-        echo "full matrix locally needs all five toolchains plus port-readiness polling; the"
+        echo "The cross-language interop matrix (Rust client -> Java server, Java client -> Rust"
+        echo "server) runs in .github/workflows/examples-interop.yml. Reproducing the"
+        echo "full matrix locally needs both toolchains plus port-readiness polling; the"
         echo "workflow is the reference. Per-language correctness is covered by 'task test'."
     silent: true

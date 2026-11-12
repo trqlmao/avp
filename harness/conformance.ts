@@ -8,7 +8,7 @@
  * encrypt never appears in anything the server stores or echoes back.
  *
  * It is server-agnostic: the only AVP-specific code is the client-side crypto, reused from the
- * vector-tested reference at ../examples/typescript/client/src/crypto.ts. A pass means the target server
+ * vector-tested reference at ./crypto.ts. A pass means the target server
  * is conformant to the surface this harness covers; it is a strong supplement to the static vectors in
  * vectors/, not a replacement for them.
  *
@@ -29,7 +29,7 @@ import {
   WRAP_SCHEME_ID,
   type EncryptedEnvelopeFields,
   type WrappedKeyFields,
-} from "../examples/typescript/client/src/crypto.ts";
+} from "./crypto.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 

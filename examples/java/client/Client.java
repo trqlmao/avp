@@ -56,8 +56,8 @@ import java.util.UUID;
  * Micro reference client for the Alt Vault Protocol (AVP), HTTP/JSON profile.
  *
  * <p>This class drives the entire wire contract against a running server so that an implementer can watch
- * every operation happen end to end. It mirrors the sibling TypeScript client
- * ({@code examples/typescript/client/src/client.ts}) step for step: it generates two local Ed25519
+ * every operation happen end to end. It mirrors the Rust reference client
+ * step for step: it generates two local Ed25519
  * identities, authenticates the first, creates a repo, pulls at the known and a stale version, pushes a
  * new version, demonstrates the optimistic-concurrency conflict path, invites a second member, fetches
  * that member's key, and finally authenticates the second member and pulls.
@@ -424,7 +424,7 @@ public final class Client {
         } catch (Exception e) {
             System.err.println("\nClient failed: " + e.getMessage());
             System.err.println("Is a server running? Start one with `java Server.java` in ../server "
-                    + "(or `go run .` in examples/go/server), or set AVP_SERVER_URL.");
+                    + "(or `cargo run` in examples/rust/server), or set AVP_SERVER_URL.");
             System.exit(1);
         }
     }

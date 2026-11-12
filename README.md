@@ -39,7 +39,7 @@ The same messages are defined for two interchangeable encodings, so you can pick
 stack:
 
 - **gRPC profile.** [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are
-  stable. A runnable client and server live in [`examples/grpc/`](examples/grpc/).
+  stable. The gRPC example stopped at 0.4; see the `v0.4` tag.
 - **HTTP/JSON profile.** One HTTP path per operation, JSON bodies whose field names are the proto field
   names in `camelCase`, and a Bearer token in `Authorization`. Message shapes are
   [`schema/avp.schema.json`](schema/avp.schema.json); the full route surface (paths, status codes, error
@@ -107,8 +107,8 @@ bun harness/conformance.ts --server http://localhost:8787
 ```
 
 It prints `PASS`/`FAIL` per check and exits non-zero on any failure. CI
-([`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) runs it against the Go and
-TypeScript reference servers, lints [`openapi.yaml`](openapi.yaml), and checks that the schema, example
+([`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) runs it against the Rust and
+Java reference servers, lints [`openapi.yaml`](openapi.yaml), and checks that the schema, example
 bodies, and vector index stay consistent.
 
 ## For AI agents

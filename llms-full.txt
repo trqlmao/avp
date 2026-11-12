@@ -28,7 +28,7 @@ You are building two things:
 
 The **HTTP/JSON transport profile** (one `POST` per operation, proto field names in `camelCase`,
 `Authorization: Bearer <token>`) is the most portable starting point. A gRPC profile exists (see
-[`proto/avp.proto`](proto/avp.proto), with a runnable example in [`examples/grpc/`](examples/grpc/)) and
+[`proto/avp.proto`](proto/avp.proto)) and
 is interchangeable at the message level; pick one.
 
 Conformance means two things:
@@ -83,7 +83,7 @@ That is: the UTF-8 bytes of `repoId`, then a single byte `0x1F` (ASCII unit sepa
 `payloadVersion` as a big-endian 8-byte two's-complement integer, then `keyEpoch` the same way.
 
 Vectors: [`vectors/aad.json`](vectors/aad.json).
-Reference: `BuildAAD` in [`examples/go/avp/crypto.go`](examples/go/avp/crypto.go).
+Reference: `build_aad` in [`examples/rust/client/src/crypto.rs`](examples/rust/client/src/crypto.rs).
 
 ### 3b. Payload AEAD
 
@@ -95,7 +95,7 @@ The `EncryptedEnvelope` wire type is `{ repoId, payloadVersion, keyEpoch, iv, ci
 all base64.
 
 Vectors: [`vectors/payload-aead.json`](vectors/payload-aead.json).
-Reference: `EncryptPayload` / `DecryptPayload` in [`examples/go/avp/crypto.go`](examples/go/avp/crypto.go).
+Reference: `encrypt_payload` / `decrypt_payload` in [`examples/rust/client/src/crypto.rs`](examples/rust/client/src/crypto.rs).
 
 ### 3c. HKDF-SHA256 (RFC 5869)
 
@@ -105,7 +105,7 @@ empty (it is the ephemeral public key).
 
 Vectors: [`vectors/hkdf.json`](vectors/hkdf.json) - includes RFC 5869 Appendix A.1 and A.3
 (the zero-salt case).
-Reference: `HKDFSHA256` in [`examples/go/avp/crypto.go`](examples/go/avp/crypto.go).
+Reference: `hkdf_sha256` in [`examples/rust/client/src/crypto.rs`](examples/rust/client/src/crypto.rs).
 
 ### 3d. Data-key wrap: X25519-HKDF-SHA256-AESGCM-v1
 
@@ -129,7 +129,7 @@ and the GCM AAD - it must be identical in every implementation.
 
 Vectors: [`vectors/x25519.json`](vectors/x25519.json) (the shared secret) and
 [`vectors/key-wrap.json`](vectors/key-wrap.json) (the full composition).
-Reference: `WrapDataKey` / `UnwrapDataKey` in [`examples/go/avp/crypto.go`](examples/go/avp/crypto.go).
+Reference: `wrap_data_key` / `unwrap_data_key` in [`examples/rust/client/src/crypto.rs`](examples/rust/client/src/crypto.rs).
 
 ### Encoding rule
 
@@ -152,7 +152,7 @@ bindingMessage = UTF8(ed25519PublicKey + "|" + x25519PublicKey)
 where both keys are their standard base64 wire forms. The `|` is a literal U+007C.
 
 Vectors: [`vectors/key-binding-message.json`](vectors/key-binding-message.json).
-Reference: `KeyBindingMessage` in [`examples/go/avp/crypto.go`](examples/go/avp/crypto.go).
+Reference: `keyBindingMessage` in [`harness/crypto.ts`](harness/crypto.ts).
 
 When joining a repository on a server you do not operate, verify `MemberEntry.keyBindingSig`
 against the IdP's public key (from the repo locator's `issuerJwksUrl`) before wrapping the
@@ -250,30 +250,27 @@ they configured it to share. Clients have the mirror-image duty: read an absent 
 4. **Cross-language wire interop.** Run your client against another implementation's server, and
    another implementation's client against your server. The
    [`.github/workflows/examples-interop.yml`](.github/workflows/examples-interop.yml) workflow
-   does this for all five reference examples and is a useful model.
+   does this for both reference examples and is a useful model.
 
 5. **Black-box your server.** Point the conformance harness in [`harness/`](harness/) at your running
    server (`bun harness/conformance.ts --server http://localhost:PORT`). It drives the whole flow and
    asserts the normative MUSTs: the auth failure modes, optimistic-concurrency `conflict`, membership
    authorization, key rotation, and zero-knowledge (the plaintext never surfaces in what the server
-   stores). CI runs it against the Go and TypeScript reference servers.
+   stores). CI runs it against the Rust and Java reference servers.
 
 ## 7. Reference implementations
 
-All five examples implement the real envelope and key-wrap crypto, each verified byte-for-byte
-against `vectors/`. Go and TypeScript are the fullest worked references for the cryptographic
-core and the full server-client flow.
+Both examples implement the real envelope and key-wrap crypto, each verified byte-for-byte
+against `vectors/`. Rust and Java are the worked references for the cryptographic
+core and the full server-client flow. Earlier examples in other languages stopped at 0.4; see the `v0.4` tag.
 
 | Language | Server | Client |
 |---|---|---|
-| Go | [`examples/go/server/`](examples/go/server/) | [`examples/go/client/`](examples/go/client/) |
-| TypeScript | [`examples/typescript/server/`](examples/typescript/server/) | [`examples/typescript/client/`](examples/typescript/client/) |
 | Rust | [`examples/rust/server/`](examples/rust/server/) | [`examples/rust/client/`](examples/rust/client/) |
-| Python | [`examples/python/server/`](examples/python/server/) | [`examples/python/client/`](examples/python/client/) |
 | Java | [`examples/java/server/`](examples/java/server/) | [`examples/java/client/`](examples/java/client/) |
 
-The Go crypto package ([`examples/go/avp/crypto.go`](examples/go/avp/crypto.go)) is a
-self-contained, pure-standard-library implementation of every construction in §3 and §4; read it
+The Rust client crypto module ([`examples/rust/client/src/crypto.rs`](examples/rust/client/src/crypto.rs)) is a
+self-contained implementation of every construction in §3 and §4; read it
 alongside the vectors if you are stuck on a subtlety. The conformance runner
 ([`examples/conformance/`](examples/conformance/)) independently checks every vector with
 Node's `crypto` and is a useful second reference for the byte-level expectations.

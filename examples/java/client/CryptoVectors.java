@@ -1,8 +1,8 @@
 /*
  * Conformance vector test harness for the AVP Java crypto implementation.
  *
- * Loads vectors/*.json (7 files) relative to the working directory and runs the same checks as
- * examples/go/avp/crypto_test.go, printing PASS/FAIL per case with an assertion counter. Exits
+ * Loads vectors/*.json (7 files) relative to the working directory and runs the checks the
+ * vector files define, printing PASS/FAIL per case with an assertion counter. Exits
  * non-zero on any failure.
  *
  * Run from examples/java/client after compiling:
@@ -32,7 +32,7 @@ import java.util.Map;
  * Conformance vector test harness: loads {@code vectors/*.json} and runs byte-for-byte checks
  * against the AVP crypto implementation in {@link Crypto}.
  *
- * <p>Mirrors the 7 test cases from {@code examples/go/avp/crypto_test.go}:
+ * <p>Runs one test case per vector file:
  * <ol>
  *   <li>aad.json: AAD bytes match expected hex</li>
  *   <li>key-binding-message.json: binding message string</li>

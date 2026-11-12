@@ -40,16 +40,15 @@ repo with Jekyll. The README is the home page.
   `bun vectors/generate.ts --check` is the provenance/drift gate (CI runs it; it
   also owns `negative.json` via `--write`) and does not rewrite the reviewed
   positive files.
-- `examples/` are illustrative reference clients and servers (Go, TypeScript,
-  Rust, Python, Java) for the HTTP/JSON profile, plus `examples/grpc/` (a
-  TypeScript client and server that load the canonical proto for the gRPC
-  profile) and a Node conformance runner that also checks
-  schema/example/index/openapi consistency. They are not production code.
+- `examples/` are illustrative reference clients and servers (Rust, Java) for
+  the HTTP/JSON profile, plus a Node conformance runner that also checks
+  schema/example/index/openapi consistency. They are not production code. The
+  Go, Python, TypeScript and gRPC examples stopped at 0.4 (see the `v0.4` tag).
 - `harness/` is the black-box conformance suite: point it at any running server
   (`bun harness/conformance.ts --server URL`) and it drives the full wire
   contract, asserting the SPEC §3/§6/§10 MUSTs (auth failure modes,
   optimistic-concurrency conflict, membership authorization, key rotation,
-  zero-knowledge). It reuses the vector-tested example crypto; it is the
+  zero-knowledge). It reuses the vector-tested client crypto in `harness/crypto.ts`; it is the
   executable check for a *server*, the vectors are the check for the *crypto*.
 - `THREATMODEL.md` is the adversary model (what AVP defends, what it does not, the
   residual risks). Keep it consistent with SPEC §10 invariants and §12 open items
@@ -95,10 +94,10 @@ AI). The committer is the responsible author.
 - One-command local run: `Taskfile.yml` (go-task). `task test` runs the conformance
   runner and every language's example tests; `task harness` / `task openapi-lint` run
   the server harness and the Spectral lint. Each target mirrors a CI job.
-- CI workflows in `.github/workflows/`: per-language `examples-{go,node,rust,java,python}.yml`,
+- CI workflows in `.github/workflows/`: per-language `examples-{node,rust,java}.yml`,
   the cross-language `examples-interop.yml`, and `conformance.yml` (vector runner +
   Spectral lint of `openapi.yaml` + schema-consistency + the black-box harness against
-  the Go and TypeScript reference servers). `no-leak.yml` is the vendor-neutrality gate.
+  the Rust and Java reference servers). `no-leak.yml` is the vendor-neutrality gate.
 - The Pages site builds on push (no local step required). If you want to preview
   it locally and have Ruby, `bundle exec jekyll serve` renders `_layouts/default.html`
   with `assets/css/style.css`.

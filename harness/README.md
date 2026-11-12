@@ -26,10 +26,10 @@ Exit code is `0` only if every check passes; each check prints `PASS`/`FAIL` wit
 ## How it works
 
 The only AVP-specific code is the client-side crypto, imported from the vector-tested reference at
-[`../examples/typescript/client/src/crypto.ts`](../examples/typescript/client/src/crypto.ts), so the
+[`crypto.ts`](crypto.ts), so the
 harness itself stays a thin wire driver. It runs under [Bun](https://bun.sh) with no install step (only
 Node's built-in `crypto` and global `fetch`). `bun run typecheck` runs `tsc` over it.
 
 A pass certifies the surface this harness covers; it supplements, and does not replace, reproducing the
-[`../vectors/`](../vectors/) in your implementation language. CI runs it against the Go and TypeScript
+[`../vectors/`](../vectors/) in your implementation language. CI runs it against the Rust and Java
 reference servers (`.github/workflows/conformance.yml`).

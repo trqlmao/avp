@@ -4,7 +4,7 @@ A tiny, runnable reference client for the [HTTP/JSON profile](../../../SPEC.md).
 lifecycle against a running server so you can watch every operation happen end to end, including
 real envelope encryption and key wrapping. The source is [`src/main.rs`](src/main.rs) and
 [`src/crypto.rs`](src/crypto.rs). It is a sibling of the
-[Go reference client](../../go/client/) and is wire-compatible with every reference server in
+[Java reference client](../../java/client/) and is wire-compatible with every reference server in
 this repository.
 
 ```sh
@@ -26,7 +26,7 @@ You need a server running first. The sibling [`../server`](../server) is the obv
 cd ../server && cargo run   # listens on http://localhost:8787
 ```
 
-The [Go server](../../go/server/) is wire-compatible and works just as well.
+The [Java server](../../java/server/) is wire-compatible and works just as well.
 
 ## What it does
 

@@ -2,7 +2,7 @@
 
 An in-memory reference server for the [Alt Vault Protocol](../../../SPEC.md), HTTP/JSON profile. It
 implements the whole wire contract so an implementer can point a client at something real. It is a
-sibling of the [TypeScript reference server](../../typescript/server/) and behaves identically.
+sibling of the [Java reference server](../../java/server/) and behaves identically.
 
 > **Illustrative, not for production.** State lives in process memory and is lost on restart, there is
 > no TLS, and the bearer token is an opaque random string mapped to a member id in this same process. A

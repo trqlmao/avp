@@ -2,7 +2,7 @@
  * Integration smoke test for the AVP Java reference server. Dependency-free: it spins the server up on
  * an ephemeral port, drives the real keypair challenge -> token flow with a JDK-generated Ed25519 key,
  * and walks the full repo lifecycle (create, pull, push + conflict, add, fetch, remove) plus the auth and
- * authorization rejection paths. Mirrors examples/typescript/server/test/server.test.ts.
+ * authorization rejection paths.
  *
  * Run on JDK 17+ from this directory:
  *
@@ -33,8 +33,7 @@ import java.util.Map;
  *
  * <p>It spins the server up on an ephemeral port, drives the real keypair challenge -> token flow with a
  * JDK-generated Ed25519 key, and walks the full repo lifecycle (create, pull, push + conflict, add,
- * fetch, remove) plus the authentication and authorization rejection paths. It mirrors
- * {@code examples/typescript/server/test/server.test.ts}.
+ * fetch, remove) plus the authentication and authorization rejection paths.
  *
  * <p>Run on JDK 17+ from this directory:
  *

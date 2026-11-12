@@ -1,8 +1,8 @@
 version: 2
 
-# Dependency update PRs. The TypeScript examples are managed with Bun; Dependabot
+# Dependency update PRs. The Bun projects (`examples/conformance` and `harness`) are managed with Bun; Dependabot
 # has no Bun-lockfile updater, and bumping package.json without updating bun.lock
-# would break the `bun install --frozen-lockfile` CI, so the JS examples are left
+# would break the `bun install --frozen-lockfile` CI, so those projects are left
 # to Bun + the committed frozen lockfile and are intentionally not listed here.
 updates:
   - package-ecosystem: github-actions
@@ -17,15 +17,5 @@ updates:
 
   - package-ecosystem: cargo
     directory: /examples/rust/client
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: pip
-    directory: /examples/python/server
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: pip
-    directory: /examples/python/client
     schedule:
       interval: weekly

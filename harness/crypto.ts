@@ -1,5 +1,5 @@
 /**
- * High-level AVP cryptographic constructions for the TypeScript reference client.
+ * High-level AVP cryptographic constructions for the conformance harness.
  *
  * This module reimplements the low-level primitives from the canonical vector-tested
  * source (`examples/conformance/src/crypto.ts`) using `node:crypto` builtins, and

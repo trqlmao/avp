@@ -3,7 +3,7 @@ name: conformance
 # Executable conformance:
 #   - vectors: reproduce vectors/ and check schema/example/index/openapi consistency (examples/conformance)
 #   - openapi: lint openapi.yaml with Spectral
-#   - black-box: drive the full wire contract against the Go and TypeScript reference servers (harness/)
+#   - black-box: drive the full wire contract against the Rust and Java reference servers (harness/)
 
 on:
   push:
@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        server: [go, typescript]
+        server: [rust, java]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -72,14 +72,16 @@ jobs:
         with:
           bun-version: "1.3.10"
 
-      - uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
-        if: matrix.server == 'go'
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05
+        if: matrix.server == 'rust'
         with:
-          go-version: "1.22"
+          toolchain: stable
 
-      - name: Install TypeScript server deps
-        if: matrix.server == 'typescript'
-        run: bun install --frozen-lockfile --cwd examples/typescript/server
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        if: matrix.server == 'java'
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Run the harness against the ${{ matrix.server }} reference server
         env:
@@ -89,12 +91,12 @@ jobs:
           PORT=19101
 
           case "$SERVER" in
-            go)
-              (cd examples/go/server && PORT=$PORT go run .) &
+            rust)
+              PORT=$PORT cargo run --manifest-path examples/rust/server/Cargo.toml --quiet &
               SRV_PID=$!
               ;;
-            typescript)
-              (cd examples/typescript/server && PORT=$PORT bun run start) &
+            java)
+              (cd examples/java/server && javac Server.java && PORT=$PORT java Server) &
               SRV_PID=$!
               ;;
           esac

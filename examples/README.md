@@ -17,28 +17,20 @@ HTTP/JSON profile against in-memory state and is illustrative, not production.
 
 | Language | Server | Client |
 |---|---|---|
-| TypeScript | [`typescript/server/`](typescript/server/) | [`typescript/client/`](typescript/client/) |
 | Rust | [`rust/server/`](rust/server/) | [`rust/client/`](rust/client/) |
-| Python | [`python/server/`](python/server/) | [`python/client/`](python/client/) |
 | Java | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
-| Go | [`go/server/`](go/server/) | [`go/client/`](go/client/) |
 
-All five examples implement the real envelope and key-wrap crypto (payload AEAD and
+Both examples implement the real envelope and key-wrap crypto (payload AEAD and
 X25519-HKDF-SHA256-AESGCM-v1), each verified byte-for-byte against
 [`../vectors/`](../vectors/). Cross-language wire compatibility is checked continuously
-by the `examples-interop` workflow: each language's client runs against the Go reference
-server, and the Go reference client runs against each language's server. Go and TypeScript
-are the fullest worked references for the cryptographic core.
-
-For the **gRPC profile**, [`grpc/`](grpc/) is a runnable client and server that load the canonical
-[`../proto/avp.proto`](../proto/avp.proto) directly and exercise all six `Vault` RPCs over a gRPC channel
-(the `examples-grpc` workflow runs it end to end). The message objects and crypto are identical to the
-HTTP/JSON examples; only the transport differs.
+by the `examples-interop` workflow: the Rust client runs against the Java server, and the
+Java client runs against the Rust server. The examples in other languages (and the gRPC
+example) stopped at 0.4; see the `v0.4` tag.
 
 Conformance tooling lives in [`conformance/`](conformance/) (it checks the repo's
 [`../vectors/`](../vectors/)). From the repo root, [`task test`](../Taskfile.yml) (go-task) runs the
-conformance suite and every language's example tests in one command; per-language targets
-(`task go`, `task rust`, …) run just one toolchain. More languages are welcome; see
+conformance suite and each example's tests in one command; per-language targets
+(`task rust`, `task java`) run just one toolchain. More languages are welcome; see
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## The cast

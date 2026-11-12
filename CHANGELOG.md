@@ -6,6 +6,8 @@ implementation's version.
 
 ## [Unreleased]
 
+### Removed: the Go, Python, TypeScript, and TypeScript gRPC reference examples. They stopped at 0.4; see the `v0.4` tag.
+
 ## [0.4] - 2026-07-28
 
 Refresh-token sharing, gated by a per-repository opt-in, plus a per-server ban map. The transport
