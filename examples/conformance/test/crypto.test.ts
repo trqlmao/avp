@@ -5,12 +5,11 @@
  *   - RFC 5869 HKDF-SHA256  -> vectors/hkdf.json
  *   - RFC 7748 X25519       -> vectors/x25519.json
  *   - RFC 8032 Ed25519      -> vectors/ed25519.json
- *   - SPEC section 4 AEAD   -> vectors/payload-aead.json
- *   - SPEC section 4 wrap   -> vectors/key-wrap.json
+ *   - SPEC section 4.4 wrap -> vectors/key-wrap.json
  *
  * The RFC cases (hkdf/x25519/ed25519) reproduce published outputs byte-for-byte.
- * The composition cases additionally round-trip (decrypt/unwrap and assert
- * recovery) and the AEAD case asserts that a tampered AAD epoch is rejected.
+ * The key-wrap composition additionally round-trips (unwrap and assert
+ * recovery). The payload AEAD under AAD v2 is covered by test/commit.test.ts.
  * The same vectors are independently cross-checked against the Java reference
  * implementation; see vectors/README.md.
  *
@@ -22,7 +21,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { buildAad } from "../src/constructions.ts";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -44,7 +42,6 @@ import {
   loadEd25519Vectors,
   loadHkdfVectors,
   loadKeyWrapVectors,
-  loadPayloadAeadVectors,
   loadX25519Vectors,
 } from "../src/vectors.ts";
 
@@ -100,36 +97,6 @@ test("Ed25519 (RFC 8032) reproduces vectors/ed25519.json", async (t) => {
       assert.equal(hex(ed25519Sign(priv, msg)), c.signatureHex, "signature");
       // and verifies under the public key
       assert.ok(ed25519Verify(pub, msg, fromHex(c.signatureHex)), "verify");
-    });
-  }
-});
-
-// ---- AES-256-GCM payload AEAD (SPEC section 4) ----
-test("payload AEAD (SPEC section 4) reproduces and round-trips vectors/payload-aead.json", async (t) => {
-  const vector = loadPayloadAeadVectors();
-  assert.ok(vector.cases.length > 0, "expected at least one payload-aead case");
-
-  for (const c of vector.cases) {
-    await t.test(c.name, () => {
-      const key = fromB64(c.keyB64);
-      const iv = fromB64(c.ivB64);
-      const aad = buildAad(c.repoId, c.payloadVersion, c.keyEpoch);
-      const plaintext = Buffer.from(c.plaintextUtf8, "utf8");
-
-      // AAD matches the committed hex (and the aad.json layout).
-      assert.equal(hex(aad), c.aadHex, "AAD layout");
-
-      // re-encrypt is deterministic given key+iv+aad and matches the committed ciphertext.
-      const ct = aesGcmEncrypt(key, iv, aad, plaintext);
-      assert.equal(b64(ct), c.ciphertextB64, "ciphertext||tag");
-
-      // decrypt recovers the plaintext.
-      const recovered = aesGcmDecrypt(key, iv, aad, fromB64(c.ciphertextB64));
-      assert.equal(recovered.toString("utf8"), c.plaintextUtf8, "decrypt round-trip");
-
-      // a tampered AAD epoch is rejected (replay/rollback protection).
-      const tampered = buildAad(c.repoId, c.payloadVersion, c.tamperEpoch);
-      assert.throws(() => aesGcmDecrypt(key, iv, tampered, fromB64(c.ciphertextB64)), "tampered-epoch must fail");
     });
   }
 });

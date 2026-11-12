@@ -5,21 +5,35 @@ or more `cases`. The conformance runner in [`../examples/conformance`](../exampl
 checks every file here with Node's `crypto`.
 
 [`index.json`](index.json) is a machine-readable index of these files: each entry gives the file, its
-`kind` (deterministic / rfc-primitive / composition), the spec section, and the published RFC anchors,
-so a harness can enumerate the vectors instead of hardcoding filenames.
+`kind` (deterministic / rfc-primitive / composition / negative), the spec section, and the published
+anchors, so a harness can enumerate the vectors instead of hardcoding filenames.
+
+## AVP 0.5 construction vectors (generated)
+
+These pin the 0.5 byte constructions. They are derived only from fixed seeds (listed in each file under
+`seeds`) by [`generate.ts`](generate.ts), which owns them.
+
+- [`bip39-english.txt`](bip39-english.txt), the BIP39 English wordlist, a byte copy of the upstream
+  `bitcoin/bips` `bip-0039/english.txt` (2048 words, LF, trailing newline, SHA-256
+  `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`, checked by `generate.ts --check`).
+- [`bip39-owner.json`](bip39-owner.json), the owner identity of SPEC §3.1: entropy to the 24-word mnemonic,
+  the PBKDF2 seed (empty passphrase), and the HKDF owner Ed25519 and X25519 keys. Its `anchors` are three
+  256-bit cases of the Trezor reference vectors (`trezor/python-mnemonic` `vectors.json`, passphrase
+  `TREZOR`), which pin entropy, mnemonic, and seed against an external implementation.
+- [`manifest.json`](manifest.json), a four-state owner-signed chain (genesis, add members, remove a member
+  with a two-id frontier, policy flip) for SPEC §4.1 and §4.2: the CE bytes `S`, the owner signature,
+  `manifestHash`, and the seq 1 `repoId`. The wire lists are stored in descending order so an encoder that
+  does not sort fails.
+- [`commit.json`](commit.json), three commits (root, single parent, three-parent merge) for SPEC §4.3: the
+  header bytes, `commitId`, author signature, AAD v2 bytes, and the AES-256-GCM ciphertext. Each commit
+  cites a `manifest.json` state; the removal frontier in `manifest.json` names two of these commits.
+
+The CE constructions have no published anchor, so the runner also re-derives every case by a second,
+hand-written assembly of the SPEC layout (raw byte concatenation, independent of the encoder under test).
 
 ## Deterministic construction vectors
 
-These depend only on byte/string construction rules, not on key material, so they are fully specified in
-this repository:
-
-- [`aad.json`](aad.json), the additional-authenticated-data layout from SPEC §4:
-  `AAD = UTF8(repoId) || 0x1F || int64BE(payloadVersion) || int64BE(keyEpoch)`. Each case gives the
-  inputs and the expected AAD as lowercase hex.
-- [`key-binding-message.json`](key-binding-message.json), the canonical key-binding message from
-  SPEC §9: `utf8(ed25519PublicKey + "|" + x25519PublicKey)`. Each case gives the inputs and the expected
-  message as a UTF-8 string.
-- [`federation.json`](federation.json), the federation handshake and addressing from SPEC §8. Unlike the
+- [`federation.json`](federation.json), the join tokens and addressing (SPEC §11). Unlike the
   others it uses top-level `tokens` and `uris` arrays rather than `cases`. Each token case (the invite
   request and the repo locator) is a **decode oracle**: base64url-decoding `base64url` MUST yield
   `decoded`. `canonicalJson` is the recommended minified encoding (members in the order shown) and
@@ -48,17 +62,12 @@ implementation reproduces a known-good output and cannot drift on the primitive 
   `rfc8032-test2` and `rfc8032-test3` are the RFC 8032 §7.1 vectors. The runner derives the public key
   from the seed, reproduces the (deterministic) signature byte-for-byte, and verifies it.
 
-## Composition vectors (generated, three-way cross-verified)
+## Composition vectors (three-way cross-verified)
 
-These exercise the full AVP envelope composition (SPEC §4). They embed fixed keys/IVs so they are
+This exercises the default wrap scheme (SPEC §4.4). They embed fixed keys/IVs so they are
 reproducible, and their correctness is established by **three independent sources agreeing byte-for-byte**
 (see "Three-way verification" below):
 
-- [`payload-aead.json`](payload-aead.json), AES-256-GCM payload encryption with the AVP AAD: 12-byte
-  IV, 128-bit tag **appended** to the ciphertext, `AAD = UTF8(repoId) || 0x1F || int64BE(payloadVersion)
-  || int64BE(keyEpoch)`. The runner re-encrypts (deterministic given key+iv+aad) and asserts equality
-  with the committed ciphertext, decrypts and asserts plaintext recovery, and asserts that decryption
-  **fails** when the epoch bound into the AAD is changed (rollback/replay protection).
 - [`key-wrap.json`](key-wrap.json), the default wrap scheme `X25519-HKDF-SHA256-AESGCM-v1`:
   `sharedSecret = X25519(ephemeralPriv, recipientPub)`;
   `KEK = HKDF-SHA256(ikm=sharedSecret, salt=ephemeralPubRaw, info=UTF8("avp/rdk-wrap/v1"), L=32)`;
@@ -81,8 +90,7 @@ independent sources agreeing byte-for-byte** before being committed:
    via the wrap keypairs. The Node runner reproduces every published output exactly.
 2. **The reference implementation (Java)**, the `lol.trq.alts` crypto primitives independently agree
    with every vector: its HKDF and X25519 reproduce the primitive outputs, it verifies (and reproduces)
-   the Ed25519 signatures, its `PayloadCipher` decrypts the payload-aead vector under the AVP AAD and
-   recovers the plaintext (and rejects a tampered epoch), and its `X25519HkdfAesGcmKeyWrap` unwraps the
+   the Ed25519 signatures, and its `X25519HkdfAesGcmKeyWrap` unwraps the
    key-wrap vector and recovers the data key. This was verified with a throwaway harness against the
    library's compiled primitives.
 3. **The Node conformance runner**, reproduces every primitive output and round-trips every composition
@@ -93,15 +101,19 @@ An implementation proves conformance by reproducing the deterministic and RFC-an
 and by round-tripping the composition vectors (decrypting/unwrapping what a peer encrypted/wrapped,
 verifying what a peer signed).
 
+The 0.5 construction vectors (`bip39-owner.json`, `manifest.json`, `commit.json`) are verified by the
+Trezor BIP39 reference vectors and the RFC-anchored primitives, by the Node runner, and by the runner's
+second, hand-written assembly of every CE layout; the rebuilt Rust and Java references reproduce them
+byte-for-byte as their third source.
+
 ## Negative vectors
 
 - [`negative.json`](negative.json), a bank of MUST-reject cases. Each case starts from a valid
-  construction (the seeds of `payload-aead.json`, `key-wrap.json`, and `ed25519.json`) and applies one
-  mutation: a flipped GCM tag, a flipped body bit, truncation, a missing tag, a wrong AAD repoId /
-  payloadVersion / keyEpoch, a wrong data key, a wrong recipient or ephemeral wrap key, a wrong message,
-  or a wrong public key. A conformant implementation MUST reject every case: `payload-decrypt` and
-  `key-unwrap` fail authentication, and `ed25519-verify` returns false. Passing the positive vectors is
-  not enough; an implementation that accepts a tampered or replayed envelope is not conformant. Wire
+  construction (the seeds of `key-wrap.json` and `ed25519.json`) and applies one mutation: a flipped GCM
+  tag, a flipped body bit, truncation, a wrong recipient or ephemeral wrap key, a wrong message, or a wrong
+  public key. A conformant implementation MUST reject every case: `key-unwrap` fails authentication, and
+  `ed25519-verify` returns false. Passing the positive vectors is not enough; an implementation that
+  accepts a tampered input is not conformant. Wire
   base64 strictness is implementation-specific and is intentionally not tested here.
 
 ## Regenerating the vectors
@@ -110,7 +122,9 @@ verifying what a peer signed).
 reference crypto so it cannot drift from the runner.
 
 - `bun vectors/generate.ts --check` re-derives every committed positive vector's value fields from its
-  documented seeds and asserts the committed file matches, then asserts `negative.json` equals the
-  generator's output. This is the provenance and drift gate; CI runs it. It does not rewrite the
-  RFC-anchored and cross-verified positive files (their reviewed prose and formatting are preserved).
-- `bun vectors/generate.ts --write` regenerates `negative.json`, which the generator owns.
+  documented seeds and asserts the committed file matches, checks the wordlist hash and the Trezor anchors,
+  then asserts `negative.json` and the 0.5 construction files equal the generator's output. This is the
+  provenance and drift gate; CI runs it. It does not rewrite the RFC-anchored and cross-verified positive
+  files (their reviewed prose and formatting are preserved).
+- `bun vectors/generate.ts --write` regenerates the files the generator owns: `negative.json`,
+  `bip39-owner.json`, `manifest.json`, and `commit.json`.

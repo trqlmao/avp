@@ -9,6 +9,8 @@
  *   - X25519 ECDH  : RFC 7748 (raw 32-byte little-endian keys, unhashed secret)
  *   - Ed25519      : RFC 8032 (raw 32-byte keys)
  *   - AES-256-GCM  : the payload/key-wrap AEAD (12-byte IV, 128-bit appended tag)
+ *   - SHA-256/512  : FIPS 180-4
+ *   - PBKDF2       : RFC 8018 (HMAC-SHA512, for the BIP39 seed of SPEC section 3.1)
  *
  * Illustrative reference code, not production. SPDX-License-Identifier: MIT
  */
@@ -16,10 +18,12 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   createPrivateKey,
   createPublicKey,
   diffieHellman,
   hkdfSync,
+  pbkdf2Sync,
   sign as edSign,
   verify as edVerify,
   type KeyObject,
@@ -39,6 +43,43 @@ function requireLen(name: string, raw: Buffer, len: number): Buffer {
     throw new Error(`${name} must be ${len} bytes, got ${raw.length}`);
   }
   return raw;
+}
+
+/**
+ * SHA-256 (FIPS 180-4) of the concatenation of `parts`.
+ *
+ * @param parts - The byte strings to hash, in order.
+ * @returns The 32-byte digest.
+ */
+export function sha256(...parts: Uint8Array[]): Buffer {
+  const h = createHash("sha256");
+  for (const p of parts) h.update(p);
+  return h.digest();
+}
+
+/**
+ * SHA-512 (FIPS 180-4) of the concatenation of `parts`.
+ *
+ * @param parts - The byte strings to hash, in order.
+ * @returns The 64-byte digest.
+ */
+export function sha512(...parts: Uint8Array[]): Buffer {
+  const h = createHash("sha512");
+  for (const p of parts) h.update(p);
+  return h.digest();
+}
+
+/**
+ * PBKDF2-HMAC-SHA512 (RFC 8018), as the BIP39 seed derivation uses it (SPEC section 3.1).
+ *
+ * @param password - The password bytes.
+ * @param salt - The salt bytes.
+ * @param iterations - The iteration count.
+ * @param length - The output length in bytes.
+ * @returns The derived key.
+ */
+export function pbkdf2Sha512(password: Buffer, salt: Buffer, iterations: number, length: number): Buffer {
+  return pbkdf2Sync(password, salt, iterations, length, "sha512");
 }
 
 /**
@@ -224,4 +265,31 @@ export const WRAP_SCHEME_ID = "X25519-HKDF-SHA256-AESGCM-v1";
  */
 export function wrapKek(sharedSecret: Buffer, ephemeralPubRaw: Buffer): Buffer {
   return hkdfSha256(sharedSecret, ephemeralPubRaw, WRAP_INFO, 32);
+}
+
+
+/**
+ * Wraps a secret to a recipient with the default wrap scheme (SPEC section 4.4), with the ephemeral
+ * private key and IV supplied by the caller so the result is reproducible. Real clients MUST pick a
+ * fresh random ephemeral key and IV for every wrap; this deterministic form exists for vectors.
+ *
+ * @param recipientPubRaw - The recipient's raw 32-byte X25519 public key.
+ * @param ephemeralPrivRaw - The raw 32-byte ephemeral X25519 private key.
+ * @param iv - The 12-byte AES-GCM IV.
+ * @param secret - The secret to wrap (a 32-byte data key for `avp/rdk-wrap/v1`).
+ * @param info - The scheme label, bound as both the HKDF info and the GCM AAD.
+ * @returns The raw `WrappedKey` fields.
+ */
+export function wrapSecret(
+  recipientPubRaw: Buffer,
+  ephemeralPrivRaw: Buffer,
+  iv: Buffer,
+  secret: Buffer,
+  info: Buffer = WRAP_INFO,
+): { schemeId: string; ephemeralPublicKey: Buffer; iv: Buffer; ciphertext: Buffer } {
+  const eph = importX25519Private(ephemeralPrivRaw);
+  const ephemeralPublicKey = x25519PublicRaw(eph);
+  const shared = x25519(eph, importX25519Public(recipientPubRaw));
+  const kek = hkdfSha256(shared, ephemeralPublicKey, info, 32);
+  return { schemeId: WRAP_SCHEME_ID, ephemeralPublicKey, iv, ciphertext: aesGcmEncrypt(kek, iv, info, secret) };
 }
