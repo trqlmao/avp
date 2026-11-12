@@ -124,7 +124,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/SignedManifest" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "409": { $ref: "#/components/responses/DuplicateRepo" }
         "413": { $ref: "#/components/responses/TooLarge" }
         "429": { $ref: "#/components/responses/QuotaExceeded" }
@@ -152,7 +152,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/PullResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/repos/{repoId}/push:
@@ -179,7 +179,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/PushResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/TooManyHeads" }
         "413": { $ref: "#/components/responses/TooLarge" }
@@ -211,7 +211,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/SignedManifest" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ManifestConflict" }
         "413": { $ref: "#/components/responses/TooLarge" }
@@ -240,7 +240,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/LeaveResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/prepare-join:
@@ -294,7 +294,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/HeadsResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/HostUnauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/ReplicationPaused" }
 
@@ -329,7 +329,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/FetchResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/HostUnauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/ReplicationPaused" }
 
@@ -364,7 +364,7 @@ paths:
               schema: { $ref: "./schema/avp.schema.json#/$defs/OfferResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/HostUnauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/TooLarge" }
         "503": { $ref: "#/components/responses/ReplicationPaused" }
@@ -439,6 +439,14 @@ components:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "bad host request signature", code: unauthorized }
     Forbidden:
+      description: |
+        Authenticated but the caller is not the required key, not a member, or the operation is
+        disallowed by deployment policy (`code: forbidden`).
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "caller is not a member", code: forbidden }
+    ForbiddenOrNotHosted:
       description: |
         Not a member, a commit after the removal cutoff, an epoch mismatch, a held commit, the caller is
         not the required key, or an operation disallowed by policy (`code: forbidden`, or `policy_denied`);

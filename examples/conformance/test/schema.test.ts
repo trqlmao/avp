@@ -258,6 +258,153 @@ const EXPECTED_ROUTES: Record<string, RouteExpectation> = {
   },
 };
 
+// Field types, written once and checked against BOTH the proto parse and the schema property.
+// I = int64 (schema integer), T = bool (boolean), S = string, B = bytes (a base64 string in both
+// profiles: proto string, schema $ref Base64), M:Name = message (schema $ref), a leading [] = repeated.
+const EXPECTED_TYPES: Record<string, Record<string, string>> = {
+  WrappedKey: { scheme_id: "S", ephemeral_public_key: "B", iv: "B", ciphertext: "B" },
+  HostRef: { host_key: "B", locator: "S" },
+  MemberEntry: {
+    ed25519_public_key: "B",
+    x25519_public_key: "B",
+    wrapped_data_key: "M:WrappedKey",
+    key_epoch: "I",
+    home_host_key: "B",
+  },
+  Removal: { member_key: "B", removed_at_seq: "I", frontier: "[]B" },
+  ManifestState: {
+    repo_id: "S",
+    manifest_seq: "I",
+    prev_manifest_hash: "B",
+    owner_key: "B",
+    genesis_nonce: "B",
+    scheme_id: "S",
+    key_epoch: "I",
+    share_refresh_tokens: "T",
+    hosts: "[]M:HostRef",
+    members: "[]M:MemberEntry",
+    removals: "[]M:Removal",
+  },
+  SignedManifest: { state: "M:ManifestState", owner_signature: "B" },
+  Commit: {
+    repo_id: "S",
+    commit_id: "B",
+    parents: "[]B",
+    manifest_seq: "I",
+    manifest_hash: "B",
+    key_epoch: "I",
+    author: "B",
+    iv: "B",
+    ciphertext: "B",
+    author_signature: "B",
+  },
+  LeaveRequest: { repo_id: "S", member_key: "B", at: "I", signature: "B" },
+  LeaveResponse: {},
+  Acceptance: { repo_id: "S", member_key: "B", host_key: "B", expires_at: "I", signature: "B" },
+  CreateRepoRequest: { manifest: "M:SignedManifest", commit: "M:Commit" },
+  PullRequest: { since_manifest_seq: "I", known_heads: "[]B" },
+  PullResponse: { manifests: "[]M:SignedManifest", heads: "[]M:Commit", leaves: "[]M:LeaveRequest" },
+  PushRequest: { commit: "M:Commit" },
+  PushResponse: { accepted: "T", heads: "[]B" },
+  PublishManifestRequest: { manifest: "M:SignedManifest", commit: "M:Commit" },
+  PrepareJoinRequest: { repo_id: "S", member_key: "B" },
+  ManifestTip: { manifest_seq: "I", manifest_hash: "B" },
+  HeadsRequest: { repo_id: "S" },
+  HeadsResponse: { manifest_tip: "M:ManifestTip", heads: "[]B" },
+  FetchRequest: { repo_id: "S", ids: "[]B" },
+  FetchResponse: { manifests: "[]M:SignedManifest", commits: "[]M:Commit", leaves: "[]M:LeaveRequest" },
+  OfferRequest: {
+    repo_id: "S",
+    manifests: "[]M:SignedManifest",
+    commits: "[]M:Commit",
+    leaves: "[]M:LeaveRequest",
+  },
+  RejectedItem: { id: "B", code: "S" },
+  OfferResponse: { accepted: "[]B", rejected: "[]M:RejectedItem" },
+  ChallengeRequest: { ed25519_public_key: "B" },
+  AuthChallenge: { nonce: "B" },
+  TokenRequest: { ed25519_public_key: "B", nonce: "B", signature: "B" },
+  AuthToken: { token: "S", expires_at: "I" },
+};
+
+// The only proto fields declared optional. In the schema the only fields not in required are these
+// plus ManifestState.shareRefreshTokens (SPEC 5.1: absent means false).
+const EXPECTED_PROTO_OPTIONAL = ["PublishManifestRequest.commit"];
+
+// The error code(s) each documented non-200 status carries, per route, from the plan error table
+// and SPEC 10.4. 503 (reference test control) and the discovery 404 carry no AVP error body.
+const FORBIDDEN_CODES = ["forbidden", "not_hosted"];
+const EXPECTED_ERROR_CODES_BY_ROUTE: Record<string, Record<string, readonly string[]>> = {
+  "POST /api/auth/keypair/challenge": { "400": ["bad_request"] },
+  "POST /api/auth/keypair/token": { "400": ["bad_request"], "401": ["unauthorized"] },
+  "POST /v1/repos": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "409": ["duplicate_repo"],
+    "413": ["too_large"],
+    "429": ["quota_exceeded"],
+  },
+  "POST /v1/repos/{repoId}/pull": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+  },
+  "POST /v1/repos/{repoId}/push": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+    "409": ["too_many_heads"],
+    "413": ["too_large"],
+    "422": ["missing_parents"],
+    "429": ["quota_exceeded"],
+  },
+  "POST /v1/repos/{repoId}/manifest": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+    "409": ["manifest_conflict"],
+    "413": ["too_large"],
+    "422": ["missing_parents"],
+    "429": ["quota_exceeded"],
+  },
+  "POST /v1/repos/{repoId}/leave": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+  },
+  "POST /v1/prepare-join": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": ["forbidden"],
+    "429": ["quota_exceeded"],
+  },
+  "POST /v1/host/repos/{repoId}/heads": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+  },
+  "POST /v1/host/repos/{repoId}/fetch": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+  },
+  "POST /v1/host/repos/{repoId}/offer": {
+    "400": ["bad_request"],
+    "401": ["unauthorized"],
+    "403": FORBIDDEN_CODES,
+    "404": ["not_found"],
+    "413": ["too_large"],
+  },
+  "GET /.well-known/avp": {},
+};
+
 // ---------------------------------------------------------------------------------------------
 // Proto parsing
 // ---------------------------------------------------------------------------------------------
@@ -417,6 +564,57 @@ for (const name of Object.keys(EXPECTED_FIELDS)) {
     }
   });
 }
+
+test("EXPECTED_TYPES covers exactly the same fields as EXPECTED_FIELDS", () => {
+  assert.deepEqual(Object.keys(EXPECTED_TYPES).sort(), Object.keys(EXPECTED_FIELDS).sort());
+  for (const [name, fields] of Object.entries(EXPECTED_FIELDS)) {
+    assert.deepEqual(Object.keys(EXPECTED_TYPES[name]).sort(), Object.keys(fields).sort(), name);
+  }
+});
+
+for (const [name, types] of Object.entries(EXPECTED_TYPES)) {
+  test(`field types of ${name} agree between the pinned table, the proto, and the schema`, () => {
+    for (const [fname, token] of Object.entries(types)) {
+      const repeated = token.startsWith("[]");
+      const base = repeated ? token.slice(2) : token;
+      const where = `${name}.${fname}`;
+
+      // proto side: bytes are carried as strings
+      const pf = proto.messages.get(name)!.fields.get(fname)!;
+      const protoType = { I: "int64", T: "bool", S: "string", B: "string" }[base] ?? base.replace(/^M:/, "");
+      assert.equal(pf.type, protoType, `proto type of ${where}`);
+      assert.equal(pf.repeated, repeated, `proto repeated of ${where}`);
+
+      // schema side
+      const prop = defs[name].properties[camel(fname)];
+      const el = repeated ? prop.items : prop;
+      assert.equal(prop.type === "array", repeated, `schema array-ness of ${where}`);
+      if (base === "I") assert.equal(el.type, "integer", `schema type of ${where}`);
+      else if (base === "T") assert.equal(el.type, "boolean", `schema type of ${where}`);
+      else if (base === "S") {
+        assert.equal(el.type, "string", `schema type of ${where}`);
+        assert.equal(el.$ref, undefined, `${where} is a plain string, not a Base64 ref`);
+      } else if (base === "B") assert.equal(el.$ref, "#/$defs/Base64", `schema type of ${where}`);
+      else assert.equal(el.$ref, `#/$defs/${base.slice(2)}`, `schema ref of ${where}`);
+    }
+  });
+}
+
+test("proto optionality: only PublishManifestRequest.commit is optional, and the schema agrees", () => {
+  const optional: string[] = [];
+  for (const [name, msg] of proto.messages) {
+    for (const [fname, f] of msg.fields) if (f.optional) optional.push(`${name}.${fname}`);
+  }
+  assert.deepEqual(optional, EXPECTED_PROTO_OPTIONAL);
+  const notRequired: string[] = [];
+  for (const [name, def] of Object.entries<any>(defs)) {
+    if (!proto.messages.has(name)) continue;
+    for (const p of Object.keys(def.properties)) {
+      if (!(def.required ?? []).includes(p)) notRequired.push(`${name}.${p}`);
+    }
+  }
+  assert.deepEqual(notRequired.sort(), ["ManifestState.shareRefreshTokens", "PublishManifestRequest.commit"]);
+});
 
 test("schema Error codes are exactly the SPEC section 10.4 table plus too_large and policy_denied", () => {
   assert.deepEqual([...defs.Error.properties.code.enum].sort(), [...EXPECTED_ERROR_CODES].sort());
@@ -598,6 +796,33 @@ for (const [route, expected] of Object.entries(EXPECTED_ROUTES)) {
     } else {
       assert.deepEqual(op.security, [], "no bearer token");
     }
+  });
+}
+
+function codesOf(response: any): string[] {
+  const content = resolveRef<any>(response).content?.["application/json"];
+  const codes: string[] = [];
+  if (content?.example?.code) codes.push(content.example.code);
+  for (const ex of Object.values<any>(content?.examples ?? {})) if (ex.value?.code) codes.push(ex.value.code);
+  return codes.sort();
+}
+
+for (const [route, byStatus] of Object.entries(EXPECTED_ERROR_CODES_BY_ROUTE)) {
+  test(`openapi ${route}: each documented status carries the pinned error code(s)`, () => {
+    const [method, path] = route.split(" ");
+    const op = openapi.paths[path][method.toLowerCase()];
+    for (const [status, response] of Object.entries<any>(op.responses)) {
+      if (status === "200") continue;
+      const expected = byStatus[status];
+      if (expected === undefined) {
+        // only statuses that carry no AVP error body may be absent from the table
+        assert.ok(status === "503" || route === "GET /.well-known/avp", `${route} ${status} has no pinned code`);
+        continue;
+      }
+      assert.deepEqual(codesOf(response), [...expected].sort(), `${route} ${status} error code(s)`);
+      for (const c of expected) assert.ok(EXPECTED_ERROR_CODES.includes(c), `${c} is not an Error code`);
+    }
+    for (const status of Object.keys(byStatus)) assert.ok(status in op.responses, `${route} lacks ${status}`);
   });
 }
 
