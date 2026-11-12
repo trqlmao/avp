@@ -541,20 +541,27 @@ The rule is deterministic:
   members and must be invited again; removals made only on the losing chain did not happen and must be made
   again.
 - **Commits citing a losing state** (a verified losing state, §7.2) are re-checked against the winning
-  chain's state at the same `manifestSeq`. The removal cutoff (§7.3) takes precedence: a commit that fails
-  it is rejected (`403 forbidden`), never held. Otherwise the commit is accepted if the winning chain has a
-  state at that seq that lists the author as a member and whose `keyEpoch` equals the commit's `keyEpoch`.
-  Otherwise it is **held** until an owner device decides.
+  chain's state at the same `manifestSeq`, in this order: (1) the removal cutoff (§7.3) takes precedence: a
+  commit that fails it is rejected (`403 forbidden`), never held; (2) the commit is accepted if the winning
+  chain has a state at that seq that lists the author as a member and whose `keyEpoch` equals the commit's
+  `keyEpoch`; (3) the commit is rejected (`403 forbidden`) if it meets the **drop test**: the `keyEpoch` of
+  the host's winning tip exceeds the commit's `keyEpoch`, or the author appears in the tip's `removals` and
+  the commit is not covered by the frontier rule (§7.3); (4) otherwise it is **held** until an owner device
+  decides.
 - **Held commits.** A host MUST store a held commit and MUST NOT treat it as a head, serve it in `pull`,
-  offer it to a peer, or count it against the head bound (§7.4). It answers a client push of it with
-  `403 forbidden`. Every descendant of a held commit is held with it, not dropped. Hosts SHOULD surface held
-  commits to the owner.
+  offer it to a peer, or count it against the head bound (§7.4). The one exception is a rotation commit
+  (§8.3), which is always stored with its state and always returned by `fetch` and carried in `offer` with
+  it, even while held. A host answers a client push of a held commit with `403 forbidden`. Every descendant
+  of a held commit is held with it, not dropped. Hosts SHOULD surface held commits to the owner.
 - **Deciding a held commit.** Each time a host accepts a new state on the winning chain, it MUST re-check
-  every held commit against that state, in this order: the commit is **dropped permanently** if the
-  winning chain's `keyEpoch` exceeds the commit's `keyEpoch`, or if the author appears in `removals` and the
-  commit is not covered by the frontier rule (§7.3) (the owner dropped it); otherwise it is **accepted**,
-  with its held descendants re-checked in turn, if the state lists the author as a member and the state's
-  `keyEpoch` equals the commit's `keyEpoch` (the owner re-invited the author); otherwise it stays held.
+  every held commit against that state, in this order: the commit is **dropped permanently** if it meets the
+  drop test (the owner moved on or removed the author), and every held descendant of it is dropped with it;
+  otherwise it is **accepted**, with its held descendants re-checked in turn, if the state lists the author
+  as a member and the state's `keyEpoch` equals the commit's `keyEpoch` (the owner re-invited the author);
+  otherwise it stays held.
+- **Losing epochs.** A commit written under an epoch raised only on a losing chain is encrypted under a data
+  key the winning chain's members never received. If such a commit is later accepted, clients handle it as
+  an unreadable head (§7.5).
 - A host that switches to a winning chain MUST re-check, by the rules above, every accepted commit that
   cites a state from the fork point on. A commit that becomes held leaves the heads together with its
   descendants, which are held with it; a commit that fails the removal cutoff is dropped with its
@@ -640,9 +647,19 @@ every commit those heads descend from, by any author, stays valid on every host.
 
 ### 7.5 Client checks and old-epoch heads
 
-A client MUST verify each commit it pulls by §7.1 (id and signature) and §7.2 (against its own verified
-chain, including the §6.5 re-check), and MUST NOT merge a head authored by a removed member unless the head's
-id is in that removal's frontier. A client discards a commit that fails these checks.
+A client checks each commit it pulls on its own terms. It never trusts the host's acceptance by itself: what
+authorizes a commit is the author signature plus owner-signed membership at the commit's epoch. A client has
+no notion of a held commit and never needs a losing state. A client MUST verify:
+
+1. **Id and signature.** `commitId` recomputes from the header and `authorSignature` verifies (§7.1).
+2. **Removal cutoff.** The cutoff of §7.3 against the removals of its verified chain. Since a pulled commit
+   is a head, a head authored by a removed member passes only if its id is in that removal's frontier.
+3. **Membership.** If `(manifestSeq, manifestHash)` is the state on the client's verified winning chain at
+   that seq, the author is a member of that state and `keyEpoch` equals that state's `keyEpoch`. Otherwise
+   (the pair is not on the client's chain), the author is a member of at least one state of the client's
+   verified winning chain at or after the cited seq whose `keyEpoch` equals the commit's `keyEpoch`.
+
+A client discards a commit that fails these checks: it does not merge it and never names it as a parent.
 
 A head under an older `keyEpoch` (written concurrently with a rotation) can be read only by members who held
 that epoch's key. Clients SHOULD retain prior epoch data keys locally so they can decrypt such heads and
@@ -728,10 +745,15 @@ and `manifestHash`, its `keyEpoch` MUST equal the new epoch, and its `author` MU
 (`400 bad_request` otherwise). A host MUST record which commit accompanied each epoch-raising state, so it
 can hand the pair on by replication (§9.1).
 
-A host MUST accept the state and its rotation commit **atomically**: it validates the state (§6), then the
-commit against the new state (§7), and stores both or neither. This holds on every path: `publishManifest`
-and replication alike (§9.1). An epoch-raising state received without its rotation commit is rejected with
-`400 bad_request`. A state that does not change `keyEpoch` MAY carry a commit, which is then validated as a
+**Atomicity governs adoption.** A host MUST adopt an epoch-raising state onto its winning chain only together
+with its rotation commit, **atomically**: it validates the state (§6), then the commit against the new state
+(§7), and stores both or neither. This holds on every path: `publishManifest` and replication alike (§9.1).
+An epoch-raising state that would be adopted but arrives without its rotation commit is rejected with
+`400 bad_request`. A rotation commit is always stored with its state and always travels with it in `fetch`
+and `offer`. A host that keeps an epoch-raising state only as a verified losing state (§6.5) keeps its
+rotation commit with it as a held commit. A verified losing state MAY be retained and replicated without its
+rotation commit only when the sender never had it; the receiver then keeps the losing state for manifest
+binding (§7.2) and cannot adopt it onto its chain until the rotation commit arrives. A state that does not change `keyEpoch` MAY carry a commit, which is then validated as a
 push that cites the new state.
 
 ### 8.4 Leave
@@ -775,19 +797,23 @@ rules as a client write; the transport only decides who may talk to it.
 - **`fetch(repoId, ids)`** → `{ manifests: [SignedManifest], commits: [Commit], leaves: [LeaveRequest] }`:
   for each requested id that is a manifest hash (of a winning-chain state or a verified losing state,
   §6.5), that state and every state before it on its chain, in ascending `manifestSeq`, and in `commits` the
-  rotation commit (§8.3) of every epoch-raising state among them; for each requested id that is a commit id,
-  that commit; and every pending leave request of the repository. Ids the sender does not hold are left out.
-  Held commits (§6.5) are not served.
+  rotation commit (§8.3) of every epoch-raising state among them, even while that commit is held; for each
+  requested id that is a commit id, that commit; and every pending leave request of the repository. Ids the
+  sender does not hold are left out. Other held commits (§6.5) are not served.
 - **`offer(repoId, manifests, commits, leaves)`** → `{ accepted: [id], rejected: [{ id, code }] }`: the
   sender pushes items it believes the receiver lacks. An offer that carries an epoch-raising state MUST carry
-  its rotation commit in the same call. The receiver applies the items in dependency order: a commit after
-  the state it cites and after its parents, each epoch-raising state together with its rotation commit as one
-  atomic pair (§8.3, the same rules as `publishManifest`), and leave requests last. States are validated by
+  its rotation commit in the same call (even while that commit is held), unless the state is a verified losing
+  state whose rotation commit the sender never had (§8.3). The receiver applies the items in dependency
+  order: a commit after the state it cites and after its parents, each epoch-raising state it adopts onto its
+  winning chain together with its rotation commit as one atomic pair (§8.3, the same rules as
+  `publishManifest`), a losing epoch-raising state with its rotation commit kept held, and leave requests
+  last. States are validated by
   §6 (including §6.5), commits by §7 without the head bound and without the caller check, and leave requests
   by §8.4 without the caller check. It reports each manifest hash and commit id as accepted or rejected with
   the error code it would have returned to a client (`missing_parents` included); both items of a rejected
-  pair are rejected with the same code. An epoch-raising state offered without its rotation commit is
-  rejected with `400 bad_request`. A leave request that fails validation is dropped.
+  pair are rejected with the same code. An epoch-raising state that the receiver would adopt but that is
+  offered without its rotation commit is rejected with `400 bad_request`. A leave request that fails
+  validation is dropped.
 
 ### 9.2 Serving and catch-up
 
