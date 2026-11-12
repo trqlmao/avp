@@ -13,7 +13,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash, createPublicKey, verify } from "node:crypto";
+import {
+  createDecipheriv,
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  hkdfSync,
+  verify,
+  type KeyObject,
+} from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,6 +115,31 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 function verifyEd25519(pub: Buffer, msg: Buffer, sig: Buffer): boolean {
   const key = createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, pub]), format: "der", type: "spki" });
   return verify(null, msg, key, sig);
+}
+
+// ---- independent node:crypto key handling (RFC 8410 DER prefixes), not src/crypto.ts ----
+
+const X25519_PKCS8 = Buffer.from("302e020100300506032b656e04220420", "hex");
+const X25519_SPKI = Buffer.from("302a300506032b656e032100", "hex");
+const ED25519_PKCS8 = Buffer.from("302e020100300506032b657004220420", "hex");
+const x25519Priv = (raw: Buffer) => createPrivateKey({ key: Buffer.concat([X25519_PKCS8, raw]), format: "der", type: "pkcs8" });
+const x25519Pub = (raw: Buffer) => createPublicKey({ key: Buffer.concat([X25519_SPKI, raw]), format: "der", type: "spki" });
+const rawPub = (k: KeyObject) => Buffer.from((createPublicKey(k).export({ format: "jwk" }) as { x: string }).x, "base64url");
+const edPubFromSeed = (seed: Buffer) =>
+  rawPub(createPrivateKey({ key: Buffer.concat([ED25519_PKCS8, seed]), format: "der", type: "pkcs8" }));
+const xPubFromPriv = (priv: Buffer) => rawPub(x25519Priv(priv));
+
+/** SPEC 4.4 unwrap with node:crypto directly: X25519, HKDF(salt = ephemeral pub, info), GCM(aad = info). */
+function unwrapDirect(recipientPriv: Buffer, w: { ephemeralPublicKey: string; iv: string; ciphertext: string }): Buffer {
+  const info = Buffer.from("avp/rdk-wrap/v1", "utf8");
+  const eph = fromB64(w.ephemeralPublicKey);
+  const shared = diffieHellman({ privateKey: x25519Priv(recipientPriv), publicKey: x25519Pub(eph) });
+  const kek = Buffer.from(hkdfSync("sha256", shared, eph, info, 32));
+  const ct = fromB64(w.ciphertext);
+  const d = createDecipheriv("aes-256-gcm", kek, fromB64(w.iv));
+  d.setAAD(info);
+  d.setAuthTag(ct.subarray(ct.length - 16));
+  return Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
 }
 
 // ---- shuffles ----
@@ -223,6 +257,84 @@ test("manifest chain: prevManifestHash links, genesisNonce empty after seq 1, re
     assert.equal(s.repoId, file.cases[0].signedManifest.state.repoId);
     assert.equal(file.cases[i].expected.repoId, undefined, "repoId is derived only at seq 1");
   }
+  // SPEC 6.1 content rules every state satisfies: the owner is exactly one member, every member's
+  // homeHostKey is a listed host, and every member's keyEpoch equals the state's.
+  for (const c of file.cases) {
+    const s = signedManifestFromWire(c.signedManifest).state;
+    assert.ok(s.hosts.length > 0, `${c.name}: hosts not empty`);
+    assert.equal(s.members.filter((m) => m.ed25519PublicKey.equals(s.ownerKey)).length, 1, `${c.name}: owner is a member`);
+    for (const m of s.members) {
+      assert.ok(s.hosts.some((h) => h.hostKey.equals(m.homeHostKey)), `${c.name}: homeHostKey is in hosts`);
+      assert.equal(m.keyEpoch, s.keyEpoch, `${c.name}: member keyEpoch equals state keyEpoch`);
+    }
+  }
+});
+
+test("manifest seeds: every party's public keys derive from its seed hex; owner equals bip39-owner.json case 0", () => {
+  const s = file.seeds;
+  const bip = JSON.parse(readFileSync(join(root, "vectors", "bip39-owner.json"), "utf8")).cases[0];
+  assert.equal(s.owner.entropyHex, bip.entropyHex);
+  assert.equal(s.owner.ed25519SeedHex, bip.ed25519SeedHex);
+  assert.equal(hex(fromB64(s.owner.ownerKey)), bip.ed25519PublicKeyHex);
+  assert.equal(s.owner.x25519PrivateHex, bip.x25519PrivateHex);
+  assert.equal(hex(fromB64(s.owner.x25519PublicKey)), bip.x25519PublicKeyHex);
+  assert.equal(hex(edPubFromSeed(fromHex(s.owner.ed25519SeedHex))), hex(fromB64(s.owner.ownerKey)));
+  assert.equal(hex(xPubFromPriv(fromHex(s.owner.x25519PrivateHex))), hex(fromB64(s.owner.x25519PublicKey)));
+  const memberBytes: Record<string, string> = { alice: "11", bob: "22", carol: "33" };
+  for (const m of s.members) {
+    assert.equal(m.ed25519SeedHex, memberBytes[m.label].repeat(32), `${m.label} Ed25519 seed`);
+    assert.equal(m.x25519PrivateHex, memberBytes[m.label].repeat(32), `${m.label} X25519 private`);
+    assert.equal(edPubFromSeed(fromHex(m.ed25519SeedHex)).toString("base64"), m.ed25519PublicKey, `${m.label} Ed25519 public`);
+    assert.equal(xPubFromPriv(fromHex(m.x25519PrivateHex!)).toString("base64"), m.x25519PublicKey, `${m.label} X25519 public`);
+  }
+  const hostBytes: Record<string, string> = { a: "a0", b: "b0" };
+  for (const h of s.hosts) {
+    assert.equal(h.ed25519SeedHex, hostBytes[h.label].repeat(32));
+    assert.equal(edPubFromSeed(fromHex(h.ed25519SeedHex)).toString("base64"), h.hostKey, `host ${h.label} key`);
+    assert.equal(h.locator, `${h.label}.vault.example`);
+  }
+  assert.deepEqual(
+    s.dataKeys.map((k) => [k.keyEpoch, k.dataKeyHex]),
+    [
+      [0, "42".repeat(32)],
+      [1, "43".repeat(32)],
+    ],
+  );
+});
+
+test("manifest member wraps open to the epoch's data key (SPEC 4.4, node:crypto directly) and follow wrapDerivation", () => {
+  const s = file.seeds;
+  const parties = [
+    { label: "owner", ed25519PublicKey: s.owner.ownerKey, x25519PublicKey: s.owner.x25519PublicKey, x25519PrivateHex: s.owner.x25519PrivateHex },
+    ...s.members.map((m) => ({ label: m.label, ed25519PublicKey: m.ed25519PublicKey, x25519PublicKey: m.x25519PublicKey!, x25519PrivateHex: m.x25519PrivateHex! })),
+  ];
+  const text = (p: string) => Buffer.from(p, "utf8");
+  let checked = 0;
+  for (const c of raw.cases) {
+    for (const m of c.signedManifest.state.members) {
+      const p = parties.find((x) => x.ed25519PublicKey === m.ed25519PublicKey);
+      assert.ok(p, `${c.name}: member ${m.ed25519PublicKey} is a seeded party`);
+      assert.equal(m.x25519PublicKey, p.x25519PublicKey, `${c.name}/${p.label} X25519 key`);
+      const w = m.wrappedDataKey;
+      assert.equal(w.schemeId, "X25519-HKDF-SHA256-AESGCM-v1");
+      assert.deepEqual(
+        [fromB64(w.ephemeralPublicKey).length, fromB64(w.iv).length, fromB64(w.ciphertext).length],
+        [32, 12, 48],
+        `${c.name}/${p.label} wrap field lengths (SPEC 6.1)`,
+      );
+      const dataKey = s.dataKeys.find((k) => k.keyEpoch === m.keyEpoch);
+      assert.ok(dataKey, `${c.name}/${p.label} epoch ${m.keyEpoch} has a seeded data key`);
+      const opened = unwrapDirect(fromHex(p.x25519PrivateHex), w);
+      assert.equal(hex(opened), dataKey.dataKeyHex, `${c.name}/${p.label} unwraps to the epoch data key`);
+      // wrapDerivation: eph = SHA-256("avp/vectors/wrap-ephemeral/<epoch>/<label>"), iv = SHA-256("avp/vectors/wrap-iv/<epoch>/<label>")[0..12]
+      const ephPriv = createHash("sha256").update(text(`avp/vectors/wrap-ephemeral/${m.keyEpoch}/${p.label}`)).digest();
+      assert.equal(xPubFromPriv(ephPriv).toString("base64"), w.ephemeralPublicKey, `${c.name}/${p.label} ephemeral key`);
+      const iv = createHash("sha256").update(text(`avp/vectors/wrap-iv/${m.keyEpoch}/${p.label}`)).digest().subarray(0, 12);
+      assert.equal(iv.toString("base64"), w.iv, `${c.name}/${p.label} wrap IV`);
+      checked++;
+    }
+  }
+  assert.equal(checked, 1 + 4 + 3 + 3, "every member of every state was checked");
 });
 
 test("manifest remove-member: two-id frontier, epoch bump, removals cumulative into policy-flip", () => {

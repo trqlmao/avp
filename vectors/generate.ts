@@ -525,6 +525,15 @@ const owned: Array<[string, any]> = [
   ["commit.json", generated.commit],
 ];
 
+// --write never rewrites anything while a positive or anchor check fails: a broken primitive, a
+// changed wordlist, or a Trezor anchor mismatch must not regenerate the owned files.
+const preWriteFailures = positives.filter((c) => !c.ok);
+if (write && preWriteFailures.length > 0) {
+  for (const c of preWriteFailures) console.error(`  [DRIFT] ${c.name}  (${c.detail})`);
+  console.error(`\nRefusing to write: ${preWriteFailures.length} check(s) failed. Nothing was written.`);
+  process.exit(1);
+}
+
 if (write) {
   writeFileSync(join(dir, "negative.json"), JSON.stringify(negatives, null, 2) + "\n");
   console.log(`Wrote negative.json (${negatives.cases.length} cases).`);

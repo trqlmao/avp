@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createCipheriv, createHash, createPublicKey, verify } from "node:crypto";
+import { createCipheriv, createHash, createPrivateKey, createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,6 +137,33 @@ test("commits cite manifest.json states by seq and manifestHash", () => {
     assert.equal(hex(fromB64(c.commit.manifestHash)), m.expected.manifestHashHex);
     assert.equal(c.commit.repoId, m.signedManifest.state.repoId);
   }
+});
+
+test("commit authors: public keys derive from their seed hex and match manifest.json parties", () => {
+  const ED25519_PKCS8 = Buffer.from("302e020100300506032b657004220420", "hex");
+  const edPub = (seed: Buffer) =>
+    Buffer.from(
+      (createPublicKey(createPrivateKey({ key: Buffer.concat([ED25519_PKCS8, seed]), format: "der", type: "pkcs8" })).export({ format: "jwk" }) as { x: string }).x,
+      "base64url",
+    );
+  assert.deepEqual(
+    file.seeds.authors.map((a) => a.label),
+    ["owner", "alice", "carol"],
+  );
+  for (const a of file.seeds.authors) {
+    assert.equal(edPub(fromHex(a.ed25519SeedHex)).toString("base64"), a.ed25519PublicKey, `${a.label} public key`);
+    if (a.label === "owner") {
+      assert.equal(a.ed25519SeedHex, manifests.seeds.owner.ed25519SeedHex);
+      assert.equal(a.ed25519PublicKey, manifests.seeds.owner.ownerKey);
+    } else {
+      const m = manifests.seeds.members.find((x) => x.label === a.label);
+      assert.ok(m);
+      assert.equal(a.ed25519SeedHex, m.ed25519SeedHex);
+      assert.equal(a.ed25519PublicKey, m.ed25519PublicKey);
+    }
+  }
+  assert.equal(file.seeds.authors[1].ed25519SeedHex, "11".repeat(32));
+  assert.equal(file.seeds.authors[2].ed25519SeedHex, "33".repeat(32));
 });
 
 test("single-parent commit's parent is the root commit", () => {

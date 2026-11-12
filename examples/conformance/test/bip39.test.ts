@@ -13,7 +13,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash, hkdfSync, pbkdf2Sync } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, hkdfSync, pbkdf2Sync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,6 +170,16 @@ for (const c of owner.cases) {
     const xp = Buffer.from(hkdfSync("sha256", seed, Buffer.alloc(0), Buffer.from("avp/owner/x25519/v1"), 32));
     assert.equal(hex(ed), c.ed25519SeedHex);
     assert.equal(hex(xp), c.x25519PrivateHex);
+    // public keys straight from node:crypto KeyObjects (RFC 8410 PKCS#8 wrappers), not src/crypto.ts
+    const rawPub = (pkcs8Prefix: string, priv: Buffer) =>
+      Buffer.from(
+        (createPublicKey(createPrivateKey({ key: Buffer.concat([fromHex(pkcs8Prefix), priv]), format: "der", type: "pkcs8" })).export({
+          format: "jwk",
+        }) as { x: string }).x,
+        "base64url",
+      );
+    assert.equal(hex(rawPub("302e020100300506032b657004220420", ed)), c.ed25519PublicKeyHex, "Ed25519 public key");
+    assert.equal(hex(rawPub("302e020100300506032b656e04220420", xp)), c.x25519PublicKeyHex, "X25519 public key");
   });
 }
 
