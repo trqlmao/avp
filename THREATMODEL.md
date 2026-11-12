@@ -190,8 +190,10 @@ the same `manifestSeq`.
 *Defended:* the divergence is resolved deterministically and surfaced, not silent. Of the two states at the
 fork point, the one with the bytewise-lower `manifestHash` wins, with every state after it; every host and
 client converges on it (SPEC §6.5). Commits citing a losing state are re-checked against the winning state at
-the same seq: accepted if the author is a member there at the same epoch, otherwise rejected, and held while
-the winning chain has no state at that seq. Hosts and clients SHOULD tell the owner.
+the same seq: accepted if the author is a member there at the same epoch, otherwise held (stored, not a head,
+not served) until an owner device decides, by re-inviting the author at that epoch or by moving on (a later
+epoch or a removal drops it). A commit must cite a state the host has verified as owner-signed, so a made-up
+manifest hash is never accepted. Hosts and clients SHOULD tell the owner.
 
 *Residual:* the losing branch's changes are discarded: members invited only there must be invited again, and
 removals made only there must be made again. Until they are redone, a member the owner meant to remove on
@@ -252,7 +254,9 @@ security review:
   cannot detect it on its own.
 - **Ownership transfer** (A7): `ownerKey` is fixed for a repository's life, so a lost or stolen phrase cannot
   be recovered from inside the repository.
-- **Deletion-marker GC and commit pruning**: markers are kept forever and hosts retain every commit; a safe
+- **Deletion-marker GC, commit pruning, and retention**: markers are kept forever; hosts MAY prune commit
+  bodies, but 0.5 does not define how a pruned commit is served to or verified by a peer that lacks it, so a
+  host that pruned a body cannot bootstrap a new peer for that commit (the reference hosts do not prune); a safe
   collection rule is not specified.
 - **Algorithm negotiation**: `schemeId` names the wrap scheme, but the choreography for upgrading a
   repository's scheme over its lifetime is not specified.

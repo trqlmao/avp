@@ -169,8 +169,10 @@ A CE byte string is the concatenation of these items, in the order a constructio
 | `bool(b)` | one byte, `0x00` for false, `0x01` for true |
 | `count(n)` | `u32BE(n)` |
 
-`u32BE(n)` is the 4-byte big-endian unsigned encoding. Every CE string begins with exactly one `tag`. Every
-key, hash, nonce, IV, signature, and ciphertext goes through `bytes(...)`, never raw. A list is written as
+`u32BE(n)` is the 4-byte big-endian unsigned encoding. Every CE string begins with exactly one `tag`. Inside
+a CE string, every key, hash, nonce, IV, signature, and ciphertext goes through `bytes(...)`, never raw. The
+one raw append in AVP is outside any CE string: `manifestHash` (§4.2) hashes a finished CE string followed
+by the raw 64-byte owner signature. A list is written as
 `count(n)` followed by its `n` elements, sorted by the stated key (§2) before encoding. `CE(tag "L", x, y)`
 is shorthand for the string `tag(L) || x || y`.
 
@@ -458,8 +460,12 @@ checks and discards a state that fails.
 
 ### 6.1 Validating a state
 
-1. **Structure.** The state decodes, its binary fields have the stated lengths, and it has no duplicate
-   (§4.2). Otherwise `400 bad_request`.
+1. **Structure.** The state decodes, has no duplicate (§4.2), and its binary fields have these lengths:
+   `ownerKey`, every `hostKey`, `ed25519PublicKey`, `x25519PublicKey`, `homeHostKey`, and removal
+   `memberKey` 32 bytes; `prevManifestHash` empty at seq 1 and 32 bytes after; `genesisNonce` 16 bytes at
+   seq 1 and empty after; every frontier commit id 32 bytes; every `wrappedDataKey` with a 32-byte
+   `ephemeralPublicKey`, a 12-byte `iv`, and a 48-byte `ciphertext` (the 32-byte data key plus the 16-byte
+   tag); `ownerSignature` 64 bytes. Otherwise `400 bad_request`.
 2. **Owner signature.** `ownerSignature` verifies under `ownerKey` over `S` (§4.2). Otherwise
    `400 bad_request`. A host MUST reject a manifest state not signed by `ownerKey`.
 3. **Genesis** (seq 1 only): §6.2. Otherwise `400 bad_request`.
@@ -505,10 +511,11 @@ state's `manifestHash`. A host accepts a new state from a client (§10) only if 
 ### 6.4 Rollback protection
 
 A client MUST pin, per repository, the `manifestSeq` and `manifestHash` of the highest verified state it has
-accepted. It MUST reject any chain that does not contain its pinned state, unless the chain diverges from
-the client's own verified chain at a seq where it wins under §6.5. A client MUST NOT accept a state older
-than its pin from a host as a replacement tip. A host can therefore not roll a client back, because every
-state needs the owner signature and a winning diverged state needs an owner-signed state at the fork point.
+accepted. It MUST reject any chain that does not contain its pinned state, with one exception: a chain that
+diverges from the client's own verified chain at a fork point at or below the pinned seq and wins there under
+§6.5. Such a winning chain MAY have a lower tip `manifestSeq` than the pin; the client then re-pins to its
+tip. A host can therefore not roll a client back, because every state needs the owner signature and a
+winning diverged chain needs an owner-signed state at the fork point.
 
 `pull` returns the states with `manifestSeq` greater than the client's `sinceManifestSeq` (§10). A client
 whose first returned state does not link to its pinned state MUST pull again with `sinceManifestSeq = 0` and
@@ -523,25 +530,35 @@ The rule is deterministic:
 - **Tie rule.** Of two chains that agree up to `manifestSeq = k - 1` and hold different valid states at
   `manifestSeq = k` (the fork point), the chain whose state at `k` has the **bytewise-lower
   `manifestHash`** wins, together with every state after it on that chain. The other chain's states from `k`
-  on are discarded.
+  on are discarded from the chain. A host MUST retain them as **verified losing states** (each verified by
+  §6.1 rules 1, 2, and 5 and linked by `prevManifestHash` to a verified state) so it can resolve commits that
+  cite them (§7.2), and MUST serve them through replication `fetch` by manifest hash (§9.1).
 - A host that holds the losing chain and receives the winning state at `k` (with every state needed to link
   it) MUST replace its states from `k` on with the winning chain. A host that holds the winning chain MUST
-  reject a losing state with `409 manifest_conflict`. Both hosts therefore converge on the same tip.
+  NOT adopt a losing state into its chain: it answers `409 manifest_conflict` and, if the state verifies,
+  retains it as a verified losing state. Both hosts therefore converge on the same tip.
 - Hosts and clients SHOULD surface the event to the owner. Members invited only on the losing chain are not
   members and must be invited again; removals made only on the losing chain did not happen and must be made
   again.
-- **Commits citing a losing state** are re-checked against the winning chain's state at the same
-  `manifestSeq`, by the rules of §7.2 and §7.3: accepted if the author is a member of that state at the same
-  `keyEpoch` (and passes the removal cutoff). If the winning chain has a state at that seq and the author is
-  not a member there at that epoch, the commit is rejected (`403 forbidden`). If the winning chain has no
-  state at that seq yet, the commit is **held**: the host MUST NOT treat it as a head, serve it in `pull`,
-  or offer it to a peer; it answers a push of it with `403 forbidden`; and it MUST re-check it each time it
-  accepts a new manifest state. A held commit is decided by the owner: the next state the owner publishes at
-  that seq either keeps the author (the commit is accepted) or does not (the commit is rejected). A host MAY
-  discard a commit once it is rejected.
-- A host that switches to a winning chain MUST re-check every commit it holds that cites a seq at or after
-  the fork point, and MUST drop from its heads any commit that becomes rejected or held, together with every
-  descendant of it.
+- **Commits citing a losing state** (a verified losing state, §7.2) are re-checked against the winning
+  chain's state at the same `manifestSeq`. The removal cutoff (§7.3) takes precedence: a commit that fails
+  it is rejected (`403 forbidden`), never held. Otherwise the commit is accepted if the winning chain has a
+  state at that seq that lists the author as a member and whose `keyEpoch` equals the commit's `keyEpoch`.
+  Otherwise it is **held** until an owner device decides.
+- **Held commits.** A host MUST store a held commit and MUST NOT treat it as a head, serve it in `pull`,
+  offer it to a peer, or count it against the head bound (§7.4). It answers a client push of it with
+  `403 forbidden`. Every descendant of a held commit is held with it, not dropped. Hosts SHOULD surface held
+  commits to the owner.
+- **Deciding a held commit.** Each time a host accepts a new state on the winning chain, it MUST re-check
+  every held commit against that state, in this order: the commit is **dropped permanently** if the
+  winning chain's `keyEpoch` exceeds the commit's `keyEpoch`, or if the author appears in `removals` and the
+  commit is not covered by the frontier rule (§7.3) (the owner dropped it); otherwise it is **accepted**,
+  with its held descendants re-checked in turn, if the state lists the author as a member and the state's
+  `keyEpoch` equals the commit's `keyEpoch` (the owner re-invited the author); otherwise it stays held.
+- A host that switches to a winning chain MUST re-check, by the rules above, every accepted commit that
+  cites a state from the fork point on. A commit that becomes held leaves the heads together with its
+  descendants, which are held with it; a commit that fails the removal cutoff is dropped with its
+  descendants (§7.3).
 
 ## 7. Commit acceptance rules
 
@@ -562,13 +579,15 @@ On the client routes the authenticated caller MUST be a member of the host's tip
 ### 7.2 Membership, epoch, and manifest binding
 
 - **Manifest binding.** A commit cites its manifest state by `manifestSeq` **and** `manifestHash`, so the
-  citation is unambiguous even when owner states diverge (§6.5). If the host's chain holds a state with that
-  `manifestSeq` and `manifestHash`, the rules below use it. If the host's chain holds a different state at
-  that seq, the commit cites a losing state and §6.5 applies (re-check against the host's state at that
-  seq). If the host's chain does not reach that seq, and the host holds the cited state as one it discarded
-  under §6.5, the commit is held (§6.5). Otherwise, if the host does not hold the cited state at all, it
-  answers `422 missing_parents` naming the manifest hash in `detail`, and fetches it from a peer (§9); a
-  fetched state that loses under §6.5 makes the commit held.
+  citation is unambiguous even when owner states diverge (§6.5). The pair `(manifestSeq, manifestHash)` MUST
+  identify a state the host holds and has verified as owner-signed for this repository: either the state on
+  its winning chain at that seq, or a verified losing state (§6.5) with that seq and hash. If it is the
+  winning chain's state, the rules below use it. If it is a verified losing state, §6.5 applies (re-check
+  against the winning chain's state at that seq, or hold). If the host holds no such state, it tries to obtain
+  it from its peers (`fetch` by manifest hash, §9.1) and otherwise answers `422 missing_parents` naming the
+  manifest hash in `detail`, which is retryable like an unknown parent. A cited pair that never resolves to a
+  valid owner-signed state of this repository is never accepted; the §6.5 re-check applies only to verified
+  losing states.
 - **Membership.** The `author` MUST be a member of the cited state. Otherwise `403 forbidden`.
 - **Epoch.** `keyEpoch` MUST equal the cited state's `keyEpoch`. Otherwise `403 forbidden`.
 
@@ -610,7 +629,8 @@ every commit those heads descend from, by any author, stays valid on every host.
   peer (§9), and the client MAY retry. A commit whose parent is held is held (§6.5); a commit whose parent
   the host rejected is rejected with `403 forbidden`.
 - **Heads.** Heads are accepted commits with no accepted children. A host MUST keep every head; a commit
-  stops being a head only when a commit naming it as a parent is accepted (or when §6.5 or §7.3 drops it).
+  stops being a head only when a commit naming it as a parent is accepted (or when §6.5 holds or drops it,
+  or §7.3 drops it).
 - **Head bound.** A host SHOULD bound the number of heads per repository (RECOMMENDED 16). A client `push`,
   and the commit of `publishManifest`, is evaluated by the number of heads it **would leave**: the current
   heads, minus those named in its `parents`, plus one. Only a commit that would leave **more than** the bound
@@ -702,11 +722,17 @@ The owner client MUST set `frontier` to every head it merged into the rotation c
 the removed member it has verified that is not an ancestor of one of those heads. Every commit by the
 removed member that the owner client has seen is then in the frontier or an ancestor of it.
 
+**Rotation commit.** The rotation commit of an epoch-raising state (one whose `keyEpoch` is the previous
+`keyEpoch + 1`) is the commit published together with that state. It MUST cite that state's `manifestSeq`
+and `manifestHash`, its `keyEpoch` MUST equal the new epoch, and its `author` MUST be `ownerKey`
+(`400 bad_request` otherwise). A host MUST record which commit accompanied each epoch-raising state, so it
+can hand the pair on by replication (§9.1).
+
 A host MUST accept the state and its rotation commit **atomically**: it validates the state (§6), then the
-commit against the new state (§7), and stores both or neither. A state that increases `keyEpoch` MUST be
-published with a rotation commit under the new epoch that cites it (`400 bad_request` without one). A state
-that does not change `keyEpoch` MAY carry a commit, which is then validated as a push that cites the new
-state.
+commit against the new state (§7), and stores both or neither. This holds on every path: `publishManifest`
+and replication alike (§9.1). An epoch-raising state received without its rotation commit is rejected with
+`400 bad_request`. A state that does not change `keyEpoch` MAY carry a commit, which is then validated as a
+push that cites the new state.
 
 ### 8.4 Leave
 
@@ -747,15 +773,21 @@ rules as a client write; the transport only decides who may talk to it.
 - **`heads(repoId)`** → `{ manifestTip: { manifestSeq, manifestHash }, heads: [id] }`: the sender's verified
   tip and its current head ids. Held commits (§6.5) are not heads.
 - **`fetch(repoId, ids)`** → `{ manifests: [SignedManifest], commits: [Commit], leaves: [LeaveRequest] }`:
-  for each requested id that is a manifest hash, that state and every state before it on its chain, in
-  ascending `manifestSeq`; for each requested id that is a commit id, that commit; and every pending leave
-  request of the repository. Ids the sender does not hold are left out.
+  for each requested id that is a manifest hash (of a winning-chain state or a verified losing state,
+  §6.5), that state and every state before it on its chain, in ascending `manifestSeq`, and in `commits` the
+  rotation commit (§8.3) of every epoch-raising state among them; for each requested id that is a commit id,
+  that commit; and every pending leave request of the repository. Ids the sender does not hold are left out.
+  Held commits (§6.5) are not served.
 - **`offer(repoId, manifests, commits, leaves)`** → `{ accepted: [id], rejected: [{ id, code }] }`: the
-  sender pushes items it believes the receiver lacks. The receiver validates manifest states first in
-  ascending `manifestSeq` (§6, including §6.5), then commits parents first (§7, without the head bound and
-  without the caller check), then leave requests (§8.4, without the caller check). It reports each manifest
-  hash and commit id as accepted or rejected with the error code it would have returned to a client
-  (`missing_parents` included). A leave request that fails validation is dropped.
+  sender pushes items it believes the receiver lacks. An offer that carries an epoch-raising state MUST carry
+  its rotation commit in the same call. The receiver applies the items in dependency order: a commit after
+  the state it cites and after its parents, each epoch-raising state together with its rotation commit as one
+  atomic pair (§8.3, the same rules as `publishManifest`), and leave requests last. States are validated by
+  §6 (including §6.5), commits by §7 without the head bound and without the caller check, and leave requests
+  by §8.4 without the caller check. It reports each manifest hash and commit id as accepted or rejected with
+  the error code it would have returned to a client (`missing_parents` included); both items of a rejected
+  pair are rejected with the same code. An epoch-raising state offered without its rotation commit is
+  rejected with `400 bad_request`. A leave request that fails validation is dropped.
 
 ### 9.2 Serving and catch-up
 
@@ -765,13 +797,21 @@ rules as a client write; the transport only decides who may talk to it.
 - A host MUST NOT accept a repository whose signed manifest does not list it (§6.1): an `offer` whose tip
   does not list the receiver is rejected with `403 not_hosted`.
 - A host that receives an offer for a repository it does not hold, or one with missing items, gets the rest
-  from the sender: `heads`, then `fetch` for the tip manifest hash and for the commits it lacks, walking
-  `parents` until every commit links to commits it holds. It validates a new repository from genesis (§6.2).
-- **Catch-up after downtime** is `heads` then `fetch`. Hosts run it when a peer reconnects and periodically.
-- A host offers each write it accepts (a manifest state, a commit, a leave request) to every other host in the
-  repository's `hosts` that it can reach.
-- **Retention.** A host MUST retain every commit it has accepted, header and payload, because a peer must be
-  able to fetch any ancestor and recompute its `commitId`. 0.5 defines no pruning (§15).
+  from the sender: `heads`; then `fetch` for the tip manifest hash, which returns the chain with the rotation
+  commit of each epoch-raising state; then `fetch` for the head commits and, walking `parents` (and the
+  states commits cite), for every commit and state it lacks, until every item links to items it holds. It
+  then applies everything in the dependency order of `offer`, with each epoch-raising state and its rotation
+  commit as one atomic pair. It validates a new repository from genesis (§6.2).
+- **Catch-up after downtime** is the same sequence: `heads`, then `fetch`. Hosts run it when a peer
+  reconnects and periodically.
+- A host offers each write it accepts (a manifest state with its rotation commit when it raises the epoch, a
+  commit, a leave request) to every other host in the repository's `hosts` that it can reach.
+- **Retention.** A host MUST retain every manifest state of its winning chain and every verified losing state
+  (§6.5). A host MAY prune the payload body of a commit that is no longer a head and is an ancestor of every
+  head; commit headers SHOULD be kept long enough to answer ancestry questions (including the removal cutoff,
+  §7.3). Because `commitId` covers the ciphertext, 0.5 does not define how a pruned commit is served to, or
+  verified by, a peer that lacks it: a host that has pruned a body cannot bootstrap a new peer for that
+  commit. The reference hosts do not prune. See §15.
 
 ### 9.3 Reference host-to-host profile: signed HTTP/JSON
 
@@ -879,7 +919,7 @@ back to the HTTP status. `detail` is OPTIONAL extra context. The schema is
 
 | Status | `code` | Meaning |
 |---|---|---|
-| `400` | `bad_request` | Malformed body or parameters, a bad signature, or an id or `repoId` that does not recompute |
+| `400` | `bad_request` | Malformed body or parameters, a bad signature, an id or `repoId` that does not recompute, or an epoch-raising state without its rotation commit (§8.3) |
 | `401` | `unauthorized` | Missing or invalid token, an expired or reused challenge nonce, or a bad host request signature |
 | `403` | `forbidden` | Not a member, a commit after the removal cutoff, an epoch mismatch, a held commit, the caller is not the required key, or an operation disallowed by policy (`policy_denied`) |
 | `403` | `not_hosted` | This host is not in the manifest's `hosts` |
@@ -1005,8 +1045,11 @@ as a path segment and a host MUST route on the escaped path.
 
 ### 12.5 Retention
 
-Hosts MUST keep every accepted commit and every manifest state of the winning chain (§9.2). Deletion markers
-in payloads are never garbage-collected in 0.5. The reference hosts prune nothing.
+Hosts MUST keep every manifest state of the winning chain and every verified losing state (§6.5, §9.2). A host
+MAY prune the payload body of a commit that is no longer a head and is an ancestor of every head, and SHOULD
+keep commit headers long enough to answer ancestry questions; 0.5 does not define how a pruned commit is
+served to or verified by a peer that lacks it (§9.2). Deletion markers in payloads are never garbage-collected
+in 0.5. The reference hosts prune nothing.
 
 ## 13. Invariants
 
@@ -1021,10 +1064,15 @@ A conformant implementation MUST uphold:
   policy, or derive the owner key.
 - **Chain integrity.** The manifest chain is append-only per seq, links by hash, and is pinned by every
   client (§6.4); diverged owner states resolve by the tie rule to the same tip everywhere (§6.5).
-- **Commit integrity.** Every accepted commit's id recomputes and its author signature verifies; its author
-  was a member at the epoch of the state it cites by seq and hash (§7.1, §7.2).
+- **Commit integrity.** Every accepted commit's id recomputes and its author signature verifies; the
+  `(manifestSeq, manifestHash)` it cites resolves to a verified owner-signed state of the repository, and its
+  author is a member at the commit's epoch of the winning chain's state at that seq (§7.1, §7.2, §6.5).
+- **Rotation atomicity.** An epoch-raising state and its rotation commit are accepted together or not at all,
+  on `publishManifest` and on replication alike (§8.3, §9.1).
 - **No lost writes.** A host keeps every head; a write on a stale head becomes a fork, never an overwrite;
-  merge is per field and loses no field (§5, §7.4). The only writes dropped are those §6.5 and §7.3 reject.
+  merge is per field and loses no field (§5, §7.4). A commit citing a losing state is held, not dropped,
+  until the owner decides (§6.5). The only writes dropped are those §6.5 drops permanently and those §7.3
+  rejects.
 - **Removal is real.** After removal, a removed member's commits are accepted only within the signed cutoff
   (§7.3), and new commits are under an epoch whose key was never wrapped to it.
 - **Rotation correctness.** A removal increments `keyEpoch`; a removed member's old wrapped key cannot derive
@@ -1095,9 +1143,12 @@ Open items:
   choreography for upgrading a repository's scheme over its lifetime is not specified.
 - **Ownership transfer.** `ownerKey` is fixed for a repository's life. Transferring ownership to another key
   is not specified.
-- **Deletion-marker GC and commit pruning.** Deletion markers are kept forever and hosts retain every commit
-  (§12.5). A safe rule for collecting markers once every head descends from the deletion and every member has
-  synced past it, and for pruning commit bodies without breaking replication, is not specified.
+- **Deletion-marker GC, commit pruning, and retention.** Deletion markers are kept forever (§12.5). A safe
+  rule for collecting them once every head descends from the deletion and every member has synced past it is
+  not specified. Hosts MAY prune commit bodies (§9.2), but because `commitId` covers the ciphertext, 0.5 does
+  not define how a pruned commit is served to or verified by a peer that lacks it, so a host that has pruned
+  a body cannot bootstrap a new peer for that commit. How long commit headers must be kept for ancestry
+  questions is likewise not specified. The reference hosts do not prune.
 - **Host freshness against a withholding host.** A host cannot forge or roll back, but it can withhold new
   heads or manifest states from its own members. A member on another host gets them anyway; a member whose
   only host withholds cannot, on its own, distinguish "nothing new" from "hidden".
