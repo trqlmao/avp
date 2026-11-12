@@ -1,12 +1,16 @@
 {
-  "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
-  "envelope": {
-    "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
-    "payloadVersion": 2,
+  "commit": {
+    "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+    "commitId": "LjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6/L5AAc=",
+    "parents": [
+      "vMPK0djf5u30+wIJEBceJSwzOkFIT1ZdZGtyeYCHjpU="
+    ],
+    "manifestSeq": 2,
+    "manifestHash": "U1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBceJSw=",
     "keyEpoch": 0,
-    "iv": "Hx4dHBsaGRgXFhUUEw",
-    "ciphertext": "ZW5jcnlwdGVkLWFsdC1wYXlsb2FkLXYy"
-  },
-  "expectedPayloadVersion": 1,
-  "rotatedMembers": null
+    "author": "b3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUg=",
+    "iv": "eH+GjZSboqmwt77F",
+    "ciphertext": "naSrsrnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC82",
+    "authorSignature": "wsnQ197l7PP6AQgPFh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm10ew=="
+  }
 }

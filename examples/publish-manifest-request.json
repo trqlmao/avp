@@ -1,0 +1,74 @@
+{
+  "manifest": {
+    "state": {
+      "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+      "manifestSeq": 3,
+      "prevManifestHash": "e4KJkJeepayzusHIz9bd5Ovy+QAHDhUcIyoxOD9GTVQ=",
+      "ownerKey": "JSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4=",
+      "genesisNonce": "",
+      "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+      "keyEpoch": 1,
+      "shareRefreshTokens": false,
+      "hosts": [
+        {
+          "hostKey": "ucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5I=",
+          "locator": "a.vault.example"
+        },
+        {
+          "hostKey": "3uXs8/oBCA8WHSQrMjlAR05VXGNqcXh/ho2Um6KpsLc=",
+          "locator": "b.vault.example"
+        }
+      ],
+      "members": [
+        {
+          "ed25519PublicKey": "JSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4=",
+          "x25519PublicKey": "SlFYX2ZtdHuCiZCXnqWss7rByM/W3eTr8vkABw4VHCM=",
+          "wrappedDataKey": {
+            "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+            "ephemeralPublicKey": "oKeutbzDytHY3+bt9PsCCRAXHiUsMzpBSE9WXWRrcnk=",
+            "iv": "xczT2uHo7/b9BAsS",
+            "ciphertext": "6vH4/wYNFBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBceJSwz"
+          },
+          "keyEpoch": 1,
+          "homeHostKey": "ucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5I="
+        },
+        {
+          "ed25519PublicKey": "b3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUg=",
+          "x25519PublicKey": "lJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm0=",
+          "wrappedDataKey": {
+            "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+            "ephemeralPublicKey": "6vH4/wYNFBsiKTA3PkVMU1phaG92fYSLkpmgp661vMM=",
+            "iv": "DxYdJCsyOUBHTlVc",
+            "ciphertext": "NDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9"
+          },
+          "keyEpoch": 1,
+          "homeHostKey": "3uXs8/oBCA8WHSQrMjlAR05VXGNqcXh/ho2Um6KpsLc="
+        }
+      ],
+      "removals": [
+        {
+          "memberKey": "Vl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC8=",
+          "removedAtSeq": 3,
+          "frontier": [
+            "LjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6/L5AAc="
+          ]
+        }
+      ]
+    },
+    "ownerSignature": "NDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N/m7Q=="
+  },
+  "commit": {
+    "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+    "commitId": "WWBnbnV8g4qRmJ+mrbS7wsnQ197l7PP6AQgPFh0kKzI=",
+    "parents": [
+      "LjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6/L5AAc="
+    ],
+    "manifestSeq": 3,
+    "manifestHash": "foWMk5qhqK+2vcTL0tng5+71/AMKERgfJi00O0JJUFc=",
+    "keyEpoch": 1,
+    "author": "JSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4=",
+    "iv": "o6qxuL/GzdTb4unw",
+    "ciphertext": "yM/W3eTr8vkABw4VHCMqMTg/Rk1UW2JpcHd+hYyTmqGor7a9xMvS2eDn7vX8AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/wYNFBsiKTA3PkVMU1ph",
+    "authorSignature": "7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC82PURLUllgZ251fIOKkZifpg=="
+  }
+}

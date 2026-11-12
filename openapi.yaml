@@ -1,30 +1,36 @@
-# OpenAPI description of the AVP HTTP/JSON transport profile.
+# OpenAPI description of the AVP 0.5 HTTP/JSON transport profile.
 #
 # This is the route-level companion to schema/avp.schema.json (message shapes) and
-# proto/avp.proto (the canonical gRPC profile). It maps every operation in SPEC §6 to a
-# path, method, status set, and body, so an HTTP stack can scaffold a client or server and
-# render interactive docs. Message schemas are referenced from schema/avp.schema.json; that
-# file remains the single source of truth for shapes; do not duplicate them here.
+# proto/avp.proto (the canonical gRPC profile). It maps every operation in SPEC §10 and the
+# host-to-host replication of SPEC §9.3 to a path, method, status set, and body, so an HTTP
+# stack can scaffold a client or server and render interactive docs. Message schemas are
+# referenced from schema/avp.schema.json; that file remains the single source of truth for
+# shapes; do not duplicate them here.
 #
 # OpenAPI 3.1 (JSON Schema 2020-12). SPDX-License-Identifier: MIT
 openapi: 3.1.0
 info:
   title: Alt Vault Protocol (HTTP/JSON profile)
-  version: "0.4"
-  summary: Zero-knowledge, federated sharing of Minecraft alt accounts.
+  version: "0.5"
+  summary: Zero-knowledge, federated, multi-host sharing of Minecraft alt accounts.
   description: |
-    The HTTP/JSON transport profile for AVP. One path per operation, JSON bodies whose field
-    names are the proto field names in `camelCase`, and a bearer token in `Authorization` for
-    every route except the two auth routes. See [SPEC.md](SPEC.md) for normative semantics and
-    [IMPLEMENTING.md](IMPLEMENTING.md) for an implementer guide.
+    The HTTP/JSON transport profile for AVP 0.5. One path per operation, JSON bodies whose field
+    names are the proto field names in `camelCase`, binary values as base64 with padding, and a
+    bearer token in `Authorization` for every client route except the two auth routes. See
+    [SPEC.md](SPEC.md) for normative semantics and [IMPLEMENTING.md](IMPLEMENTING.md) for an
+    implementer guide.
 
-    **Two services, possibly two hosts.** The auth routes (`/api/auth/keypair/*`) are served by
-    the identity provider (IdP); the `/v1/repos/*` routes are the vault server. They may be the
-    same origin or different ones. Tokens are server-local (SPEC §3): cache them keyed by host.
+    **The host is the token issuer.** Every host serves the auth routes
+    (`/api/auth/keypair/*`) and mints its own bearer tokens for any Ed25519 key that signs its
+    challenge. Tokens are host-local (SPEC §3.3): cache them keyed by host key.
 
-    **Conflict is not an error.** A stale-version `push` returns `200` with
-    `PushResponse.conflict = true`, not a 4xx. Every non-2xx body is an
-    [`Error`](schema/avp.schema.json) and is terminal; never retried as a conflict (SPEC §6).
+    **Three kinds of caller.** Clients call the `vault` routes with a bearer token. Joiners call
+    `prepare-join` on their home host. Hosts that replicate a repository call the `replication`
+    routes (`/v1/host/...`) on each other, signed with the three `AVP-Host-*` headers (SPEC §9.3).
+
+    **No conflict outcome.** A push based on stale heads is simply a new fork; the next pull shows
+    the client the heads to merge. Every non-2xx body is an [`Error`](schema/avp.schema.json) and
+    is terminal except `422 missing_parents` (SPEC §10.4).
   license:
     name: MIT
     url: https://github.com/trqlmao/avp/blob/main/LICENSE
@@ -34,18 +40,20 @@ externalDocs:
 
 servers:
   - url: https://{host}
-    description: Any conformant AVP host (IdP and/or vault).
+    description: Any conformant AVP host.
     variables:
       host:
         default: vault.example
 
 tags:
   - name: auth
-    description: Challenge→token identity flow (IdP). No bearer token required.
+    description: Challenge→token identity flow, served by every host. No bearer token required.
   - name: vault
-    description: Repository operations (vault server). Bearer token required.
+    description: Repository operations a client or joiner calls on a host. Bearer token required.
+  - name: replication
+    description: Host-to-host replication (SPEC §9). Signed with the AVP-Host-* headers; no bearer token.
   - name: discovery
-    description: Optional unauthenticated server metadata.
+    description: Optional unauthenticated host metadata.
 
 security:
   - bearerAuth: []
@@ -74,10 +82,10 @@ paths:
     post:
       tags: [auth]
       operationId: token
-      summary: Exchange a signed nonce for a bearer token.
+      summary: Exchange a signed nonce for a bearer token minted by this host.
       description: |
         Sign the **raw nonce bytes** (base64-decode `nonce` first) with the Ed25519 private key.
-        A common mistake is signing the base64 string; the server rejects it.
+        A common mistake is signing the base64 string; the host rejects it.
       security: []
       requestBody:
         required: true
@@ -86,7 +94,7 @@ paths:
             schema: { $ref: "./schema/avp.schema.json#/$defs/TokenRequest" }
       responses:
         "200":
-          description: A bearer token scoped to this host and the caller's memberships.
+          description: A host-local bearer token whose subject is the signing key.
           content:
             application/json:
               schema: { $ref: "./schema/avp.schema.json#/$defs/AuthToken" }
@@ -97,8 +105,12 @@ paths:
     post:
       tags: [vault]
       operationId: createRepo
-      summary: Create a repository from a client-built manifest and initial payload.
-      description: The manifest's sole member MUST be the caller; a duplicate `repoId` is rejected.
+      summary: Create a repository from an owner-signed genesis state and its first commit.
+      description: |
+        The authenticated caller MUST equal the genesis `ownerKey`. The genesis state MUST list this
+        host in `hosts` (`403 not_hosted` otherwise), its `repoId` MUST recompute from the owner key
+        and genesis nonce, and the first commit MUST have no parents. The state and the commit are
+        accepted together or not at all. A duplicate `repoId` is `409 duplicate_repo`.
       requestBody:
         required: true
         content:
@@ -106,13 +118,14 @@ paths:
             schema: { $ref: "./schema/avp.schema.json#/$defs/CreateRepoRequest" }
       responses:
         "200":
-          description: The stored manifest.
+          description: The stored genesis state.
           content:
             application/json:
-              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
+              schema: { $ref: "./schema/avp.schema.json#/$defs/SignedManifest" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/Conflict" }
+        "409": { $ref: "#/components/responses/DuplicateRepo" }
         "413": { $ref: "#/components/responses/TooLarge" }
         "429": { $ref: "#/components/responses/QuotaExceeded" }
 
@@ -120,7 +133,11 @@ paths:
     post:
       tags: [vault]
       operationId: pull
-      summary: Fetch the current manifest and (if changed) the payload envelope.
+      summary: Fetch the manifest states after a pinned seq and the heads the client lacks.
+      description: |
+        `manifests` is every state with `manifestSeq` greater than `sinceManifestSeq`, in ascending
+        order; `heads` is every head commit whose id is not in `knownHeads`; `leaves` is every pending
+        leave request. There is no "unchanged" or "conflict" outcome.
       parameters: [{ $ref: "#/components/parameters/RepoId" }]
       requestBody:
         required: true
@@ -129,12 +146,11 @@ paths:
             schema: { $ref: "./schema/avp.schema.json#/$defs/PullRequest" }
       responses:
         "200":
-          description: |
-            The manifest plus `unchanged`. When `knownPayloadVersion` equals the current version,
-            `unchanged` is `true` and `envelope` is omitted; otherwise `envelope` is present.
+          description: The manifest states, the heads, and the pending leave requests.
           content:
             application/json:
               schema: { $ref: "./schema/avp.schema.json#/$defs/PullResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -143,12 +159,12 @@ paths:
     post:
       tags: [vault]
       operationId: push
-      summary: Write a new payload using optimistic concurrency.
+      summary: Write one commit, a normal write or a merge.
       description: |
-        Applies only if `expectedPayloadVersion` equals the current version. A stale write is **not**
-        an error: the response is `200` with `accepted = false`, `conflict = true`, and the current
-        version; pull, re-apply, and retry. Present `rotatedMembers` to replace the roster atomically
-        with the write.
+        The caller MUST be a member of the tip and the commit's `author`. A push based on stale heads
+        is simply a new fork. `409 too_many_heads` means the push would leave more heads than the
+        bound: merge first. `422 missing_parents` lists unknown parents or a cited manifest state in
+        `detail`; the host fetches them and the client MAY retry.
       parameters: [{ $ref: "#/components/parameters/RepoId" }]
       requestBody:
         required: true
@@ -157,125 +173,255 @@ paths:
             schema: { $ref: "./schema/avp.schema.json#/$defs/PushRequest" }
       responses:
         "200":
-          description: |
-            Write outcome. `accepted = true` on success; `accepted = false, conflict = true` on a
-            stale-version conflict (retryable). Both carry the authoritative `payloadVersion`/`keyEpoch`.
+          description: The commit was accepted; `heads` are the host's heads after it.
           content:
             application/json:
               schema: { $ref: "./schema/avp.schema.json#/$defs/PushResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TooManyHeads" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422": { $ref: "#/components/responses/MissingParents" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
+
+  /v1/repos/{repoId}/manifest:
+    post:
+      tags: [vault]
+      operationId: publishManifest
+      summary: Publish the next owner-signed manifest state, with its rotation commit when it rotates the key.
+      description: |
+        The caller MUST be the `ownerKey`. The state's `manifestSeq` MUST be the tip plus one and its
+        `prevManifestHash` MUST match the tip (`409 manifest_conflict` otherwise). A state that raises
+        `keyEpoch` MUST carry its rotation commit in `commit`; the host adopts both atomically or
+        neither (`400 bad_request` when it is missing). A state that does not change `keyEpoch` MAY
+        carry a commit, which is validated as a push citing the new state.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/PublishManifestRequest" }
+      responses:
+        "200":
+          description: The stored state.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/SignedManifest" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ManifestConflict" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422": { $ref: "#/components/responses/MissingParents" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
+
+  /v1/repos/{repoId}/leave:
+    post:
+      tags: [vault]
+      operationId: leave
+      summary: Publish a signed leave request.
+      description: |
+        The authenticated caller MUST equal `memberKey`, which MUST be a member of the tip and not the
+        owner. The host stores the latest request per member, serves it in `pull`, and replicates it.
+      parameters: [{ $ref: "#/components/parameters/RepoId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/LeaveRequest" }
+      responses:
+        "200":
+          description: The leave request was stored. The body is the empty object.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/LeaveResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/prepare-join:
+    post:
+      tags: [vault]
+      operationId: prepareJoin
+      summary: Ask this host to carry a repository for the caller; returns the host's signed acceptance.
+      description: |
+        The authenticated caller MUST equal `memberKey` (`403 forbidden`). The host's access control
+        and quotas apply here (SPEC §3.3). The acceptance goes into the joiner's invite token (SPEC §8.2).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/PrepareJoinRequest" }
+      responses:
+        "200":
+          description: A host-signed acceptance with a short expiry.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/Acceptance" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
+
+  /v1/host/repos/{repoId}/heads:
+    post:
+      tags: [replication]
+      operationId: replicationHeads
+      summary: The sender's verified manifest tip and its current head ids.
+      description: |
+        Host-signed (SPEC §9.3). Held commits are not heads. The calling host's key MUST be in the
+        repository's `hosts` in the serving host's tip (`403 forbidden`).
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/RepoId" }
+        - { $ref: "#/components/parameters/HostKey" }
+        - { $ref: "#/components/parameters/HostTime" }
+        - { $ref: "#/components/parameters/HostSignature" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/HeadsRequest" }
+      responses:
+        "200":
+          description: The verified tip and the head ids.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/HeadsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/HostUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ReplicationPaused" }
+
+  /v1/host/repos/{repoId}/fetch:
+    post:
+      tags: [replication]
+      operationId: replicationFetch
+      summary: Fetch manifest chains, commits, and pending leave requests by id.
+      description: |
+        Host-signed (SPEC §9.3). Each requested id may be a commit id or a manifest hash. For a
+        manifest hash (of a winning-chain state or a verified losing state) the response carries that
+        state and every state before it on its chain in ascending `manifestSeq`, and in `commits` the
+        rotation commit of every epoch-raising state among them, even while that commit is held. For a
+        commit id it carries that commit. Every pending leave request is included. Ids the host does not
+        hold are left out; other held commits are not served.
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/RepoId" }
+        - { $ref: "#/components/parameters/HostKey" }
+        - { $ref: "#/components/parameters/HostTime" }
+        - { $ref: "#/components/parameters/HostSignature" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/FetchRequest" }
+      responses:
+        "200":
+          description: The requested manifests, commits, and leave requests.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/FetchResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/HostUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ReplicationPaused" }
+
+  /v1/host/repos/{repoId}/offer:
+    post:
+      tags: [replication]
+      operationId: replicationOffer
+      summary: Push items the sender believes the receiver lacks.
+      description: |
+        Host-signed (SPEC §9.3). An offer that carries an epoch-raising state MUST carry its rotation
+        commit in the same call. The receiver applies the items in dependency order and reports each
+        manifest hash and commit id as accepted or rejected with the error code it would have returned
+        to a client; both items of a rejected pair are rejected with the same code. An offer whose tip
+        does not list the receiver is `403 not_hosted`; an offer from a host not in the repository's
+        `hosts` is `403 forbidden`.
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/RepoId" }
+        - { $ref: "#/components/parameters/HostKey" }
+        - { $ref: "#/components/parameters/HostTime" }
+        - { $ref: "#/components/parameters/HostSignature" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./schema/avp.schema.json#/$defs/OfferRequest" }
+      responses:
+        "200":
+          description: Per-item outcomes. A rejected item does not fail the call.
+          content:
+            application/json:
+              schema: { $ref: "./schema/avp.schema.json#/$defs/OfferResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/HostUnauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/TooLarge" }
-        "429": { $ref: "#/components/responses/QuotaExceeded" }
-
-  /v1/repos/{repoId}/add-member:
-    post:
-      tags: [vault]
-      operationId: addMember
-      summary: Record a member whose wrapped key the client computed.
-      parameters: [{ $ref: "#/components/parameters/RepoId" }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "./schema/avp.schema.json#/$defs/MemberAddRequest" }
-      responses:
-        "200":
-          description: The updated manifest.
-          content:
-            application/json:
-              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /v1/repos/{repoId}/remove-member:
-    post:
-      tags: [vault]
-      operationId: removeMember
-      summary: Remove a member, applying the accompanying key rotation atomically.
-      description: |
-        In one atomic step: drop `removedMemberId`, replace the roster with `rewrappedMembers`, store
-        `rotatedEnvelope`, and set the epoch to `newKeyEpoch`. The removed member's old wrapped key
-        cannot derive the new epoch's data key.
-      parameters: [{ $ref: "#/components/parameters/RepoId" }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "./schema/avp.schema.json#/$defs/MemberRemoveRequest" }
-      responses:
-        "200":
-          description: The updated manifest at the new epoch.
-          content:
-            application/json:
-              schema: { $ref: "./schema/avp.schema.json#/$defs/VaultManifest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /v1/repos/{repoId}/member/{memberId}:
-    get:
-      tags: [vault]
-      operationId: fetchMemberKey
-      summary: Look up a single member's public-key entry.
-      description: |
-        `memberId` is the base64 Ed25519 public key. Because it contains `+`, `/`, and `=`, it MUST be
-        percent-encoded, and the server MUST route on the *escaped* path (do not unescape before matching
-        the path separator).
-      parameters:
-        - { $ref: "#/components/parameters/RepoId" }
-        - { $ref: "#/components/parameters/MemberId" }
-      responses:
-        "200":
-          description: The member entry (public keys and any key-binding signature).
-          content:
-            application/json:
-              schema: { $ref: "./schema/avp.schema.json#/$defs/MemberEntry" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ReplicationPaused" }
 
   /.well-known/avp:
     get:
       tags: [discovery]
       operationId: discovery
-      summary: Optional server metadata for resolving an avp:// address (SPEC §8.2).
+      summary: Optional host metadata for resolving an avp:// address (SPEC §11.7).
       security: []
       responses:
         "200":
-          description: Which transport profile(s) the server speaks and which IdP to trust.
+          description: Which transport profile(s) the host speaks, and its host key.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Discovery" }
         "404":
-          description: The server publishes no discovery document.
+          description: The host publishes no discovery document.
 
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: The token from `/api/auth/keypair/token`, server-local (SPEC §3).
+      description: The token from `/api/auth/keypair/token`, host-local (SPEC §3.3).
 
   parameters:
     RepoId:
       name: repoId
       in: path
       required: true
-      description: The opaque repository id, percent-encoded.
+      description: The repository id (22 characters, base64url), percent-encoded as a path segment.
       schema: { type: string }
-    MemberId:
-      name: memberId
-      in: path
+    HostKey:
+      name: AVP-Host-Key
+      in: header
       required: true
-      description: The base64 Ed25519 member id, percent-encoded (contains `+` `/` `=`).
+      description: The sending host's Ed25519 host key, base64. Must be in the receiver's static peer list (SPEC §9.3).
+      schema: { type: string }
+    HostTime:
+      name: AVP-Host-Time
+      in: header
+      required: true
+      description: The sender's current time in epoch milliseconds, decimal. The receiver rejects a skew above 60 seconds.
+      schema: { type: string, pattern: "^[0-9]+$" }
+    HostSignature:
+      name: AVP-Host-Signature
+      in: header
+      required: true
+      description: |
+        Base64 Ed25519 signature by the host key over `CE(tag "avp/host-req/v1", str(method),
+        str(path), bytes(SHA-256(body)), i64(time))` (SPEC §9.3).
       schema: { type: string }
 
   responses:
     BadRequest:
-      description: Malformed body or parameters.
+      description: Malformed body or parameters, a bad signature, an id that does not recompute, or an epoch-raising state without its rotation commit.
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
@@ -286,34 +432,68 @@ components:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "missing or unknown bearer token", code: unauthorized }
-    Forbidden:
-      description: Authenticated but not a member, or disallowed by deployment policy.
+    HostUnauthorized:
+      description: A missing AVP-Host-* header, a key not in the peer list, a bad signature, or a clock skew above 60 seconds.
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
-          example: { error: "caller is not a member", code: forbidden }
+          example: { error: "bad host request signature", code: unauthorized }
+    Forbidden:
+      description: |
+        Not a member, a commit after the removal cutoff, an epoch mismatch, a held commit, the caller is
+        not the required key, or an operation disallowed by policy (`code: forbidden`, or `policy_denied`);
+        or this host is not in the manifest's `hosts` (`code: not_hosted`).
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          examples:
+            forbidden:
+              value: { error: "caller is not a member", code: forbidden }
+            notHosted:
+              value: { error: "this host is not in the manifest's hosts", code: not_hosted }
     NotFound:
-      description: Repo or member not found.
+      description: The repository does not exist on this host.
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "repo not found", code: not_found }
-    Conflict:
+    DuplicateRepo:
       description: A repository with this id already exists.
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "repo already exists", code: duplicate_repo }
+    TooManyHeads:
+      description: The push would leave more heads than the bound (RECOMMENDED 16). Merge first (SPEC §7.4). Terminal.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "too many heads", code: too_many_heads }
+    ManifestConflict:
+      description: The published seq is not tip + 1, the previous hash does not match, or the state loses the tie rule (SPEC §6.3, §6.5). Pull and rebuild.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "manifest seq is not tip + 1", code: manifest_conflict }
+    MissingParents:
+      description: |
+        A parent, a cited manifest state, or a frontier commit is unknown. `detail` lists the ids (commit
+        ids or a manifest hash). The host fetches them and the client MAY retry; this is the one
+        non-terminal error.
+      content:
+        application/json:
+          schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
+          example: { error: "unknown parent", code: missing_parents, detail: "2fPq0yJ3t8aY0kQmH5cVwq9Qe0b1bT3G7m8nZl2oR4s=" }
     QuotaExceeded:
       description: |
-        A deployment resource limit or rate limit was hit (SPEC §7). Terminal; do not retry as a conflict.
+        A deployment resource limit or rate limit was hit (SPEC §12). Terminal; do not retry unchanged.
         Honor `Retry-After` before retrying an idempotent operation.
       headers:
         Retry-After:
-          description: Seconds to wait, or an HTTP-date, before retrying (SPEC §7.2).
+          description: Seconds to wait, or an HTTP-date, before retrying (SPEC §12.2).
           schema: { type: string }
         RateLimit-Limit:
-          description: Optional request quota for the window (SPEC §7.2).
+          description: Optional request quota for the window (SPEC §12.2).
           schema: { type: integer }
         RateLimit-Remaining:
           description: Optional requests remaining in the window.
@@ -326,22 +506,31 @@ components:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "repository quota exceeded", code: quota_exceeded }
     TooLarge:
-      description: The request body exceeds a deployment size limit (SPEC §7.1). Terminal.
+      description: The request body exceeds a deployment size limit (SPEC §12.1). Terminal.
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }
           example: { error: "payload too large", code: too_large }
+    ReplicationPaused:
+      description: |
+        Only when a reference host runs with `AVP_TEST_CONTROL=1` and replication is paused through
+        `POST /v1/test/replication` (SPEC §9.3): every inbound host route answers 503. A production
+        host MUST NOT enable that control route.
 
   schemas:
     Discovery:
       type: object
-      description: Body of GET /.well-known/avp (SPEC §8.2).
-      required: [profiles]
+      description: Body of GET /.well-known/avp (SPEC §11.7).
+      required: [version, profiles, hostKey]
       properties:
+        version:
+          type: string
+          description: The protocol version the host speaks.
+          const: "0.5"
         profiles:
           type: array
           items: { type: string, enum: [grpc, http-json] }
-          description: Transport profile(s) the server speaks.
-        issuerJwksUrl:
+          description: Transport profile(s) the host speaks.
+        hostKey:
           type: string
-          description: The IdP key set whose member key bindings to trust (§9).
+          description: The host's Ed25519 host key, base64. Clients match hosts by this key, never by locator alone.

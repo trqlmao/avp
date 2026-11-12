@@ -1,8 +1,19 @@
-// Alt Vault Protocol (AVP), canonical gRPC schema.
+// Alt Vault Protocol (AVP) 0.5, canonical gRPC schema.
 //
 // This is the source of truth for the gRPC transport profile. Field numbers and
 // names are stable. The HTTP/JSON profile uses the same field names in camelCase
 // (see ../schema/avp.schema.json). See ../SPEC.md for semantics.
+//
+// BREAKING (0.5): this file is not wire-compatible with 0.4. The 0.4 messages
+// EncryptedEnvelope and VaultManifest are deleted. Commit and SignedManifest
+// replace them, MemberAddRequest and MemberRemoveRequest and FetchMemberKey are
+// replaced by owner-signed manifest states published with PublishManifest, and
+// the Replication service is new. There is no 0.4 compatibility code and no
+// migration path.
+//
+// Binary values (keys, hashes, nonces, IVs, signatures, ciphertext, commit ids)
+// are base64 strings with padding, as in the HTTP/JSON profile. A repo_id is the
+// 22-character base64url string of SPEC 4.2.
 //
 // SPDX-License-Identifier: MIT
 
@@ -10,24 +21,37 @@ syntax = "proto3";
 
 package avp;
 
-// The zero-knowledge vault service. The server stores and serves only ciphertext,
-// per-member wrapped keys, public keys, counters, and opaque signatures. It can
-// decrypt nothing. Authentication (challenge/token) yields a bearer token carried
-// in transport metadata; it is typically HTTP/JSON to the identity provider but
-// MAY be offered over gRPC using the auth messages below.
+// The client-facing zero-knowledge vault service. A host stores and serves only
+// ciphertext, wrapped keys, public keys, and opaque signatures. It can decrypt
+// nothing. Authentication (challenge/token) is host-issued (SPEC 3.3) and yields
+// a bearer token carried in transport metadata; it MAY be offered over gRPC using
+// the auth messages below.
 service Vault {
-  // Create a repository from a client-built manifest and initial payload.
-  rpc CreateRepo(CreateRepoRequest) returns (VaultManifest);
-  // Fetch the current manifest and (if changed) payload.
+  // Create a repository from an owner-signed genesis state and its first commit.
+  rpc CreateRepo(CreateRepoRequest) returns (SignedManifest);
+  // Fetch the manifest states after a pinned seq and the heads the client lacks.
   rpc Pull(PullRequest) returns (PullResponse);
-  // Write a new payload using optimistic concurrency.
+  // Write one commit, a normal write or a merge.
   rpc Push(PushRequest) returns (PushResponse);
-  // Record a member whose wrapped key the client computed.
-  rpc AddMember(MemberAddRequest) returns (VaultManifest);
-  // Remove a member, applying the accompanying key rotation atomically.
-  rpc RemoveMember(MemberRemoveRequest) returns (VaultManifest);
-  // Look up a single member's public-key entry.
-  rpc FetchMemberKey(FetchMemberKeyRequest) returns (MemberEntry);
+  // Publish the next owner-signed manifest state, with its rotation commit when
+  // the state raises the key epoch.
+  rpc PublishManifest(PublishManifestRequest) returns (SignedManifest);
+  // Publish a signed leave request.
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+  // Ask the caller's home host to carry a repository; returns its acceptance.
+  rpc PrepareJoin(PrepareJoinRequest) returns (Acceptance);
+}
+
+// Host-to-host replication (SPEC 9). A deployment whose host-to-host profile is
+// gRPC uses this service; the reference hosts use signed HTTP/JSON instead
+// (SPEC 9.3). The messages are identical.
+service Replication {
+  // The sender's verified manifest tip and its current head ids.
+  rpc Heads(HeadsRequest) returns (HeadsResponse);
+  // Manifest chains, commits, and leave requests by id.
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+  // Push items the sender believes the receiver lacks.
+  rpc Offer(OfferRequest) returns (OfferResponse);
 }
 
 // The repository data key encrypted to one member under a named wrap scheme.
@@ -38,92 +62,171 @@ message WrappedKey {
   string ciphertext = 4;           // base64
 }
 
-// A member as the server stores it. The server can read none of the wrapped key.
+// A host that replicates the repository.
+message HostRef {
+  string host_key = 1; // base64 raw 32-byte Ed25519 host key
+  string locator = 2;  // dialing hint, host or host:port
+}
+
+// A member as the owner signed it. The host can read none of the wrapped key.
 message MemberEntry {
+  reserved 5;
+  reserved "key_binding_sig";
+
   string ed25519_public_key = 1;   // base64 raw 32 bytes; the member id
   string x25519_public_key = 2;    // base64 raw 32 bytes
   WrappedKey wrapped_data_key = 3;
   int64 key_epoch = 4;
-  // Optional anti-MITM binding: an identity-provider Ed25519 signature over the
-  // two public keys (base64). Absent when no binding is published.
-  optional string key_binding_sig = 5;
+  string home_host_key = 6;        // base64 host key of the member's home host
 }
 
-// The encrypted alt payload. The header fields are bound into the ciphertext AAD.
-message EncryptedEnvelope {
-  string repo_id = 1;
-  int64 payload_version = 2;
-  int64 key_epoch = 3;
-  string iv = 4;          // base64
-  string ciphertext = 5;  // base64
+// A removed member and its signed removal cutoff (SPEC 7.3). Cumulative.
+message Removal {
+  string member_key = 1;           // base64 Ed25519 key of the removed member
+  int64 removed_at_seq = 2;        // manifest_seq of the state that removed it
+  repeated string frontier = 3;    // base64 commit ids
 }
 
-// Non-secret repository metadata.
-message VaultManifest {
+// One owner-signed manifest state (SPEC 4.2).
+message ManifestState {
   string repo_id = 1;
-  string scheme_id = 2;
-  int64 key_epoch = 3;
-  int64 payload_version = 4;
-  repeated MemberEntry members = 5;
-  // The repository's refresh-token sharing policy (SPEC §5.1): may members share
-  // an account's refresh token through this repository? Default false, which is
-  // also the proto3 default and the reading a client MUST apply when the field is
-  // absent (withhold). A server MUST persist this and return it in every manifest
-  // it serves: a server that drops it answers OK while discarding the policy, and
-  // every client then reads the absence as false and strips refresh tokens from
-  // that point on, with no error anywhere.
-  bool share_refresh_tokens = 6;
+  int64 manifest_seq = 2;
+  string prev_manifest_hash = 3;   // base64; empty at seq 1
+  string owner_key = 4;            // base64 raw 32-byte Ed25519 owner key
+  string genesis_nonce = 5;        // base64 16 bytes at seq 1; empty after
+  string scheme_id = 6;
+  int64 key_epoch = 7;
+  // The refresh-token sharing policy (SPEC 5.1). Default false, which is also the
+  // proto3 default and the reading a client MUST apply when the field is absent
+  // (withhold). A host MUST store and serve it unchanged: it is covered by the
+  // owner signature, so a host that drops it breaks the signature.
+  bool share_refresh_tokens = 8;
+  repeated HostRef hosts = 9;
+  repeated MemberEntry members = 10;
+  repeated Removal removals = 11;
+}
+
+// A manifest state and the owner's signature over its canonical bytes.
+message SignedManifest {
+  ManifestState state = 1;
+  string owner_signature = 2;      // base64 Ed25519, 64 bytes
+}
+
+// One node of the signed commit graph (SPEC 4.3). Carries the full payload state.
+message Commit {
+  string repo_id = 1;
+  string commit_id = 2;            // base64 SHA-256 of the commit header
+  repeated string parents = 3;     // base64 commit ids
+  int64 manifest_seq = 4;
+  string manifest_hash = 5;        // base64 manifestHash of the cited state
+  int64 key_epoch = 6;
+  string author = 7;               // base64 member Ed25519 public key
+  string iv = 8;                   // base64, 12 bytes
+  string ciphertext = 9;           // base64, tag appended
+  string author_signature = 10;    // base64 Ed25519 over the commit id
+}
+
+// A member's signed request to leave (SPEC 8.4, 11.4).
+message LeaveRequest {
+  string repo_id = 1;
+  string member_key = 2;           // base64 Ed25519 key of the leaving member
+  int64 at = 3;                    // epoch milliseconds
+  string signature = 4;            // base64 Ed25519 by member_key
+}
+
+// The empty answer to Leave. In HTTP/JSON this is the object with no members.
+message LeaveResponse {}
+
+// A host's signed agreement to carry a repository for a member (SPEC 8.2, 11.3).
+message Acceptance {
+  string repo_id = 1;
+  string member_key = 2;           // base64
+  string host_key = 3;             // base64
+  int64 expires_at = 4;            // epoch milliseconds
+  string signature = 5;            // base64 Ed25519 by host_key
 }
 
 message CreateRepoRequest {
-  VaultManifest manifest = 1;
-  EncryptedEnvelope initial_envelope = 2;
+  SignedManifest manifest = 1;     // genesis, manifest_seq 1
+  Commit commit = 2;               // the first commit, no parents
 }
 
 message PullRequest {
-  string repo_id = 1;
-  int64 known_payload_version = 2;
+  int64 since_manifest_seq = 1;
+  repeated string known_heads = 2; // base64 commit ids the client already has
 }
 
 message PullResponse {
-  VaultManifest manifest = 1;
-  EncryptedEnvelope envelope = 2; // omitted when unchanged
-  bool unchanged = 3;
+  repeated SignedManifest manifests = 1; // every state after since_manifest_seq
+  repeated Commit heads = 2;             // every head not in known_heads
+  repeated LeaveRequest leaves = 3;      // every pending leave request
 }
 
 message PushRequest {
-  string repo_id = 1;
-  EncryptedEnvelope envelope = 2;
-  int64 expected_payload_version = 3;
-  repeated MemberEntry rotated_members = 4; // present only on the rotation path
+  Commit commit = 1;
 }
 
 message PushResponse {
   bool accepted = 1;
-  int64 payload_version = 2;
-  int64 key_epoch = 3;
-  bool conflict = 4;
+  repeated string heads = 2;       // base64 head ids after the commit
 }
 
-message MemberAddRequest {
+message PublishManifestRequest {
+  SignedManifest manifest = 1;
+  optional Commit commit = 2;      // required when the state raises key_epoch
+}
+
+message PrepareJoinRequest {
   string repo_id = 1;
-  MemberEntry member = 2;
+  string member_key = 2;           // base64; MUST equal the authenticated caller
 }
 
-message MemberRemoveRequest {
+// A verified manifest tip.
+message ManifestTip {
+  int64 manifest_seq = 1;
+  string manifest_hash = 2;        // base64
+}
+
+message HeadsRequest {
   string repo_id = 1;
-  string removed_member_id = 2;
-  EncryptedEnvelope rotated_envelope = 3;
-  repeated MemberEntry rewrapped_members = 4;
-  int64 new_key_epoch = 5;
 }
 
-message FetchMemberKeyRequest {
+message HeadsResponse {
+  ManifestTip manifest_tip = 1;
+  repeated string heads = 2;       // base64 head commit ids
+}
+
+message FetchRequest {
   string repo_id = 1;
-  string member_id = 2;
+  repeated string ids = 2;         // base64 commit ids or manifest hashes
 }
 
-// --- Authentication (challenge -> token). Typically HTTP/JSON to the IdP. ---
+message FetchResponse {
+  repeated SignedManifest manifests = 1;
+  repeated Commit commits = 2;
+  repeated LeaveRequest leaves = 3;
+}
+
+message OfferRequest {
+  string repo_id = 1;
+  repeated SignedManifest manifests = 2;
+  repeated Commit commits = 3;
+  repeated LeaveRequest leaves = 4;
+}
+
+// One offered item the receiver rejected, with the error code it would have
+// returned to a client.
+message RejectedItem {
+  string id = 1;                   // base64 manifest hash or commit id
+  string code = 2;                 // an error code of SPEC 10.4
+}
+
+message OfferResponse {
+  repeated string accepted = 1;    // base64 manifest hashes and commit ids
+  repeated RejectedItem rejected = 2;
+}
+
+// --- Authentication (challenge -> token). Host-issued (SPEC 3.3). ---
 
 message ChallengeRequest {
   string ed25519_public_key = 1;
