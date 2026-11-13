@@ -22,7 +22,10 @@ specified. `SPEC.md` was rewritten; the section numbers below are 0.5's.
   `avp/owner/ed25519/v1` and `avp/owner/x25519/v1`. The phrase is the identity; it never reaches a host.
 - **Host keys and host-issued authentication** (section 3.3): each host has an Ed25519 host key, every
   host match compares keys, and each host mints its own host-local bearer tokens for any key that signs
-  its challenge. There is no external identity provider.
+  its challenge. There is no external identity provider. The client signs the transcript
+  `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))`, not the raw nonce
+  as in 0.4, so a host cannot pick a nonce that is another construction's message, and every signed
+  construction has its own tag (section 4.1).
 - **Canonical encoding** (section 4.1): one deterministic byte writer (`tag`, `bytes`, `str`, `i64`,
   `bool`, `count`, sorted lists) for every signed or hashed structure; no JSON canonicalization anywhere.
 - **Manifest chain** (sections 4.2, 6): owner-signed, hash-linked states carrying the members, wrapped

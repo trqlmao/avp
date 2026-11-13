@@ -84,8 +84,10 @@ paths:
       operationId: token
       summary: Exchange a signed nonce for a bearer token minted by this host.
       description: |
-        Sign the **raw nonce bytes** (base64-decode `nonce` first) with the Ed25519 private key.
-        A common mistake is signing the base64 string; the host rejects it.
+        Sign the challenge transcript `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey),
+        bytes(nonce))` with the Ed25519 private key (SPEC §3.3), where `hostKey` is this host's key and
+        `nonce` the raw nonce bytes (base64-decode `nonce` first). A signature over the raw nonce alone, over
+        the base64 string, or over a transcript built with another host key is rejected.
       security: []
       requestBody:
         required: true

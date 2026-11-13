@@ -239,7 +239,7 @@ message AuthChallenge {
 message TokenRequest {
   string ed25519_public_key = 1;
   string nonce = 2;
-  string signature = 3; // base64 Ed25519 signature over the raw nonce bytes
+  string signature = 3; // base64 Ed25519 signature over the avp/challenge/v1 transcript (SPEC 3.3)
 }
 
 message AuthToken {

@@ -46,8 +46,8 @@ who may store and sync; only keys held by people decide who can read.
 - **Raw keys.** "Ed25519 public key" and "X25519 public key" mean the raw 32-byte encodings (RFC 8032,
   RFC 7748). An Ed25519 signature is the raw 64-byte encoding.
 - **Strict Ed25519 verification.** Every Ed25519 signature AVP verifies (owner signatures on manifest
-  states, author signatures on commits, host acceptances, leave requests, link and host requests, and the
-  challenge signature of §3.3) MUST be verified strictly, so that every conformant implementation accepts
+  states, author signatures on commits, host acceptances, leave requests, host requests, and the
+  challenge signature of §3.3; the full list is the table of §4.1) MUST be verified strictly, so that every conformant implementation accepts
   exactly the same signatures. A verifier MUST reject the signature, before any other check, if the public
   key `A` or the signature's first half `R` (the encoding of a point) is the encoding of a point of small
   order, if `A` or `R` is a non-canonical encoding (its 255-bit `y` field, the 32 bytes read little-endian
@@ -153,10 +153,29 @@ A host mints its own bearer tokens for any Ed25519 key that signs its challenge:
 
 1. `challenge { ed25519PublicKey } → { nonce }`. The host returns a single-use random nonce of at least
    32 bytes (base64) with a short TTL (RECOMMENDED at most 2 minutes).
-2. `token { ed25519PublicKey, nonce, signature } → { token, expiresAt }`. The client signs the **raw nonce
-   bytes** (the base64-decoded `nonce`) with its Ed25519 private key. The host MUST verify the signature
-   against `ed25519PublicKey`, MUST reject a nonce that was already used, has expired, or was not issued
-   for that key (`401 unauthorized`), and then mints a token whose subject is that key.
+2. `token { ed25519PublicKey, nonce, signature } → { token, expiresAt }`. The client signs the
+   **challenge transcript** with its Ed25519 private key:
+
+   ```
+   challengeMessage = CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))
+   signature        = Ed25519-Sign(ed25519PublicKey, challengeMessage)
+   ```
+
+   where `hostKey` is the 32-byte host key of the host the client is authenticating to (the key the client
+   matches that host by: from the repository's `hosts`, a `homeHostKey`, a token of §11, or discovery,
+   §11.7), `ed25519PublicKey` is the 32-byte key requesting the token, and `nonce` is the raw nonce bytes
+   (the base64-decoded `nonce`). A client MUST NOT sign the raw nonce, or any other bytes a host supplies,
+   outside this transcript. The host MUST build `challengeMessage` with its own host key and verify the
+   signature over it against `ed25519PublicKey`. It MUST reject (`401 unauthorized`) a signature that does
+   not verify over that transcript, which includes a signature over the raw nonce bytes and a transcript
+   built with another host key, and a nonce that was already used, has expired, or was not issued for that
+   key. It then mints a token whose subject is that key.
+
+   The host chooses the nonce, so the transcript is what keeps the challenge from being a signing oracle.
+   Its `avp/challenge/v1` tag separates it from every other signed construction (§4.1): no nonce a host
+   picks makes `challengeMessage` equal to a commit, leave, manifest, or other signed message. Its
+   `hostKey` binds the signature to one host: a host that relays another host's nonce to a client gets a
+   signature that the other host rejects.
 
 The token format is host-defined and opaque to clients. A token is **host-local**: it is valid only at the
 host that issued it, and a client MUST cache tokens keyed by host key and MUST NOT present a token issued by
@@ -196,6 +215,28 @@ one raw append in AVP is outside any CE string: `manifestHash` (§4.2) hashes a 
 by the raw 64-byte owner signature. A list is written as
 `count(n)` followed by its `n` elements, sorted by the stated key (§2) before encoding. `CE(tag "L", x, y)`
 is shorthand for the string `tag(L) || x || y`.
+
+**Domain separation.** Every message an AVP key signs is a CE string whose first item is a `tag`, and each
+signed construction has its own label. The labels in the table below are distinct and none contains a
+`0x00` byte, so the terminating `0x00` makes the tags prefix-free: two messages with different labels
+differ within the shorter label or at its `0x00`, and no message of one construction can equal a message
+of another, whatever the fields after the tag hold. An implementation MUST NOT sign, and MUST NOT verify an
+AVP signature over, bytes that are not one of these constructions; in particular it MUST NOT sign bytes
+another party supplies except as a field inside one of them. A new signed construction MUST take a new
+label.
+
+| Construction | Signing key | Signed message | Section |
+|---|---|---|---|
+| manifest state | owner key | `S = CE(tag "avp/manifest/v1", ...)` | §4.2 |
+| commit author signature | member key (`author`) | `CE(tag "avp/commit-sig/v1", bytes(commitId))` | §4.3, §7.1 |
+| leave request | member key | `CE(tag "avp/leave/v1", str(repoId), bytes(memberKey), i64(at))` | §8.4, §11.4 |
+| challenge | the key requesting a token | `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))` | §3.3 |
+| acceptance | host key | `CE(tag "avp/accept/v1", str(repoId), bytes(memberKey), bytes(hostKey), i64(expiresAt))` | §8.2, §11.3 |
+| host request | host key | `CE(tag "avp/host-req/v1", str(method), str(path), bytes(SHA-256(body)), i64(time))` | §9.3 |
+
+The owner key is also a member key, so it signs every construction a member key signs. The other CE labels
+(`avp/repo-id/v1`, `avp/commit/v1`, `avp/aad/v2`, `avp/link-code/v1`) are hashed or used as AEAD additional
+data, never signed, and are distinct from the labels above.
 
 ### 4.2 Manifest state
 
@@ -1188,6 +1229,10 @@ A conformant implementation MUST uphold:
   the new epoch's data key, and the AAD makes a ciphertext under the wrong epoch fail authentication.
 - **Hosts by key.** Every host match (`hosts`, `homeHostKey`, acceptances, `not_hosted`, host-to-host
   serving) compares host keys (§3.3).
+- **Domain separation.** Every AVP signature is over a CE string that begins with the distinct tag of its
+  construction (§4.1). No key signs host-supplied bytes outside such a string, and a challenge signature
+  covers the host key it was made for (§3.3), so no signature made for one construction, or for one host's
+  challenge, verifies as another.
 
 ## 14. Conformance
 
@@ -1195,7 +1240,8 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 [`vectors/`](vectors/), indexed by [`vectors/index.json`](vectors/index.json):
 
 - **RFC-anchored primitives**: HKDF-SHA256 (`hkdf.json`), X25519 (`x25519.json`), and Ed25519 sign and
-  verify (`ed25519.json`). The Ed25519 vector anchors the challenge signature (§3.3).
+  verify (`ed25519.json`). The Ed25519 vector anchors every signature; the challenge transcript is pinned
+  in `federation.json`.
 - **Wrap scheme**: wrap and unwrap of a data key (`key-wrap.json`, §4.4).
 - **Owner identity**: entropy to mnemonic, mnemonic to seed, and seed to the owner Ed25519 and X25519 keys
   (`bip39-owner.json`, §3.1), over the pinned English wordlist (`bip39-english.txt`).
@@ -1217,11 +1263,15 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
   the cutoff, and backdated as a child of a frontier commit (`forbidden`), diverged owner states (lower hash
   wins, a commit re-checked and accepted, a commit held), and a leave request with a bad signature.
 - **Tokens and addresses**: every token of §11 (with the acceptance and leave signatures, the link
-  confirmation code, and the owner and member fingerprints) and `avp://` locators (`federation.json`).
+  confirmation code, and the owner and member fingerprints), `avp://` locators, and the challenge
+  transcript `challengeMessage` of §3.3 with its signature (`federation.json`).
 - **Negative cases**: `negative.json`, valid constructions with one mutation each that a conformant
   implementation MUST reject, including a manifest with a bad signature or a wrong previous hash, a commit
   whose id does not recompute or whose author signed another id, a payload whose AAD v2 has a swapped parent,
-  a link grant unwrapped with the data key wrap label, an acceptance verified with another host key, and
+  a link grant unwrapped with the data key wrap label, an acceptance verified with another host key, the
+  cross-construction and challenge cases of §3.3 and §4.1 (a challenge signature presented as a commit
+  author signature over the same 32 bytes, a commit author signature presented as a challenge signature, a
+  challenge signature made for another host key, and a signature over the raw nonce), and
   the Ed25519 signatures that strict verification (§2) rejects: a small-order public key or `R`, a
   non-canonical public key, and a non-canonical `S`. Reproducing the positive vectors is necessary but not
   sufficient.
@@ -1231,7 +1281,8 @@ Every committed vector is reproducible from documented seeds by [`vectors/genera
 [`vectors/README.md`](vectors/README.md).
 
 A **host** additionally proves conformance by passing the black-box harness in [`harness/`](harness/), which
-drives the client wire contract (the auth failure modes of §3.3, `createRepo` checks, the pulled chain,
+drives the client wire contract (the auth failure modes of §3.3, including a signature over the raw nonce
+and a transcript built with another host key, `createRepo` checks, the pulled chain,
 forks and merges, the head bound, `manifest_conflict`, the removal cutoff, leave, `prepareJoin`
 acceptances, and zero-knowledge), and its multi-host scenarios, which drive §9 between two or more hosts
 (convergence after a paused host, concurrent writes on two hosts, a removed member rejected on both, an
@@ -1244,7 +1295,8 @@ unlisted host refused, an old-epoch head merged forward, and diverged owner stat
 - **Token theft.** Tokens are bearer credentials; client-to-host transport MUST be TLS. Tokens are host-local
   (§3.3), short-lived, and scoped to membership.
 - **Nonce handling.** Challenge nonces MUST be single-use with a short TTL to prevent replay of the signed
-  challenge.
+  challenge. The client signs the `avp/challenge/v1` transcript, never the host-chosen nonce alone (§3.3,
+  §4.1).
 - **Owner phrase.** Whoever holds the phrase, or an owner device, is the owner (THREATMODEL A7).
 - **Host-to-host transport.** The protocol validates every replicated item; confidentiality and
   authentication of host-to-host links come from the deployment profile (§9).

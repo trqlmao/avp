@@ -68,8 +68,8 @@ clear they carry nothing a host could not already see (A3).
 
 *Capability:* intercepts, modifies, replays, or reorders messages.
 
-*Defended:* authentication is an Ed25519 challenge over a single-use, short-TTL nonce, so a captured auth
-exchange cannot be replayed. Manifest states are owner-signed and hash-chained, and commits are
+*Defended:* authentication is an Ed25519 signature over a transcript of the host key, the requesting key,
+and a single-use, short-TTL nonce (SPEC §3.3), so a captured auth exchange cannot be replayed. Manifest states are owner-signed and hash-chained, and commits are
 author-signed with ids that cover the ciphertext, so a modified state or commit fails verification. The
 payload AAD binds `repoId`, `keyEpoch`, `author`, and the sorted parent ids (SPEC §4.3), so a ciphertext
 cannot be replayed under a different repository, epoch, author, or parent set. Tampering with ciphertext
@@ -103,6 +103,17 @@ or get a data key wrapped to itself (the owner wraps only to keys from an invite
 serves, SPEC §8.1). It cannot add itself to a repository: the owner adds a host only with that host's signed
 acceptance in an invite token (SPEC §8.2), and other hosts refuse to serve a host that is not listed (SPEC
 §9.2).
+
+It cannot use the authentication challenge as a signing oracle. The host chooses the nonce, so a client
+that signed the nonce bytes as given would sign whatever the host picked: the 54-byte
+`avp/commit-sig/v1` message of a commit the host built with the member as `author` (a forged commit), a
+leave message (a forged leave), or, from the owner, a manifest state (a forged state). A client instead
+signs `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))` (SPEC §3.3), and
+every signed construction starts with its own tag (SPEC §4.1), so no nonce makes the challenge message
+equal another construction's message. The transcript also carries the key of the host the client is
+authenticating to, so a malicious host that relays another host's nonce gets a signature the other host
+rejects, and cannot obtain a token there as the member. *Residual:* none for cross-construction
+signatures.
 
 *Residual:* a malicious host can still attack **availability and freshness**. It can withhold new heads or
 manifest states, delay them, or refuse service. A member whose only host withholds cannot, on its own,

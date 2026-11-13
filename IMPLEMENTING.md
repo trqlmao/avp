@@ -88,8 +88,20 @@ POST /api/auth/keypair/token
   response: { "token": "<bearer>", "expiresAt": <ms> }
 ```
 
-Sign the **decoded nonce bytes**, not the base64 text. The host rejects a reused, expired, foreign, or
-never-issued nonce with `401 unauthorized`. Tokens are **host-local**: cache them keyed by host key and
+Sign the **challenge transcript**, never the nonce alone:
+
+```
+challengeMessage = CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))
+signature        = Ed25519-Sign(ed25519PublicKey, challengeMessage)
+```
+
+`hostKey` is the 32-byte key of the host you are authenticating to (the key you match it by, checked
+against discovery), `ed25519PublicKey` your 32-byte key, and `nonce` the **decoded nonce bytes**, not the
+base64 text. The host builds the same transcript with its own host key and verifies it. A signature over
+the raw nonce (the old construction) or over a transcript built with another host key is
+`401 unauthorized`, as is a reused, expired, foreign, or never-issued nonce. The tag is what stops a
+malicious host from choosing a "nonce" that is really another construction's message, such as a commit
+signature message (SPEC §3.3); every signed message has its own tag (the table in SPEC §4.1). Tokens are **host-local**: cache them keyed by host key and
 never present one host's token to another.
 
 ## 3. Constructions (SPEC §4)
@@ -373,7 +385,7 @@ it. A host never decrypts and never logs a request body.
 This mirrors SPEC §14.
 
 1. **RFC-anchored primitives.** HKDF-SHA256 (`hkdf.json`, RFC 5869), X25519 (`x25519.json`, RFC 7748),
-   and Ed25519 sign and verify (`ed25519.json`, RFC 8032; it anchors the challenge signature).
+   and Ed25519 sign and verify (`ed25519.json`, RFC 8032; it anchors every signature).
 2. **Wrap scheme.** Wrap and unwrap of a data key (`key-wrap.json`).
 3. **Owner identity.** Entropy to mnemonic, mnemonic to seed, seed to the owner keys
    (`bip39-owner.json`, over `bip39-english.txt`).
@@ -386,9 +398,9 @@ This mirrors SPEC §14.
 7. **Acceptance rules.** Replay every scenario of `acceptance.json` through your host's rules: each step's
    verdict and the final heads, held commits, tip, and leaves.
 8. **Tokens and addresses.** Every token, the acceptance and leave signatures, link confirmation codes,
-   fingerprints, and `avp://` locators (`federation.json`).
-9. **Negative cases.** Reject every case of `negative.json`, including the strict Ed25519 rejects, and
-   accept each case's `base`. Reproducing the positive vectors is necessary but not sufficient.
+   fingerprints, `avp://` locators, and the challenge transcript and its signature (`federation.json`).
+9. **Negative cases.** Reject every case of `negative.json`, including the strict Ed25519 rejects and the
+   cross-construction challenge cases, and accept each case's `base`. Reproducing the positive vectors is necessary but not sufficient.
 10. **Black-box your host.** `bun harness/conformance.ts --server http://127.0.0.1:PORT` drives the
     client wire contract (auth failure modes, `createRepo`, the pulled chain, forks and merges, the head
     bound, `manifest_conflict`, the removal cutoff, leave, `prepareJoin`, not hosted, zero-knowledge).
