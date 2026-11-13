@@ -189,3 +189,16 @@ test("RepoView maps malformed commits and leaves to bad_request instead of throw
   }
   assert.deepEqual(view.heads(), [b64(root.commitId)], "malformed input changed no state");
 });
+
+test("tipListsHost follows the tip's hosts during a first copy by replication (SPEC 6.1 rule 6, 9.2, 10.1)", () => {
+  const s = (acceptance.scenarios as any[]).find((x) => x.name === "new-host-first-copy-by-offer");
+  const view = new RepoView(Buffer.from(s.hostKey, "base64"), s.headBound);
+  assert.equal(view.tipListsHost(), false, "no tip before genesis");
+  const steps = s.steps as Step[];
+  // The genesis lists only b.vault.example: accepted by offer, but the tip does not list this host.
+  assert.equal(verdictCode(apply(view, steps[0])), "ok");
+  assert.equal(view.tipListsHost(), false, "tip is the genesis, which does not list a.vault.example");
+  // The seq 2 state adds a.vault.example.
+  assert.equal(verdictCode(apply(view, steps[1])), "ok");
+  assert.equal(view.tipListsHost(), true, "tip is seq 2, which lists a.vault.example");
+});

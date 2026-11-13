@@ -1887,6 +1887,24 @@ function buildAcceptance(ctx: Ctx): any {
     );
   }
 
+  // ── a newly listed host's first copy by replication (SPEC 6.1 rule 6, 8.1, 9.2) ──
+  {
+    // The owner created the repository on b.vault.example only; seq 2 invites alice, whose home host
+    // a.vault.example is new, so it adds that host (SPEC 8.1, 8.6).
+    const Gb = state(1, null, 0, [[owner, hostB]], { hosts: [ref(hostB)] });
+    const rb = cm("r-b-first-copy", owner, [], Gb);
+    const M2 = state(2, Gb, 0, [[owner, hostB], [alice, hostA]]);
+    const a1 = cm("a1-first-copy", alice, [rb], M2);
+    add(
+      "new-host-first-copy-by-offer",
+      "SPEC 6.1 rule 6, 8.1, 9.2: a.vault.example is first listed at seq 2 and gets its first copy by replication. The genesis, which lists only b.vault.example, arrives by offer with its first commit and is accepted: rule 6 applies to the tip of the chain being received, which is the seq 2 state that lists this host, not to the states before it. The seq 2 state is then accepted by offer, and alice, whose home host is a.vault.example and who is a member of the tip at epoch 0, pushes a child of the first commit: accepted, the only head.",
+      [M("Gb", Gb, "ok", "offer", rb), M("M2-adds-a", M2, "ok", "offer"), C(a1, "ok")],
+      [a1],
+      [],
+      M2,
+    );
+  }
+
   return {
     description:
       "Host acceptance scenarios (SPEC 6, 7, 8.3, 8.4, 9.1). Each scenario is one host's view of one repository: create a rules engine for `hostKey` (a.vault.example) " +

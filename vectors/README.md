@@ -103,6 +103,15 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
   repository the host does not hold is `404 not_found` (SPEC §10.1). A host answers both before it
   consults its rules engine, so the engine's verdict type has neither code.
 
+  `not_hosted` is an engine verdict only for `via: "push"`: a client write of a state whose `hosts` does
+  not list this host (SPEC §6.1 rule 6). For `via: "offer"` it is host level, like the two answers above:
+  the host checks that the tip of the chain it is receiving lists it, and otherwise rejects the offer with
+  `403 not_hosted` and stores nothing, before it applies any item of the offer or catch-up to its engine
+  (SPEC §9.2). The engine therefore does not reject an offered state because it does not list this host,
+  so a newly listed host can take the earlier states of the chain (SPEC §8.1); the offered steps of a
+  scenario are items that passed that check. The engine reports whether its current tip lists this host,
+  so that the host can refuse to serve a repository whose tip does not (SPEC §8.6, §10.1).
+
 ## Cryptographic primitive vectors (RFC-anchored)
 
 Each primitive AVP relies on is pinned to a **published RFC test vector**, so a conformant

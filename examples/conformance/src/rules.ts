@@ -7,8 +7,10 @@
  * verified commit header (for the removal cutoff ancestry of SPEC 7.3), and the pending leave
  * requests. Each operation names its path: `"push"` is a client write (`push`, `publishManifest`,
  * `createRepo`, `leave`), where the authenticated caller is the author (or the owner for a manifest)
- * and the head bound applies; `"offer"` is a replicated item (SPEC 9.1), with no caller check and no
- * head bound. It is checked against `vectors/acceptance.json`.
+ * and the head bound applies; `"offer"` is a replicated item (SPEC 9.1), with no caller check, no
+ * head bound, and no per-state hosted check: rule 6 applies to the tip of the chain being received,
+ * which the host checks before it applies the offer (SPEC 6.1, 9.2), and `tipListsHost()` tells the
+ * host whether it may serve the repository. It is checked against `vectors/acceptance.json`.
  *
  * Every input is attacker-controlled. No method throws on any input: every failure maps to a
  * `Verdict` code.
@@ -286,6 +288,18 @@ export class RepoView {
     return this.tipRec()?.m;
   }
 
+  /**
+   * Whether the tip of the winning chain lists this host. A host does not serve a repository whose tip
+   * does not list it (SPEC 8.6, 10.1); states before the tip may not list it when the host got its
+   * first copy by replication (SPEC 6.1 rule 6, 9.2).
+   *
+   * @returns `true` if the tip's `hosts` contains this host's key, `false` otherwise or before genesis.
+   */
+  tipListsHost(): boolean {
+    const tip = this.tipRec();
+    return tip !== undefined && hasHost(tip.m.state, this.hostKey);
+  }
+
   /** @returns The pending leave requests (SPEC 8.4), one per member: its key (base64) and `at`, sorted by key. */
   pendingLeaves(): Array<{ memberKey: string; at: number }> {
     return [...this.st.leaves]
@@ -369,7 +383,9 @@ export class RepoView {
         return same && via === "offer" && commit === undefined ? OK : fail("manifest_conflict");
       }
       if (!contentOk(s, undefined)) return fail("bad_request");
-      if (!hasHost(s, this.hostKey)) return fail("not_hosted");
+      // Rule 6, hosted, on a client write. By replication it applies to the tip of the chain being
+      // received, which the host checks before it applies any item (SPEC 6.1, 9.2).
+      if (via === "push" && !hasHost(s, this.hostKey)) return fail("not_hosted");
       return this.adopt(rec, undefined, commit, via);
     }
 
@@ -405,8 +421,8 @@ export class RepoView {
       this.retainLosing(rec, prev, commit);
       return fail("manifest_conflict");
     }
-    // Appends to the tip, or wins the tie rule at its seq (lower manifestHash).
-    if (!hasHost(s, this.hostKey)) return fail("not_hosted");
+    // Appends to the tip, or wins the tie rule at its seq (lower manifestHash). Rule 6 as above.
+    if (via === "push" && !hasHost(s, this.hostKey)) return fail("not_hosted");
     return this.adopt(rec, prev, commit, via);
   }
 
