@@ -7,6 +7,7 @@
   "license": "MIT",
   "scripts": {
     "conformance": "bun conformance.ts",
+    "multihost": "bun multihost.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

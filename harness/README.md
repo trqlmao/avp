@@ -43,7 +43,46 @@ harness polls `GET /.well-known/avp` until the host answers, so it can be starte
 | §13 Zero-knowledge | a random plaintext marker, written into every payload the harness encrypts, appears in no response text and in no base64 value of any response. |
 
 Multi-host behavior (SPEC §9: replication, convergence, diverged owner states) is out of scope for this
-single-host suite.
+single-host suite; [`multihost.ts`](#multi-host-scenarios) covers it.
+
+## Multi-host scenarios
+
+`multihost.ts` drives two hosts, A and B, that replicate with each other (SPEC §9), plus an optional
+third host C, and asserts what both hosts must converge on. It uses only the client routes and the
+reference test control (SPEC §9.3), so it runs against any pair of hosts that ship that profile, in any
+language pairing.
+
+```sh
+bun multihost.ts --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203```
+
+Start each host with `AVP_TEST_CONTROL=1`, a distinct `AVP_HOST_SEED`, and `AVP_PEERS` naming the others
+(`<base64 hostKey>@http://127.0.0.1:<port>`; the host key is the one each host's `/.well-known/avp`
+serves). A and B peer with each other; C peers with A and B (and they with C) but is never listed in a
+repository's `hosts`. Without `--c` the `unlisted-host-refused` scenario is skipped with a printed note.
+Exit code is `0` only if every check passes; a failure names its scenario.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--converge-ms N` | `15000` | How long a convergence wait polls (every 250 ms). |
+| `--quiet-ms N` | `6000` | How long a "nothing arrives" check waits: one 5 s sweep (SPEC §9.3) plus a margin. |
+| `--startup-timeout-ms N` | `30000` | How long to wait for each host's discovery. |
+| `--request-timeout-ms N` | `30000` | How long one request may take. |
+
+Every scenario works on a fresh repository that the owner creates on A and then lists on B the way
+SPEC §8.1 and §8.2 add a host (bob's `prepareJoin` on B, then a seq 2 adding B and bob), so B's first
+copy always arrives by replication. "Paused" means the test control `POST /v1/test/replication
+{ paused: true }` on B, which stops all host traffic to and from B.
+
+| Scenario | SPEC | Checks |
+|---|---|---|
+| `write-while-b-paused-converges` | §9.1, §9.2, §9.3 | B gets its first copy from A; a paused B answers a host route with `503` and receives nothing for one sweep; after the heal B's heads are exactly A's write, served unchanged; a write on B then reaches A. |
+| `concurrent-writes-two-heads-then-merge` | §7.4, §9.2 | concurrent writes on A and on paused B on the same parent leave the same two heads on both hosts (no conflict outcome); the owner's merge on A collapses them on both. |
+| `removed-member-rejected-on-both` | §7.1, §7.3, §7.4, §8.3 | carol writes on paused B while the owner removes her on A with frontier `[cc1]`; after the heal B adopts the removal and drops her commit outside the frontier (heads exactly the rotation commit), A never accepts it, her pull and push are `403 forbidden` on both, and a child of the dropped commit is `403 forbidden` on B and refused on A. |
+| `unlisted-host-refused` | §6.1, §9.2, §9.3 | C, peered but not listed, answers `404 not_found` for the repository's pull and push, before and after a sweep interval of writes on A; A and B serve the same chain and heads. (A direct signed host request from C is out of scope: the harness holds no host key of C's.) |
+| `old-epoch-head` | §7.2, §7.5, §8.3 | bob writes under epoch 0 on paused B while the owner rotates to epoch 1 on A; after the heal both hosts keep the old-epoch head next to the rotation commit, the owner decrypts it with epoch 0's key, and its merge forward under epoch 1 collapses the heads on both. |
+| `diverged-owner` | §6.3, §6.5 | the owner publishes one seq 3 on A and a different seq 3 on paused B; after the heal both chains end in the bytewise-lower `manifestHash`, bob's commit citing the losing state is accepted after re-check on both, each host answers the losing state with `409 manifest_conflict`, and seq 4 on the winning chain replicates. It runs once with the lower hash on A and once on B. |
+
+Every payload carries a random marker, which must appear in no response (SPEC §13).
 
 ## How it works
 
@@ -51,7 +90,8 @@ The only AVP-specific code is the client-side construction, re-exported by [`cry
 the vector-tested conformance runner in [`../examples/conformance/src`](../examples/conformance/src/):
 the CE writer, manifest and commit constructions, AAD v2, the wrap scheme, BIP39 owner keys, and strict
 Ed25519. Every body is built from real keys and real signatures, so the harness itself stays a thin wire
-driver. It runs under [Bun](https://bun.sh) with no install step (only Node's built-in `crypto` and
+driver; [`common.ts`](common.ts) holds the parties and constructions both harnesses share. It runs
+under [Bun](https://bun.sh) with no install step (only Node's built-in `crypto` and
 global `fetch`). `bun install && bun run typecheck` runs `tsc` over it.
 
 A pass certifies the surface this harness covers; it supplements, and does not replace, reproducing the
