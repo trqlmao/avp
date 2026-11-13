@@ -217,7 +217,12 @@ repeat is `409 duplicate_repo`.
 2. Verify every state (SPEC §6.1): structure, owner signature, genesis or chain link, content rules. Pin
    the highest verified `(manifestSeq, manifestHash)`. If the first returned state does not link to your
    pin, pull again from 0 and apply the tie rule (§5i). Never accept a chain without your pin unless it
-   wins at a fork at or below it.
+   wins at a fork at or below it. An empty answer does not prove your pin is current: a pin on a state
+   that lost the tie rule at its own seq has nothing above it. So on `409 manifest_conflict`, or a `403`
+   that a stale pin may cause (a push citing a losing state), pull again from 0, verify that chain like
+   any pull, adopt it only if it wins at a fork at or below your pin, rebuild on the new tip, and retry
+   once (SPEC §6.3, §6.4). One re-pull and one retry per operation, never a loop; a `403` that leaves
+   your pin unchanged is terminal.
 3. Verify every head (SPEC §7.5): id and signature, the removal cutoff, and membership at the commit's
    epoch. Discard one that fails.
 4. Decrypt each readable head (AAD v2 from its header, the data key of its epoch), observe its stamps,
@@ -347,7 +352,7 @@ line before any route runs. Clients and harnesses check only the status there.
 | `404` | `not_found` | The host does not hold the repository |
 | `409` | `duplicate_repo` | `createRepo` for an existing `repoId` |
 | `409` | `too_many_heads` | The push would leave more heads than the bound; merge first |
-| `409` | `manifest_conflict` | Not tip + 1, wrong previous hash, or the state loses the tie rule; pull and rebuild |
+| `409` | `manifest_conflict` | Not tip + 1, wrong previous hash, or the state loses the tie rule; pull from seq 0, rebuild, retry once |
 | `413` | `too_large` | Body over a host limit (SPEC §12.1) |
 | `422` | `missing_parents` | Unknown parent, cited state, or frontier commit; `detail` lists the ids; retry later |
 | `429` | `quota_exceeded` | A deployment limit; honor `Retry-After` (SPEC §12.2) |

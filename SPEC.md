@@ -532,8 +532,10 @@ key for its whole life.
 A state with `manifestSeq = k > 1` links to the state at `k - 1`: its `prevManifestHash` MUST equal that
 state's `manifestHash`. A host accepts a new state from a client (§10) only if `manifestSeq` equals its tip's
 `manifestSeq + 1` and `prevManifestHash` equals its tip's `manifestHash`; otherwise it answers
-`409 manifest_conflict`. An owner client MUST pull the manifest tip before publishing a state, and on
-`manifest_conflict` MUST pull again and rebuild its change on the new tip.
+`409 manifest_conflict`. An owner client MUST pull the manifest tip before publishing a state. On
+`manifest_conflict` it MUST pull again with `sinceManifestSeq = 0`, re-verify the chain from genesis
+(§6.4), rebuild its change on the verified tip, and retry once. The retry is bounded: one re-pull and one
+retry per operation, never a loop; if the retry fails too, the client returns that error.
 
 ### 6.4 Rollback protection
 
@@ -547,6 +549,18 @@ winning diverged chain needs an owner-signed state at the fork point.
 `pull` returns the states with `manifestSeq` greater than the client's `sinceManifestSeq` (§10). A client
 whose first returned state does not link to its pinned state MUST pull again with `sinceManifestSeq = 0` and
 apply §6.5 to the full chain.
+
+A pin can also be stale with nothing above it: a device pinned on a state that lost the §6.5 tie rule at
+its own `manifestSeq` gets no state from `pull`, so the check above never fires. A client that gets
+`409 manifest_conflict`, or a `403` whose cause may be a stale pin (for example a `push` answered
+`403 forbidden` because it cites a losing state whose epoch the winning chain raised), MUST therefore pull
+again with `sinceManifestSeq = 0` and re-verify the full chain by §6.1 and §7.5, as for any pull, before it
+retries once. If that chain does not contain its pin, the client adopts it only under the exception above
+(it wins at a fork point at or below the pin, §6.5), re-pins to its tip, unwraps the data keys it gives
+the client, and rebuilds the request on the new tip; any other chain is rejected as a rollback, and a
+chain with a different genesis state is never adopted. If the re-pull leaves the pin unchanged, the `403`
+is terminal (§10.4) and is not retried. The retry is bounded: one re-pull and one retry per operation,
+never a loop; if the retry fails too, the client returns that error.
 
 ### 6.5 Diverged owner states
 
@@ -1025,8 +1039,8 @@ only the status.
 | `429` | `quota_exceeded` | A deployment resource limit was hit |
 
 Every error except `422 missing_parents` is **terminal** for that request: a client MUST NOT retry it
-unchanged. `too_many_heads` and `manifest_conflict` tell the client what to do next (merge, or pull and
-rebuild). The gRPC profile maps them to `INVALID_ARGUMENT` (`bad_request`), `UNAUTHENTICATED`
+unchanged. `too_many_heads` and `manifest_conflict` tell the client what to do next (merge, or pull from
+seq 0 and rebuild, §6.3, §6.4); a request rebuilt on a new tip after that re-pull is not unchanged. The gRPC profile maps them to `INVALID_ARGUMENT` (`bad_request`), `UNAUTHENTICATED`
 (`unauthorized`), `PERMISSION_DENIED` (`forbidden`, `not_hosted`), `NOT_FOUND`, `ALREADY_EXISTS`
 (`duplicate_repo`), `FAILED_PRECONDITION` (`too_many_heads`, `manifest_conflict`, `missing_parents`), and
 `RESOURCE_EXHAUSTED` (`quota_exceeded`), and carries the same `code` string as the status message.
