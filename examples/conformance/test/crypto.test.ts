@@ -26,6 +26,7 @@ import {
   aesGcmEncrypt,
   ed25519PublicRaw,
   ed25519Sign,
+  ed25519StrictInputsOk,
   ed25519Verify,
   hkdfSha256,
   importEd25519Private,
@@ -134,4 +135,61 @@ test("key wrap (SPEC section 4) reproduces and round-trips vectors/key-wrap.json
       assert.equal(b64(recovered), c.dataKeyB64, "unwrapped data key");
     });
   }
+});
+
+// ---- Strict Ed25519 pre-checks (SPEC section 2) ----
+
+/** The seven small-order encodings SPEC 2 lists (sign bit cleared), little-endian hex. */
+const SPEC_SMALL_ORDER = [
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+];
+/** The group order L of SPEC 2. */
+const SPEC_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+/** Writes x as 32 little-endian bytes. */
+const le32 = (x: bigint): Buffer => Buffer.from(Array.from({ length: 32 }, (_, i) => Number((x >> BigInt(8 * i)) & 0xffn)));
+/** The encoding with the sign bit (top bit of the last byte) set. */
+const withSignBit = (b: Buffer): Buffer => {
+  const out = Buffer.from(b);
+  out[31] |= 0x80;
+  return out;
+};
+
+test("ed25519StrictInputsOk applies the SPEC 2 pre-checks", async (t) => {
+  const c = loadEd25519Vectors().cases[0];
+  const pub = fromHex(c.publicKeyHex);
+  const sig = fromHex(c.signatureHex);
+  const honestR = sig.subarray(0, 32);
+  const honestS = sig.subarray(32, 64);
+
+  await t.test("an RFC 8032 signature passes", () => {
+    assert.equal(ed25519StrictInputsOk(pub, sig), true);
+  });
+
+  for (const h of SPEC_SMALL_ORDER) {
+    for (const [label, enc] of [["sign bit clear", fromHex(h)], ["sign bit set", withSignBit(fromHex(h))]] as const) {
+      await t.test(`small-order ${h.slice(0, 8)}..${hex(enc.subarray(31))} (${label}) is rejected as A and as R`, () => {
+        assert.equal(ed25519StrictInputsOk(enc, sig), false, "as the public key A");
+        assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([enc, honestS])), false, "as R");
+      });
+    }
+  }
+
+  await t.test("y = p + 2 (non-canonical, not on the blocklist) is rejected as A and as R", () => {
+    const pPlus2 = fromHex("ef" + "ff".repeat(30) + "7f");
+    for (const enc of [pPlus2, withSignBit(pPlus2)]) {
+      assert.equal(ed25519StrictInputsOk(enc, sig), false, "as the public key A");
+      assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([enc, honestS])), false, "as R");
+    }
+  });
+
+  await t.test("S = L is rejected and S = L - 1 passes", () => {
+    assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([honestR, le32(SPEC_L)])), false, "S = L");
+    assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([honestR, le32(SPEC_L - 1n)])), true, "S = L - 1");
+  });
 });
