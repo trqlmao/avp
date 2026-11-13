@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +17,7 @@ use avp::crypto::{SCHEME_ID, WRAP_INFO, ed25519_verify, random_bytes, wrap, x255
 use avp::encoding::{Ce, b64_decode, b64_decode_array, b64_encode};
 use avp::manifest::{HostRef, ManifestState, MemberEntry, Removal, SignedManifest, derive_repo_id};
 use avp::tokens::{Acceptance, LeaveRequest};
-use avp_reference_server::{Serving, State, serve};
+use avp_reference_server::{Serving, State, parse_bind, serve};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
 use x25519_dalek::StaticSecret;
@@ -712,6 +712,22 @@ fn discovery_reports_version_profiles_and_host_key() {
     assert!(avp_reference_server::parse_host_seed(&"zz".repeat(32)).is_err());
     let fixed = State::new(SigningKey::from_bytes(&seed));
     assert_eq!(fixed.host_key(), pk(&SigningKey::from_bytes(&seed)));
+}
+
+#[test]
+fn bind_address_defaults_to_all_interfaces_and_honors_avp_bind() {
+    // Unset AVP_BIND keeps the old 0.0.0.0 listener; a set one is the address bound.
+    assert_eq!(parse_bind(None), Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+    assert_eq!(parse_bind(Some("127.0.0.1")), Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    assert_eq!(parse_bind(Some(" ::1 ")), Ok(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    for bad in ["", "localhost", "127.0.0.256", "127.0.0.1:8787"] {
+        assert!(parse_bind(Some(bad)).is_err(), "accepted AVP_BIND {bad:?}");
+    }
+    let ip = parse_bind(Some("127.0.0.1")).unwrap();
+    let state = Arc::new(Mutex::new(State::new(SigningKey::from_bytes(&random_bytes::<32>()))));
+    let serving = serve(&SocketAddr::new(ip, 0).to_string(), state).expect("bind loopback");
+    assert_eq!(serving.addr().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    serving.stop();
 }
 
 // ─── Authentication failure modes (SPEC 3.3) ────────────────────────────────────────────

@@ -28,7 +28,7 @@ pub mod replication;
 pub mod store;
 
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -42,6 +42,10 @@ use crate::store::Store;
 
 /// The default port of the binary (`PORT` overrides it).
 pub const DEFAULT_PORT: u16 = 8787;
+
+/// The default listen address of the binary (`AVP_BIND` overrides it): every interface, which
+/// container and CI runs rely on.
+pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// The number of worker threads that take requests off the listener.
 const WORKERS: usize = 4;
@@ -184,6 +188,22 @@ pub fn parse_host_seed(hex: &str) -> Result<[u8; 32], String> {
         *slot = u8::from_str_radix(digits, 16).map_err(|_| "AVP_HOST_SEED has a non-hex digit".to_string())?;
     }
     Ok(out)
+}
+
+/// Parses `AVP_BIND`: the IP address the binary listens on. `None` (unset) is [`DEFAULT_BIND`].
+///
+/// # Errors
+///
+/// A message naming the variable if the text is not an IPv4 or IPv6 address literal (a host name
+/// or an address with a port is refused).
+pub fn parse_bind(text: Option<&str>) -> Result<IpAddr, String> {
+    match text {
+        None => Ok(DEFAULT_BIND),
+        Some(t) => t
+            .trim()
+            .parse()
+            .map_err(|_| "AVP_BIND must be an IP address, for example 127.0.0.1".to_string()),
+    }
 }
 
 /// A running server: the bound address and the worker threads.
