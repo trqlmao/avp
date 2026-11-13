@@ -200,8 +200,68 @@ export function ed25519Sign(priv: KeyObject, message: Buffer): Buffer {
   return edSign(null, message, priv);
 }
 
+/** The field prime of edwards25519, `2^255 - 19`. */
+const ED25519_P = (1n << 255n) - 19n;
+/** The prime order of the edwards25519 base point, `2^252 + 27742317777372353535851937790883648493`. */
+const ED25519_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+
 /**
- * Verifies an Ed25519 signature (RFC 8032).
+ * The libsodium `has_small_order` blocklist: with the sign bit cleared, the eight small-order points of
+ * edwards25519 have five encodings (`y` = 0, 1, the two order-8 values, and `p - 1`), followed here by
+ * the non-canonical encodings `p` and `p + 1` of `y` = 0 and 1.
+ */
+const ED25519_SMALL_ORDER = [
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+].map((h) => Buffer.from(h, "hex"));
+
+/** Reads bytes as an unsigned little-endian integer. */
+function littleEndian(b: Uint8Array): bigint {
+  let x = 0n;
+  for (let i = b.length - 1; i >= 0; i--) x = (x << 8n) | BigInt(b[i]);
+  return x;
+}
+
+/** Whether a 32-byte point encoding is that of a small-order point, ignoring the sign bit. */
+function isSmallOrder(p: Uint8Array): boolean {
+  return ED25519_SMALL_ORDER.some((e) => {
+    for (let i = 0; i < 31; i++) if (p[i] !== e[i]) return false;
+    return (p[31] & 0x7f) === e[31];
+  });
+}
+
+/** Whether a 32-byte point encoding is canonical: its `y` field, sign bit cleared, is below `p`. */
+function isCanonicalPoint(p: Uint8Array): boolean {
+  const y = Buffer.from(p);
+  y[31] &= 0x7f;
+  return littleEndian(y) < ED25519_P;
+}
+
+/**
+ * The strict pre-checks of SPEC 2 on a raw public key and signature: neither the key nor `R` is a
+ * small-order or non-canonical point encoding, and `S` is below the group order `L`. Node's
+ * OpenSSL verification is cofactorless and makes none of these checks itself.
+ *
+ * @param publicKey - The raw 32-byte public key.
+ * @param signature - The 64-byte signature.
+ * @returns Whether the inputs pass every pre-check.
+ */
+export function ed25519StrictInputsOk(publicKey: Uint8Array, signature: Uint8Array): boolean {
+  if (publicKey.length !== 32 || signature.length !== 64) return false;
+  const r = signature.subarray(0, 32);
+  if (isSmallOrder(publicKey) || !isCanonicalPoint(publicKey)) return false;
+  if (isSmallOrder(r) || !isCanonicalPoint(r)) return false;
+  return littleEndian(signature.subarray(32, 64)) < ED25519_L;
+}
+
+/**
+ * Verifies an Ed25519 signature strictly (SPEC 2): the pre-checks of {@link ed25519StrictInputsOk},
+ * then RFC 8032 verification.
  *
  * @param pub - The Ed25519 public {@link KeyObject}.
  * @param message - The message bytes.
@@ -209,6 +269,9 @@ export function ed25519Sign(priv: KeyObject, message: Buffer): Buffer {
  * @returns Whether the signature is valid.
  */
 export function ed25519Verify(pub: KeyObject, message: Buffer, signature: Buffer): boolean {
+  const jwk = pub.export({ format: "jwk" }) as { x?: string };
+  if (typeof jwk.x !== "string") return false;
+  if (!ed25519StrictInputsOk(Buffer.from(jwk.x, "base64url"), signature)) return false;
   return edVerify(null, message, pub, signature);
 }
 

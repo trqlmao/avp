@@ -200,7 +200,12 @@ byte-for-byte as their third source.
   commit whose id no longer recomputes (tampered ciphertext or header), an author signature over another
   commit id, a payload decrypted under AAD v2 with a wrong parent set, epoch, author, or repoId, a link
   grant unwrapped with the data key wrap label `avp/rdk-wrap/v1`, an acceptance verified under another
-  host key or with a tampered `expiresAt`, and a leave request signed by another key. A conformant
+  host key or with a tampered `expiresAt`, and a leave request signed by another key. The last five
+  `ed25519-verify` cases are the strict verification rejects of SPEC §2, which a cofactorless verifier
+  (the JDK's, or OpenSSL's under Node) accepts: forgeries with `R` = identity and `S` = 0 under the
+  identity key, under an order-8 key, and under the non-canonical identity encoding `y = p + 1`, an honest
+  key's signature whose `R` is the identity, and a valid signature with `L` added to `S`. They carry no
+  `base`; the runner shows instead that a verifier without the strict checks accepts each. A conformant
   implementation MUST reject every case; the description lists what each `op` means. Each 0.5 case also
   carries `base`, the fields that restore the valid construction, which MUST be accepted, so the one
   mutation is shown to be the cause. Passing the positive vectors is not enough; an implementation that

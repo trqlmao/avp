@@ -11,6 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createPublicKey, verify as rawVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,8 @@ const negative = JSON.parse(readFileSync(join(root, "vectors", "negative.json"),
 
 const fromB64 = (s: string) => Buffer.from(s, "base64");
 const fromHex = (s: string) => Buffer.from(s, "hex");
+/** DER prefix for an Ed25519 SubjectPublicKeyInfo (RFC 8410), for the cofactorless check below. */
+const SPKI = Buffer.from("302a300506032b6570032100", "hex");
 
 function safeVerify(pub: Buffer, msg: Buffer, sig: Buffer): boolean {
   try {
@@ -145,4 +148,39 @@ test("each 0.5 negative differs from a valid base by its one mutation (the base 
     assert.ok(c.base, `${c.name}: every 0.5 negative carries a base`);
     assert.equal(accepted({ ...c, ...c.base }), true, `${c.name}: the unmutated base must be accepted`);
   }
+});
+
+/**
+ * The strict Ed25519 cases (SPEC 2) are only meaningful if a verifier without the strict checks
+ * accepts them: Node's OpenSSL verification is cofactorless and accepts the small-order forgeries
+ * and the non-canonical key, and the S + L signature verifies once S is reduced modulo L.
+ */
+test("the strict ed25519 negatives are accepted by a cofactorless verifier", () => {
+  const lenient = (c: any) =>
+    rawVerify(
+      null,
+      fromHex(c.messageHex),
+      createPublicKey({ key: Buffer.concat([SPKI, fromHex(c.publicKeyHex)]), format: "der", type: "spki" }),
+      fromHex(c.signatureHex),
+    );
+  const byName = new Map((negative.cases as any[]).map((c) => [c.name, c]));
+  for (const n of ["ed25519/identity-key-forgery", "ed25519/order-8-key-forgery", "ed25519/identity-r", "ed25519/non-canonical-key"]) {
+    const c = byName.get(n);
+    assert.ok(c, `missing negative ${n}`);
+    assert.equal(lenient(c), true, `${n}: a cofactorless verifier accepts it, so the strict check is what rejects it`);
+  }
+  const c = byName.get("ed25519/s-plus-l");
+  assert.ok(c, "missing negative ed25519/s-plus-l");
+  const sig = fromHex(c.signatureHex);
+  const L = (1n << 252n) + 27742317777372353535851937790883648493n;
+  let s = 0n;
+  for (let i = 63; i >= 32; i--) s = (s << 8n) | BigInt(sig[i]);
+  assert.ok(s >= L, "S is not reduced");
+  const reduced = Buffer.from(sig);
+  let r = s - L;
+  for (let i = 32; i < 64; i++) {
+    reduced[i] = Number(r & 0xffn);
+    r >>= 8n;
+  }
+  assert.equal(lenient({ ...c, signatureHex: reduced.toString("hex") }), true, "the reduced signature is valid");
 });

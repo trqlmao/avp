@@ -35,6 +35,7 @@ import {
   importX25519Private,
   importX25519Public,
   sha256,
+  sha512,
   WRAP_INFO,
   WRAP_SCHEME_ID,
   wrapKek,
@@ -2041,6 +2042,61 @@ function buildNegatives05(ctx: Ctx, fed: FedItems): any[] {
   ];
 }
 
+// ─── Strict Ed25519 rejects (SPEC 2) ─────────────────────────────────────────────
+
+const ED_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+const leInt = (b: Buffer) => [...b].reverse().reduce((x, v) => (x << 8n) | BigInt(v), 0n);
+const le32 = (x: bigint) => Buffer.from(Array.from({ length: 32 }, (_, i) => Number((x >> BigInt(8 * i)) & 0xffn)));
+/** The encoding of the identity point (y = 1), a small-order point with no private key. */
+const ED_IDENTITY = Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]);
+/** The signature R = identity, S = 0, which a cofactorless verifier accepts whenever [k]A is the identity. */
+const ED_SIG_ZERO = Buffer.concat([ED_IDENTITY, Buffer.alloc(32)]);
+/** An order-8 point (libsodium blocklist). */
+const ED_ORDER8 = fromHex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a");
+/** y = p + 1, the non-canonical encoding of the identity. */
+const ED_NONCANONICAL_IDENTITY = fromHex("ee" + "ff".repeat(30) + "7f");
+
+/**
+ * The Ed25519 signatures strict verification (SPEC 2) MUST reject and a cofactorless or
+ * non-canonical-tolerant verifier accepts. The honest key is the RFC 8032 key of the seed 0x07 00..00,
+ * the message the commit signature message over the all-zero commit id.
+ */
+function strictEd25519Negatives(): any[] {
+  const seed = Buffer.concat([Buffer.from([7]), Buffer.alloc(31)]);
+  const pub = ed25519PublicRaw(importEd25519Private(seed));
+  const msg = commitSigMessage(Buffer.alloc(32));
+  const h = sha512(seed);
+  const a = Buffer.from(h.subarray(0, 32));
+  a[0] &= 248;
+  a[31] &= 127;
+  a[31] |= 64;
+  // A signature by the honest key with R = identity: S = k * a mod L, k = SHA-512(R || A || M) mod L.
+  const k = leInt(sha512(ED_IDENTITY, pub, msg)) % ED_L;
+  const identityR = Buffer.concat([ED_IDENTITY, le32((k * leInt(a)) % ED_L)]);
+  // A message for which [k]A is the identity under the order-8 key: k mod L is a multiple of 8.
+  let i = 0;
+  const order8Msg = (n: number) => Buffer.from(`avp/vectors/order-8/${n}`, "utf8");
+  while ((leInt(sha512(ED_IDENTITY, ED_ORDER8, order8Msg(i))) % ED_L) % 8n !== 0n) i++;
+  const honest = ed25519Sign(importEd25519Private(seed), msg);
+  const sPlusL = Buffer.concat([honest.subarray(0, 32), le32(leInt(honest.subarray(32)) + ED_L)]);
+  const strict = (name: string, mutation: string, publicKey: Buffer, message: Buffer, signature: Buffer) => ({
+    name: `ed25519/${name}`,
+    op: "ed25519-verify",
+    mutation,
+    expect: "reject",
+    publicKeyHex: hex(publicKey),
+    messageHex: hex(message),
+    signatureHex: hex(signature),
+  });
+  return [
+    strict("identity-key-forgery", "public key and R are the identity point and S is 0: a forgery with no private key", ED_IDENTITY, msg, ED_SIG_ZERO),
+    strict("order-8-key-forgery", `public key is an order-8 point, R is the identity, S is 0, over the first message avp/vectors/order-8/<n> (n = ${i}) whose k is a multiple of 8`, ED_ORDER8, order8Msg(i), ED_SIG_ZERO),
+    strict("identity-r", "an honest key signs with R = identity and S = k * a mod L (R is small order)", pub, msg, identityR),
+    strict("s-plus-l", "add the group order L to S of a valid signature (non-canonical S)", pub, msg, sPlusL),
+    strict("non-canonical-key", "public key y = p + 1, the non-canonical encoding of the identity, R = identity, S = 0", ED_NONCANONICAL_IDENTITY, msg, ED_SIG_ZERO),
+  ];
+}
+
 function buildNegatives(extra: any[]): any {
   const kw = read("key-wrap.json").cases[0];
   const ed = read("ed25519.json").cases.find((c: any) => c.name === "rfc8032-test2");
@@ -2082,7 +2138,7 @@ function buildNegatives(extra: any[]): any {
 
   return {
     description:
-      "MUST-reject vectors. Each case starts from a valid construction (the seeds of key-wrap.json and ed25519.json, and the items of manifest.json, commit.json, and federation.json) and applies exactly one mutation; a conformant implementation MUST reject it. 'op' is the operation: 'key-unwrap' (X25519-HKDF-SHA256-AESGCM-v1, info avp/rdk-wrap/v1) and 'wrap-unwrap' (the same scheme under the case's `info`) MUST fail authentication; 'ed25519-verify' MUST return false; 'manifest-verify' (ownerSignature over the state bytes S under ownerKey, SPEC 4.2) MUST fail; 'manifest-link' MUST find that `next` does not link to `prev` (manifestSeq + 1 and prevManifestHash = manifestHash(prev), SPEC 6.3) although `next` is validly signed; 'commit-verify' (commitId recomputes from the header and authorSignature verifies, SPEC 7.1) MUST fail; 'payload-decrypt' (AES-256-GCM under dataKeyHex with AAD v2 built from `aad`, SPEC 4.3) MUST fail authentication; 'acceptance-verify' (the signature under verifyHostKey, SPEC 11.3) and 'leave-verify' (the signature under memberKey, SPEC 11.4) MUST return false. Where a case has `base`, replacing its fields with `base` gives the valid construction, which MUST be accepted. Wire base64 strictness is implementation-specific and intentionally not tested here. Generated by vectors/generate.ts from the same seeds as the positive vectors.",
+      "MUST-reject vectors. Each case starts from a valid construction (the seeds of key-wrap.json and ed25519.json, and the items of manifest.json, commit.json, and federation.json) and applies exactly one mutation; a conformant implementation MUST reject it. 'op' is the operation: 'key-unwrap' (X25519-HKDF-SHA256-AESGCM-v1, info avp/rdk-wrap/v1) and 'wrap-unwrap' (the same scheme under the case's `info`) MUST fail authentication; 'ed25519-verify' MUST return false, and its last five cases are the strict verification rejects of SPEC 2 (a small-order or non-canonical public key or R, a non-canonical S), which carry no base; 'manifest-verify' (ownerSignature over the state bytes S under ownerKey, SPEC 4.2) MUST fail; 'manifest-link' MUST find that `next` does not link to `prev` (manifestSeq + 1 and prevManifestHash = manifestHash(prev), SPEC 6.3) although `next` is validly signed; 'commit-verify' (commitId recomputes from the header and authorSignature verifies, SPEC 7.1) MUST fail; 'payload-decrypt' (AES-256-GCM under dataKeyHex with AAD v2 built from `aad`, SPEC 4.3) MUST fail authentication; 'acceptance-verify' (the signature under verifyHostKey, SPEC 11.3) and 'leave-verify' (the signature under memberKey, SPEC 11.4) MUST return false. Where a case has `base`, replacing its fields with `base` gives the valid construction, which MUST be accepted. Wire base64 strictness is implementation-specific and intentionally not tested here. Generated by vectors/generate.ts from the same seeds as the positive vectors.",
     cases: [
       wrap("flipped-tag", "flip the last byte of the wrap ciphertext (inside the GCM tag)", { ciphertextB64: b64(flipLast(kwCt)) }),
       wrap("tampered-body", "flip a bit in the first wrap-ciphertext byte", { ciphertextB64: b64(flipFirst(kwCt)) }),
@@ -2094,6 +2150,7 @@ function buildNegatives(extra: any[]): any {
       verify("wrong-message", "verify the valid signature against a different message", { messageHex: "ff" }),
       verify("wrong-public-key", "verify the valid signature under a different public key", { publicKeyHex: edOther.publicKeyHex }),
       ...extra,
+      ...strictEd25519Negatives(),
     ],
   };
 }
