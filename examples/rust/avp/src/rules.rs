@@ -268,8 +268,10 @@ fn content_ok(s: &ManifestState, prev: Option<&ManifestState>) -> bool {
 /// Construct it with the host's own Ed25519 key, apply items in arrival order, and read
 /// [`RepoView::heads`], [`RepoView::held`], and [`RepoView::tip`]. Every `apply_*` method is
 /// atomic: an item that is rejected changes nothing, except that a state that loses the tie rule
-/// but verifies is retained as a verified losing state (SPEC 6.5) and a commit header that verifies
-/// stays known for ancestry (SPEC 7.3).
+/// but verifies is retained as a verified losing state (SPEC 6.5), and that the verified header of a
+/// commit applied alone stays known for ancestry (SPEC 7.3) when a rule after the caller check
+/// refuses it. A commit whose caller is refused, and a state refused together with its commit,
+/// leave no header behind.
 ///
 /// Host implementers: on the [`Via::Offer`] path this engine applies no per-state hosted check, so
 /// it will adopt a whole repository whose states never list this host. The host MUST therefore
@@ -573,23 +575,10 @@ impl RepoView {
 
     // ─── Store ────────────────────────────────────────────────────────────────────────
 
+    /// Undoes a rejected operation completely, the headers it learned included: a rejected item
+    /// changes nothing, as on the offer path, where a rejected commit is not kept at all.
     fn restore(&mut self, snap: Store) {
-        // Verified headers stay known: ancestry uses them whether or not the commit was accepted
-        // (SPEC 7.3). The re-check that ran inside the failed operation was reverted with it, so
-        // run it again over the restored state for any header the operation learned.
-        let headers = std::mem::take(&mut self.st.headers);
         self.st = snap;
-        let mut learned = false;
-        for (k, parents) in headers {
-            if let std::collections::hash_map::Entry::Vacant(e) = self.st.headers.entry(k) {
-                e.insert(parents);
-                learned = true;
-            }
-        }
-        if learned {
-            self.recheck_cutoffs();
-            self.propagate();
-        }
     }
 
     fn tip_rec(&self) -> Option<Arc<StateRec>> {
@@ -907,10 +896,10 @@ impl RepoView {
             return Ok(Err(RejectCode::BadRequest));
         }
         let id = c.commit_id;
-        self.record_header(&c);
 
         // Caller check on the client routes: the caller is the author (the owner for a carried
-        // commit) and is a member of the tip.
+        // commit) and is a member of the tip. It runs before the header is recorded, so a caller
+        // the host refuses leaves nothing behind.
         if via == Via::Push {
             if carried && c.author != tip.state().owner_key {
                 return Ok(Err(RejectCode::Forbidden));
@@ -919,6 +908,7 @@ impl RepoView {
                 return Ok(Err(RejectCode::Forbidden));
             }
         }
+        self.record_header(&c);
 
         if let Some(existing) = self.status_of(&id) {
             return Ok(match existing {

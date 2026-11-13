@@ -386,3 +386,96 @@ fn unlisted_genesis_is_not_hosted_on_push_and_taken_by_offer() {
         .unwrap();
     assert!(listed.tip_lists_host());
 }
+
+// ─── A refused write leaves nothing behind (SPEC 7.1, 7.3) ─────────────────────────────────
+
+/// A commit sealed by `author` on `parents`, citing `cites` at `seq`.
+fn sealed(f: &Fixture, author: &SigningKey, parents: Vec<[u8; 32]>, seq: i64, cites: [u8; 32]) -> Commit {
+    let header = CommitHeader {
+        repo_id: f.genesis.state.repo_id.clone(),
+        parents,
+        manifest_seq: seq,
+        manifest_hash: cites,
+        key_epoch: 0,
+    };
+    Commit::seal(&[0x42; 32], header, b"{}", author).unwrap()
+}
+
+#[test]
+fn removed_member_push_does_not_decide_a_cutoff() {
+    let file = load("acceptance.json");
+    let sc = file["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "removed-member-ancestor-of-frontier")
+        .unwrap();
+    let steps = sc["steps"].as_array().unwrap();
+    let mut view = RepoView::new(b64_32(sc["hostKey"].as_str().unwrap()), 16);
+    // Up to bob's removal at seq 3 (frontier {a1, b1, b2}) and the first offer of b0, which waits for
+    // frontier commit b2 (SPEC 7.3).
+    for step in &steps[..6] {
+        assert_eq!(code(apply(&mut view, step)), step["expect"].as_str().unwrap());
+    }
+    let b0: Commit = decode(&steps[5]["item"]).unwrap();
+    let b2: Commit = decode(&steps[6]["item"]).unwrap();
+    assert_eq!(view.missing_for(&b0), vec![b2.commit_id]);
+    let before = format!("{view:?}");
+
+    // bob is not a member of the tip, so his own push of b2 is refused (SPEC 7.1), and its header
+    // does not decide b0's cutoff: nothing changed.
+    assert_eq!(view.apply_commit(b2.clone()), Err(RejectCode::Forbidden));
+    assert_eq!(format!("{view:?}"), before, "a refused caller changes nothing");
+    assert_eq!(view.missing_for(&b0), vec![b2.commit_id]);
+    assert_eq!(
+        view.apply_commit_via(b0.clone(), Via::Offer),
+        Err(RejectCode::MissingParents),
+        "b0 still waits for b2"
+    );
+
+    // b2 by replication then decides it, as the scenario expects.
+    for step in &steps[6..] {
+        assert_eq!(code(apply(&mut view, step)), step["expect"].as_str().unwrap());
+    }
+    assert_eq!(sorted_ids(view.heads()), sorted(&sc["finalHeads"]));
+}
+
+#[test]
+fn stranger_push_leaves_no_state() {
+    let f = fixture();
+    let mut view = RepoView::new(f.host_a, 16);
+    view.apply_manifest_with(f.genesis.clone(), Some(f.root.clone()), Via::Push)
+        .unwrap();
+    let before = format!("{view:?}");
+    let stranger = SigningKey::from_bytes(&[0x66; 32]);
+    let parents: Vec<[u8; 32]> = (0..200u8).map(|j| [j; 32]).collect();
+    let c = sealed(&f, &stranger, parents, 1, f.genesis.hash().unwrap());
+
+    // The signature is checked first (400 before 403, SPEC 7.1).
+    let mut forged = c.clone();
+    forged.author_signature[0] ^= 1;
+    assert_eq!(view.apply_commit(forged), Err(RejectCode::BadRequest));
+    // A signed commit by a key the tip does not list is refused and stores nothing, its header
+    // included.
+    assert_eq!(view.apply_commit(c.clone()), Err(RejectCode::Forbidden));
+    assert_eq!(format!("{view:?}"), before, "a refused caller changes nothing");
+    assert_eq!(view.status(&c.commit_id), None);
+}
+
+#[test]
+fn refused_publish_keeps_no_header_of_its_commit() {
+    let f = fixture();
+    let mut view = RepoView::new(f.host_a, 16);
+    view.apply_manifest_with(f.genesis.clone(), Some(f.root.clone()), Via::Push)
+        .unwrap();
+    let before = format!("{view:?}");
+    let x = seq2(&f, &f.alice);
+    let c = sealed(&f, &f.owner, vec![[7; 32]], 2, x.hash().unwrap());
+    // The state and its commit are applied together or not at all (SPEC 8.3): the commit's unknown
+    // parent refuses both, and the commit's header is not kept either.
+    assert_eq!(
+        view.apply_manifest_with(x, Some(c), Via::Push),
+        Err(RejectCode::MissingParents)
+    );
+    assert_eq!(format!("{view:?}"), before, "a refused publish changes nothing");
+}
