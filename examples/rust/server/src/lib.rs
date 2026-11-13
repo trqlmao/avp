@@ -108,6 +108,11 @@ pub struct State {
     pub limits: Limits,
     /// Added to the system clock. Zero in the binary; tests move it to expire challenges and tokens.
     pub clock_offset_ms: i64,
+    /// Test hook: when set, the host clock reads this time (epoch milliseconds) in place of the
+    /// system clock, before `clock_offset_ms` is added. `None` in the binary; tests freeze the clock
+    /// to pin exact time bounds.
+    #[doc(hidden)]
+    pub fixed_now_ms: Option<i64>,
     /// The replication settings (SPEC 9.3).
     pub replication: replication::Config,
     /// The peer list, the pause flag, and the queues the request handlers share with the
@@ -127,6 +132,7 @@ impl State {
             auth: Auth::default(),
             limits: Limits::default(),
             clock_offset_ms: 0,
+            fixed_now_ms: None,
             replication: replication::Config::default(),
             repl: replication::Runtime::default(),
             replication_stats: replication::Stats::default(),
@@ -148,7 +154,9 @@ impl State {
     /// The host's current time in epoch milliseconds.
     #[must_use]
     pub fn now_ms(&self) -> i64 {
-        system_ms().saturating_add(self.clock_offset_ms)
+        self.fixed_now_ms
+            .unwrap_or_else(system_ms)
+            .saturating_add(self.clock_offset_ms)
     }
 }
 

@@ -651,6 +651,17 @@ fn host_not_in_hosts_is_refused() {
     let mut b = node();
     let mut c = node();
     link(&mut [&mut a, &mut b, &mut c]);
+    // D records every request path it gets and answers 403, as a host that does not list the
+    // caller would. It is in A's static peer list (AVP_PEERS) but not in the repository's hosts.
+    let stop = Arc::new(AtomicBool::new(false));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let (d_addr, d_thread) = scripted_peer(Arc::clone(&stop), move |path| {
+        log.lock().unwrap().push(path.to_string());
+        (403, json!({ "error": "forbidden", "code": "forbidden" }).to_string())
+    });
+    let d = new_key();
+    a.peer_with(&[b.entry(), c.entry(), format!("{}@http://{d_addr}", b64_encode(&pk(&d)))]);
     let repo = genesis(&[a.key(), b.key()], a.key());
     create(&a, &repo);
     let id = repo.id();
@@ -666,6 +677,19 @@ fn host_not_in_hosts_is_refused() {
     // A never offers the repository to C, and C never takes it.
     thread::sleep(SWEEP * 6);
     assert!(!c.holds(&id));
+
+    // SPEC 9.2 and 9.3: A offers each accepted write only to the peers in the repository's hosts.
+    // D is reachable (A's sweep calls it), yet it never gets an offer, so it never sees the
+    // manifest, the ciphertext, or the commits.
+    let got = seen.lock().unwrap().clone();
+    assert!(!got.is_empty(), "A never called D, so the recorder proves nothing");
+    for p in &got {
+        assert_ne!(p, &host_path(&id, "offer"), "A offered the repository to D: {got:?}");
+        assert_eq!(p, &host_path(&id, "heads"), "A sent D more than a heads call: {got:?}");
+    }
+    stop.store(true, Ordering::SeqCst);
+    drop(a);
+    let _ = d_thread.join();
 }
 
 #[test]
@@ -739,6 +763,19 @@ fn stale_timestamp_rejected() {
         let h = host_headers(&p.sign, "POST", &path, &body, now_ms() + skew);
         assert_eq!(b.raw("POST", &path, &h, &body).status, 200);
     }
+    // The bound itself, on a frozen clock: SPEC 9.3 rejects only when |now - time| exceeds 60
+    // seconds, so exactly 60 000 ms is accepted and 60 001 ms is refused, in either direction.
+    let frozen = now_ms();
+    b.state.lock().unwrap().fixed_now_ms = Some(frozen);
+    for skew in [-60_000, 60_000] {
+        let h = host_headers(&p.sign, "POST", &path, &body, frozen + skew);
+        assert_eq!(b.raw("POST", &path, &h, &body).status, 200, "skew {skew}");
+    }
+    for skew in [-60_001, 60_001] {
+        let h = host_headers(&p.sign, "POST", &path, &body, frozen + skew);
+        assert_error(&b.raw("POST", &path, &h, &body), 401, "unauthorized");
+    }
+    b.state.lock().unwrap().fixed_now_ms = None;
 }
 
 #[test]
