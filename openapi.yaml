@@ -343,7 +343,9 @@ paths:
         commit in the same call. The receiver applies the items in dependency order and reports each
         manifest hash and commit id as accepted or rejected with the error code it would have returned
         to a client; both items of a rejected pair are rejected with the same code. An offer whose tip
-        does not list the receiver is `403 not_hosted`; an offer from a host not in the repository's
+        does not list the receiver is `403 not_hosted`, checked on the tip of the chain being received
+        before anything is stored; an earlier state of that chain is not rejected for not listing the
+        receiver. An offer from a host not in the repository's
         `hosts` is `403 forbidden`.
       security: []
       parameters:
