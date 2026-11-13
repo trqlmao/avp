@@ -87,9 +87,10 @@ Every non-2xx body is `{ error, code?, detail? }` (SPEC 10.4).
 | Heads per repository (client writes) | 16 | `409 too_many_heads` |
 | Members in a manifest state | 500 | `429 quota_exceeded` |
 | Repositories per owner key | 1000 | `429 quota_exceeded` |
-| Outstanding challenges | 10000 | `429 quota_exceeded` with `Retry-After` |
-| Live tokens | 100000 | `429 quota_exceeded` |
-| Recorded unexpired acceptances | 10000 | `429 quota_exceeded` |
+| Outstanding challenges per key | 16 | `429 quota_exceeded` with `Retry-After` |
+| Live tokens per key | 32 | `429 quota_exceeded` |
+| Recorded unexpired acceptances per member key | 64 | `429 quota_exceeded` |
+| Outstanding challenges, live tokens, recorded acceptances in all | 10000, 100000, 10000 | the oldest entry is evicted, so one caller cannot lock others out |
 | Challenge lifetime | 2 minutes | `401 unauthorized` after |
 | Token lifetime | 15 minutes | `401 unauthorized` after |
 

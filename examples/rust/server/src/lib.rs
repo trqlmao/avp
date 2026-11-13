@@ -52,12 +52,19 @@ pub struct Limits {
     pub max_members: usize,
     /// Most repositories one owner key may create on this host; more is `429 quota_exceeded`.
     pub max_repos_per_owner: usize,
-    /// Most outstanding (unexpired) challenges; more is `429 quota_exceeded`.
+    /// Most outstanding challenges in all; at the cap the oldest is evicted, so one caller cannot
+    /// lock everyone out.
     pub max_challenges: usize,
-    /// Most live (unexpired) bearer tokens; more is `429 quota_exceeded`.
+    /// Most outstanding challenges for one key; more is `429 quota_exceeded`.
+    pub max_challenges_per_key: usize,
+    /// Most live bearer tokens in all; at the cap the oldest is evicted.
     pub max_tokens: usize,
-    /// Most recorded unexpired acceptances (SPEC 8.2); more is `429 quota_exceeded`.
+    /// Most live bearer tokens for one key; more is `429 quota_exceeded`.
+    pub max_tokens_per_key: usize,
+    /// Most recorded unexpired acceptances (SPEC 8.2) in all; at the cap the oldest is evicted.
     pub max_pending_joins: usize,
+    /// Most recorded unexpired acceptances for one member key; more is `429 quota_exceeded`.
+    pub max_pending_joins_per_key: usize,
     /// The head bound for client writes (SPEC 7.4); more is `409 too_many_heads`.
     pub head_bound: usize,
 }
@@ -69,8 +76,11 @@ impl Default for Limits {
             max_members: 500,
             max_repos_per_owner: 1000,
             max_challenges: 10_000,
+            max_challenges_per_key: 16,
             max_tokens: 100_000,
+            max_tokens_per_key: 32,
             max_pending_joins: 10_000,
+            max_pending_joins_per_key: 64,
             head_bound: 16,
         }
     }

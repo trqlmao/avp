@@ -9,6 +9,10 @@
 //! Neither secret is stored: both maps are keyed by the SHA-256 digest of the secret, so a lookup
 //! compares digests rather than the secret itself and its timing says nothing about the secret.
 //! The challenge's bound key is compared in constant time.
+//!
+//! Memory stays bounded by two caps per table ([`Caps`]): a per-key cap answered with
+//! `429 quota_exceeded`, and a total cap at which the oldest entry is evicted, so one caller
+//! filling the table cannot lock every other caller out.
 
 use std::collections::HashMap;
 
@@ -27,25 +31,47 @@ pub enum AuthError {
     /// The nonce is unknown, already used, expired, issued for another key, or the signature does
     /// not verify: `401 unauthorized`.
     Unauthorized,
-    /// Too many outstanding challenges or live tokens: `429 quota_exceeded`.
+    /// This key already holds its share of outstanding challenges or live tokens:
+    /// `429 quota_exceeded`.
     Full,
 }
 
-struct Challenge {
+/// The size caps of one table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    /// Most live entries in all; at the cap the entry that expires first is evicted.
+    pub total: usize,
+    /// Most live entries for one key; more is [`AuthError::Full`].
+    pub per_key: usize,
+}
+
+struct Entry {
     key: [u8; 32],
     expires_at: i64,
 }
 
-struct Session {
-    subject: [u8; 32],
-    expires_at: i64,
+/// Drops expired entries, refuses a key at its per-key cap, and evicts the entry that expires
+/// first while the table is at its total cap.
+fn make_room(map: &mut HashMap<[u8; 32], Entry>, key: &[u8; 32], now: i64, caps: Caps) -> Result<(), AuthError> {
+    map.retain(|_, e| e.expires_at > now);
+    if caps.total == 0 || map.values().filter(|e| e.key == *key).count() >= caps.per_key {
+        return Err(AuthError::Full);
+    }
+    while map.len() >= caps.total {
+        let oldest = map.iter().min_by_key(|(_, e)| e.expires_at).map(|(d, _)| *d);
+        match oldest {
+            Some(d) => map.remove(&d),
+            None => break,
+        };
+    }
+    Ok(())
 }
 
 /// Outstanding challenges and live tokens, keyed by the SHA-256 digest of the secret.
 #[derive(Default)]
 pub struct Auth {
-    challenges: HashMap<[u8; 32], Challenge>,
-    tokens: HashMap<[u8; 32], Session>,
+    challenges: HashMap<[u8; 32], Entry>,
+    tokens: HashMap<[u8; 32], Entry>,
 }
 
 impl Auth {
@@ -53,16 +79,13 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// [`AuthError::Full`] when `max` unexpired challenges are outstanding.
-    pub fn challenge(&mut self, key: [u8; 32], now: i64, max: usize) -> Result<[u8; 32], AuthError> {
-        self.challenges.retain(|_, c| c.expires_at > now);
-        if self.challenges.len() >= max {
-            return Err(AuthError::Full);
-        }
+    /// [`AuthError::Full`] when `key` already has `caps.per_key` outstanding challenges.
+    pub fn challenge(&mut self, key: [u8; 32], now: i64, caps: Caps) -> Result<[u8; 32], AuthError> {
+        make_room(&mut self.challenges, &key, now, caps)?;
         let nonce = random_bytes::<32>();
         self.challenges.insert(
             sha256(&nonce),
-            Challenge {
+            Entry {
                 key,
                 expires_at: now.saturating_add(CHALLENGE_TTL_MS),
             },
@@ -79,33 +102,24 @@ impl Auth {
     ///
     /// [`AuthError::Unauthorized`] if the nonce was not issued, was already used, has expired, was
     /// issued for another key, or the signature over the raw nonce bytes does not verify under
-    /// `key`; [`AuthError::Full`] when `max_tokens` live tokens exist.
+    /// `key`; [`AuthError::Full`] when `key` already has `caps.per_key` live tokens.
     pub fn token(
         &mut self,
         key: [u8; 32],
         nonce: &[u8],
         signature: &[u8; 64],
         now: i64,
-        max_tokens: usize,
+        caps: Caps,
     ) -> Result<(String, i64), AuthError> {
         let challenge = self.challenges.remove(&sha256(nonce)).ok_or(AuthError::Unauthorized)?;
         if challenge.expires_at <= now || !ct_eq(&challenge.key, &key) {
             return Err(AuthError::Unauthorized);
         }
         ed25519_verify(&key, nonce, signature).map_err(|_| AuthError::Unauthorized)?;
-        self.tokens.retain(|_, s| s.expires_at > now);
-        if self.tokens.len() >= max_tokens {
-            return Err(AuthError::Full);
-        }
+        make_room(&mut self.tokens, &key, now, caps)?;
         let token = b64url_encode(&random_bytes::<32>());
         let expires_at = now.saturating_add(TOKEN_TTL_MS);
-        self.tokens.insert(
-            sha256(token.as_bytes()),
-            Session {
-                subject: key,
-                expires_at,
-            },
-        );
+        self.tokens.insert(sha256(token.as_bytes()), Entry { key, expires_at });
         Ok((token, expires_at))
     }
 
@@ -114,7 +128,7 @@ impl Auth {
     pub fn subject(&self, token: &str, now: i64) -> Option<[u8; 32]> {
         self.tokens
             .get(&sha256(token.as_bytes()))
-            .filter(|s| s.expires_at > now)
-            .map(|s| s.subject)
+            .filter(|e| e.expires_at > now)
+            .map(|e| e.key)
     }
 }

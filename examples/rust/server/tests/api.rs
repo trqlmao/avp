@@ -525,7 +525,9 @@ fn removed_member_push_forbidden() {
     repo.tip = removed;
     repo.data_key = new_key;
 
-    // Bob backdates a child of his frontier commit citing the old state and epoch (SPEC 7.3).
+    // Bob backdates a child of his frontier commit citing the old state and epoch. Through the
+    // client route the 403 comes from the caller check: bob is no longer a member of the tip
+    // (SPEC 7.1). The removal cutoff itself (SPEC 7.3) is pinned by the engine's acceptance tests.
     let late = commit_on(&at_seq2, &old_key, &bob.sign, vec![bob_commit.commit_id], b"late");
     assert_error(&push(&host, &repo, &bob_token, &late), 403, "forbidden");
     // And he can no longer pull: not a member of the tip.
@@ -1167,8 +1169,8 @@ fn repo_limit_per_owner_is_quota_exceeded() {
 }
 
 #[test]
-fn challenge_capacity_is_quota_exceeded() {
-    let host = start_with(|s| s.limits.max_challenges = 2);
+fn challenge_cap_per_key_is_quota_exceeded() {
+    let host = start_with(|s| s.limits.max_challenges_per_key = 2);
     let key = new_key();
     host.challenge(&key);
     host.challenge(&key);
@@ -1178,9 +1180,336 @@ fn challenge_capacity_is_quota_exceeded() {
         &json!({ "ed25519PublicKey": b64_encode(&pk(&key)) }),
     );
     assert_error(&r, 429, "quota_exceeded");
+    // Another key is not affected by this key's cap.
+    host.challenge(&new_key());
     // Expired challenges free their slots.
     host.advance_clock(2 * 60 * 1000 + 1);
     host.challenge(&key);
+}
+
+#[test]
+fn challenge_global_cap_evicts_the_oldest() {
+    // One caller filling the global table cannot lock out the next caller: the oldest challenge is
+    // evicted instead of answering 429.
+    let host = start_with(|s| s.limits.max_challenges = 2);
+    let (a, b, c) = (new_key(), new_key(), new_key());
+    let na = host.challenge(&a);
+    host.advance_clock(1);
+    let nb = host.challenge(&b);
+    host.advance_clock(1);
+    let nc = host.challenge(&c);
+    let sign = |k: &SigningKey, n: &str| k.sign(&b64_decode(n).unwrap()).to_bytes();
+    assert_error(&host.redeem(&a, &na, &sign(&a, &na)), 401, "unauthorized");
+    assert_eq!(host.redeem(&b, &nb, &sign(&b, &nb)).status, 200);
+    assert_eq!(host.redeem(&c, &nc, &sign(&c, &nc)).status, 200);
+}
+
+#[test]
+fn token_cap_per_key_is_quota_exceeded() {
+    let host = start_with(|s| s.limits.max_tokens_per_key = 2);
+    let key = new_key();
+    host.login(&key);
+    host.login(&key);
+    let nonce = host.challenge(&key);
+    let r = host.redeem(&key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    assert_error(&r, 429, "quota_exceeded");
+    // Another key still logs in.
+    host.login(&new_key());
+}
+
+#[test]
+fn token_global_cap_evicts_the_oldest() {
+    let host = start_with(|s| s.limits.max_tokens = 2);
+    let (r1, t1) = created(&host);
+    host.advance_clock(1);
+    let (r2, t2) = created(&host);
+    host.advance_clock(1);
+    let (r3, t3) = created(&host);
+    assert_error(&pull(&host, &r1, &t1, 0, &[]), 401, "unauthorized");
+    assert_eq!(pull(&host, &r2, &t2, 0, &[]).status, 200);
+    assert_eq!(pull(&host, &r3, &t3, 0, &[]).status, 200);
+}
+
+fn prepare(host: &Host, key: &SigningKey, token: &str) -> Reply {
+    host.post(
+        "/v1/prepare-join",
+        Some(token),
+        &json!({ "repoId": genesis(&[host.key()]).id(), "memberKey": b64_encode(&pk(key)) }),
+    )
+}
+
+#[test]
+fn acceptance_cap_per_key_is_quota_exceeded() {
+    let host = start_with(|s| s.limits.max_pending_joins_per_key = 2);
+    let carol = new_key();
+    let token = host.login(&carol);
+    assert_eq!(prepare(&host, &carol, &token).status, 200);
+    assert_eq!(prepare(&host, &carol, &token).status, 200);
+    assert_error(&prepare(&host, &carol, &token), 429, "quota_exceeded");
+    let bob = new_key();
+    let bob_token = host.login(&bob);
+    assert_eq!(
+        prepare(&host, &bob, &bob_token).status,
+        200,
+        "another key is not affected"
+    );
+}
+
+#[test]
+fn acceptance_global_cap_evicts_the_oldest() {
+    let host = start_with(|s| s.limits.max_pending_joins = 2);
+    let mut issued = Vec::new();
+    for _ in 0..3 {
+        let k = new_key();
+        let t = host.login(&k);
+        let r = prepare(&host, &k, &t);
+        assert_eq!(r.status, 200);
+        issued.push((r.json["repoId"].as_str().unwrap().to_string(), pk(&k)));
+        host.advance_clock(1);
+    }
+    let st = host.state.lock().unwrap();
+    assert_eq!(st.store.pending_join.len(), 2);
+    assert!(
+        !st.store.pending_join.contains_key(&issued[0]),
+        "the oldest acceptance is evicted"
+    );
+    assert!(st.store.pending_join.contains_key(&issued[1]));
+    assert!(st.store.pending_join.contains_key(&issued[2]));
+}
+
+// ─── Fix round 1: reject paths SPEC lists ───────────────────────────────────────────────
+
+fn sealed(key: &SigningKey, header: CommitHeader, data_key: &[u8; 32]) -> Commit {
+    Commit::seal(data_key, header, EMPTY_PAYLOAD, key).unwrap()
+}
+
+#[test]
+fn publish_carried_commit_missing_parent_lists_only_that_parent() {
+    let host = start();
+    let (repo, token) = created(&host);
+    let next = repo.next(|s| s.share_refresh_tokens = true);
+    let unknown = random_bytes::<32>();
+    let c = commit_on(&next, &repo.data_key, &repo.owner.sign, vec![unknown], b"x");
+    let r = host.post(
+        &repo.path("manifest"),
+        Some(&token),
+        &json!({ "manifest": to_json(&next), "commit": to_json(&c) }),
+    );
+    assert_error(&r, 422, "missing_parents");
+    assert_eq!(r.json["detail"], json!(b64_encode(&unknown)));
+    // Nothing was adopted.
+    let tip = pull(&host, &repo, &token, 0, &[]).json["manifests"].clone();
+    assert_eq!(tip, json!([to_json(&repo.tip)]));
+}
+
+#[test]
+fn publish_carried_commit_beyond_bound_is_too_many_heads() {
+    let host = start();
+    let (repo, token) = created(&host);
+    for i in 0..16 {
+        let c = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], format!("{i}").as_bytes());
+        assert_eq!(push(&host, &repo, &token, &c).status, 200);
+    }
+    let next = repo.next(|s| s.share_refresh_tokens = true);
+    let c = commit_on(
+        &next,
+        &repo.data_key,
+        &repo.owner.sign,
+        vec![repo.root.commit_id],
+        b"17",
+    );
+    let r = host.post(
+        &repo.path("manifest"),
+        Some(&token),
+        &json!({ "manifest": to_json(&next), "commit": to_json(&c) }),
+    );
+    assert_error(&r, 409, "too_many_heads");
+}
+
+#[test]
+fn create_non_genesis_state_is_bad_request() {
+    let host = start();
+    let repo = genesis(&[host.key()]);
+    let token = host.login(&repo.owner.sign);
+    let seq2 = repo.next(|s| s.share_refresh_tokens = true);
+    let c = commit_on(&seq2, &repo.data_key, &repo.owner.sign, Vec::new(), EMPTY_PAYLOAD);
+    let r = host.post(
+        "/v1/repos",
+        Some(&token),
+        &json!({ "manifest": to_json(&seq2), "commit": to_json(&c) }),
+    );
+    assert_error(&r, 400, "bad_request");
+}
+
+#[test]
+fn create_first_commit_rules_are_bad_request() {
+    let host = start();
+    let repo = genesis(&[host.key()]);
+    let token = host.login(&repo.owner.sign);
+    let g = &repo.tip;
+    let base = CommitHeader {
+        repo_id: repo.id(),
+        parents: Vec::new(),
+        manifest_seq: 1,
+        manifest_hash: g.hash().unwrap(),
+        key_epoch: 0,
+    };
+    let owner = &repo.owner.sign;
+    let dk = &repo.data_key;
+    let cases = [
+        (
+            "has a parent",
+            sealed(
+                owner,
+                CommitHeader {
+                    parents: vec![[5; 32]],
+                    ..base.clone()
+                },
+                dk,
+            ),
+        ),
+        (
+            "wrong manifest hash",
+            sealed(
+                owner,
+                CommitHeader {
+                    manifest_hash: [6; 32],
+                    ..base.clone()
+                },
+                dk,
+            ),
+        ),
+        (
+            "wrong seq",
+            sealed(
+                owner,
+                CommitHeader {
+                    manifest_seq: 2,
+                    ..base.clone()
+                },
+                dk,
+            ),
+        ),
+        ("author not owner", sealed(&new_key(), base.clone(), dk)),
+        (
+            "keyEpoch not 0",
+            sealed(
+                owner,
+                CommitHeader {
+                    key_epoch: 1,
+                    ..base.clone()
+                },
+                dk,
+            ),
+        ),
+    ];
+    for (name, c) in &cases {
+        let r = host.post(
+            "/v1/repos",
+            Some(&token),
+            &json!({ "manifest": to_json(g), "commit": to_json(c) }),
+        );
+        assert_eq!(r.status, 400, "{name}: {}", r.json);
+        assert_eq!(r.json["code"], json!("bad_request"), "{name}");
+    }
+    let r = host.post("/v1/repos", Some(&token), &json!({ "manifest": to_json(g) }));
+    assert_error(&r, 400, "bad_request");
+    assert!(host.state.lock().unwrap().store.repos.is_empty());
+}
+
+#[test]
+fn forged_colliding_genesis_is_bad_request_not_duplicate() {
+    let host = start();
+    let (repo, _) = created(&host);
+    // Mallory reuses the existing repoId under her own owner key: the repoId does not recompute.
+    let mallory = genesis(&[host.key()]);
+    let mut s = mallory.tip.state.clone();
+    s.repo_id = repo.id();
+    let forged = s.sign(&mallory.owner.sign).unwrap();
+    let c = commit_on(
+        &forged,
+        &mallory.data_key,
+        &mallory.owner.sign,
+        Vec::new(),
+        EMPTY_PAYLOAD,
+    );
+    let t = host.login(&mallory.owner.sign);
+    let r = host.post(
+        "/v1/repos",
+        Some(&t),
+        &json!({ "manifest": to_json(&forged), "commit": to_json(&c) }),
+    );
+    assert_error(&r, 400, "bad_request");
+    // The same genesis with a bad owner signature.
+    let mut bad_sig = repo.tip.clone();
+    bad_sig.owner_signature[0] ^= 1;
+    let t = host.login(&repo.owner.sign);
+    let r = host.post(
+        "/v1/repos",
+        Some(&t),
+        &json!({ "manifest": to_json(&bad_sig), "commit": to_json(&repo.root) }),
+    );
+    assert_error(&r, 400, "bad_request");
+}
+
+#[test]
+fn push_epoch_mismatch_is_forbidden() {
+    let host = start();
+    let (repo, token) = created(&host);
+    let header = CommitHeader {
+        repo_id: repo.id(),
+        parents: vec![repo.root.commit_id],
+        manifest_seq: 1,
+        manifest_hash: repo.tip.hash().unwrap(),
+        key_epoch: 1,
+    };
+    let c = sealed(&repo.owner.sign, header, &repo.data_key);
+    assert_error(&push(&host, &repo, &token, &c), 403, "forbidden");
+}
+
+#[test]
+fn publish_dropping_this_host_is_not_hosted() {
+    let host = start();
+    let other = pk(&new_key());
+    // The owner's home is the other host, so a state listing only it passes the content rules.
+    let repo = genesis(&[other, host.key()]);
+    let token = host.login(&repo.owner.sign);
+    assert_eq!(host.post("/v1/repos", Some(&token), &create_body(&repo)).status, 200);
+    let next = repo.next(|s| s.hosts.retain(|h| h.key == other));
+    let r = host.post(
+        &repo.path("manifest"),
+        Some(&token),
+        &json!({ "manifest": to_json(&next) }),
+    );
+    assert_error(&r, 403, "not_hosted");
+}
+
+#[test]
+fn leave_by_outsider_is_forbidden() {
+    let host = start();
+    let (repo, _) = created(&host);
+    let outsider = new_key();
+    let t = host.login(&outsider);
+    let own = leave_request(&repo, &outsider);
+    assert_error(
+        &host.post(&repo.path("leave"), Some(&t), &to_json(&own)),
+        403,
+        "forbidden",
+    );
+}
+
+#[test]
+fn pull_returns_states_after_since_in_ascending_order() {
+    let host = start();
+    let (mut repo, token) = created(&host);
+    add_member(&host, &mut repo, &token, &Device::new());
+    let seq2 = repo.tip.clone();
+    add_member(&host, &mut repo, &token, &Device::new());
+    let seq3 = repo.tip.clone();
+    let r = pull(&host, &repo, &token, 1, &[]);
+    assert_eq!(r.json["manifests"], json!([to_json(&seq2), to_json(&seq3)]));
+    let r = pull(&host, &repo, &token, 3, &[]);
+    assert_eq!(r.json["manifests"], json!([]));
 }
 
 #[test]

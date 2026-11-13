@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response};
 
 use crate::State;
-use crate::auth::{AuthError, CHALLENGE_TTL_MS};
+use crate::auth::{AuthError, CHALLENGE_TTL_MS, Caps};
 
 /// How long an acceptance from `prepareJoin` stays valid (SPEC 8.2: the reference hosts use 15
 /// minutes).
@@ -405,11 +405,15 @@ fn discovery(st: &State) -> Answer {
 
 fn challenge(st: &mut State, body: &[u8]) -> Answer {
     let ChallengeBody { key } = decode(body)?;
-    let (now, max) = (st.now_ms(), st.limits.max_challenges);
-    match st.auth.challenge(key, now, max) {
+    let now = st.now_ms();
+    let caps = Caps {
+        total: st.limits.max_challenges,
+        per_key: st.limits.max_challenges_per_key,
+    };
+    match st.auth.challenge(key, now, caps) {
         Ok(nonce) => Ok(json!({ "nonce": b64_encode(&nonce) })),
         Err(_) => {
-            let mut e = ApiError::quota("too many outstanding challenges");
+            let mut e = ApiError::quota("too many outstanding challenges for this key");
             e.retry_after_s = Some(CHALLENGE_TTL_MS / 1000);
             Err(e)
         }
@@ -418,13 +422,17 @@ fn challenge(st: &mut State, body: &[u8]) -> Answer {
 
 fn token(st: &mut State, body: &[u8]) -> Answer {
     let TokenBody { key, nonce, signature } = decode(body)?;
-    let (now, max) = (st.now_ms(), st.limits.max_tokens);
-    match st.auth.token(key, &nonce, &signature, now, max) {
+    let now = st.now_ms();
+    let caps = Caps {
+        total: st.limits.max_tokens,
+        per_key: st.limits.max_tokens_per_key,
+    };
+    match st.auth.token(key, &nonce, &signature, now, caps) {
         Ok((token, expires_at)) => Ok(json!({ "token": token, "expiresAt": expires_at })),
         Err(AuthError::Unauthorized) => Err(ApiError::unauthorized(
             "challenge nonce unknown, used, expired, or not issued for this key, or bad signature",
         )),
-        Err(AuthError::Full) => Err(ApiError::quota("too many live tokens")),
+        Err(AuthError::Full) => Err(ApiError::quota("too many live tokens for this key")),
     }
 }
 
@@ -437,20 +445,29 @@ fn create_repo(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
     if s.owner_key != caller {
         return Err(ApiError::forbidden("caller is not the genesis ownerKey"));
     }
-    if st.store.repos.contains_key(&s.repo_id) {
-        return Err(ApiError::new(409, "duplicate_repo", "repository already exists"));
-    }
-    if st.store.repos_owned_by(&caller) >= st.limits.max_repos_per_owner {
-        return Err(ApiError::quota("repository quota for this owner key exceeded"));
+    // createRepo carries the genesis state (SPEC 6.2, 10.1); any other seq is malformed.
+    if s.manifest_seq != 1 {
+        return Err(ApiError::bad_request(
+            "createRepo needs the genesis state (manifestSeq 1)",
+        ));
     }
     if s.members.len() > st.limits.max_members {
         return Err(ApiError::quota("member limit exceeded"));
     }
+    // Validate first, on a fresh view: structure, owner signature, repoId recomputation, genesis
+    // and first-commit rules, and the hosted check (SPEC 6, 8.2). Only a valid genesis can collide
+    // with a held repoId, so a forged one never learns whether that id exists here.
     let mut view = RepoView::new(st.host_key(), st.limits.head_bound);
     // The genesis state and its first commit are accepted together or not at all (SPEC 8.2).
     view.apply_manifest_with(manifest, Some(commit), Via::Push)
         .map_err(ApiError::reject)?;
     let tip = view.tip().cloned().ok_or_else(ApiError::internal)?;
+    if st.store.repos.contains_key(&tip.state.repo_id) {
+        return Err(ApiError::new(409, "duplicate_repo", "repository already exists"));
+    }
+    if st.store.repos_owned_by(&caller) >= st.limits.max_repos_per_owner {
+        return Err(ApiError::quota("repository quota for this owner key exceeded"));
+    }
     st.store.repos.insert(tip.state.repo_id.clone(), view);
     to_json(&tip)
 }
@@ -481,12 +498,12 @@ fn prepare_join(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
     }
     .sign(st.host_signing_key())
     .map_err(|_| ApiError::internal())?;
-    let max = st.limits.max_pending_joins;
+    let (total, per_key) = (st.limits.max_pending_joins, st.limits.max_pending_joins_per_key);
     if !st
         .store
-        .record_acceptance(&acceptance.repo_id, member_key, expires_at, now, max)
+        .record_acceptance(&acceptance.repo_id, member_key, expires_at, now, total, per_key)
     {
-        return Err(ApiError::quota("too many outstanding acceptances"));
+        return Err(ApiError::quota("too many outstanding acceptances for this key"));
     }
     to_json(&acceptance)
 }
@@ -563,10 +580,19 @@ fn publish_manifest(st: &mut State, caller: [u8; 32], repo_id: &str, body: &[u8]
         return Err(ApiError::quota("member limit exceeded"));
     }
     let probe = commit.clone();
+    let submitted = manifest.hash().ok();
     match view.apply_manifest_with(manifest, commit, Via::Push) {
         Ok(()) => to_json(tip(view)?),
         Err(RejectCode::MissingParents) => {
-            let ids = probe.map(|c| view.missing_for(&c)).unwrap_or_default();
+            // The engine has rolled the state back, so `missing_for` also names the state this
+            // request carries; it is not missing (the commit was checked against it), so only the
+            // ids the host really lacks go in `detail` (SPEC 7.4, 10.4).
+            let ids: Vec<[u8; 32]> = probe
+                .map(|c| view.missing_for(&c))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| Some(*id) != submitted)
+                .collect();
             Err(ApiError::missing(&ids))
         }
         Err(code) => Err(ApiError::reject(code)),

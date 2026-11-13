@@ -29,8 +29,11 @@ impl Store {
             .count()
     }
 
-    /// Records an issued acceptance, after dropping expired ones. Returns `false`, recording
-    /// nothing, when `max` unexpired acceptances are already recorded.
+    /// Records an issued acceptance, after dropping expired ones.
+    ///
+    /// Returns `false`, recording nothing, when `member` already holds `per_key` unexpired
+    /// acceptances for other repositories. When `total` are recorded, the one that expires first
+    /// is evicted, so one member key cannot fill the table for everyone.
     #[must_use]
     pub fn record_acceptance(
         &mut self,
@@ -38,12 +41,27 @@ impl Store {
         member: [u8; 32],
         expires_at: i64,
         now: i64,
-        max: usize,
+        total: usize,
+        per_key: usize,
     ) -> bool {
         self.pending_join.retain(|_, exp| *exp > now);
         let key = (repo_id.to_string(), member);
-        if !self.pending_join.contains_key(&key) && self.pending_join.len() >= max {
-            return false;
+        if !self.pending_join.contains_key(&key) {
+            let held = self.pending_join.keys().filter(|(_, m)| *m == member).count();
+            if total == 0 || held >= per_key {
+                return false;
+            }
+            while self.pending_join.len() >= total {
+                let oldest = self
+                    .pending_join
+                    .iter()
+                    .min_by_key(|(_, exp)| **exp)
+                    .map(|(k, _)| k.clone());
+                match oldest {
+                    Some(k) => self.pending_join.remove(&k),
+                    None => break,
+                };
+            }
         }
         self.pending_join.insert(key, expires_at);
         true
