@@ -28,7 +28,8 @@
  * Options: `--challenge-ttl-ms N` (the host's challenge lifetime, default 120000, the SPEC 3.3
  * RECOMMENDED maximum; the expired-nonce check waits this long plus a margin), `--head-bound N` (the
  * host's head bound, default 16, the SPEC 7.4 RECOMMENDED value), `--startup-timeout-ms N` (how long
- * to wait for `/.well-known/avp`, default 30000).
+ * to wait for `/.well-known/avp`, default 30000), `--request-timeout-ms N` (how long one request may
+ * take before the run fails, default 30000, so a hanging host fails instead of hanging the run).
  *
  * Exit code is 0 only if every check passes. SPDX-License-Identifier: MIT
  */
@@ -105,6 +106,7 @@ const BASE_URL = (flag("--server") ?? process.env.AVP_SERVER_URL ?? "http://127.
 const CHALLENGE_TTL_MS = numberFlag("--challenge-ttl-ms", 120_000);
 const HEAD_BOUND = numberFlag("--head-bound", 16);
 const STARTUP_TIMEOUT_MS = numberFlag("--startup-timeout-ms", 30_000);
+const REQUEST_TIMEOUT_MS = numberFlag("--request-timeout-ms", 30_000);
 /** Slack added to the challenge TTL before the expired nonce is redeemed. */
 const EXPIRY_MARGIN_MS = 3_000;
 
@@ -152,6 +154,8 @@ async function req(method: string, path: string, body?: unknown, token?: string)
     method,
     headers,
     body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+    // A host that never answers fails the run (the abort throws) instead of hanging it.
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const text = await res.text();
   seen.push(text);

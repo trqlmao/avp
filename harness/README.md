@@ -21,6 +21,7 @@ harness polls `GET /.well-known/avp` until the host answers, so it can be starte
 | `--challenge-ttl-ms N` | `120000` | The host's challenge nonce lifetime (SPEC 3.3 RECOMMENDED maximum). The expired-nonce check redeems a nonce issued at start once this much time (plus 3 s) has passed, so a run takes about two minutes. |
 | `--head-bound N` | `16` | The host's head bound (SPEC 7.4 RECOMMENDED value). |
 | `--startup-timeout-ms N` | `30000` | How long to wait for discovery. |
+| `--request-timeout-ms N` | `30000` | How long one request may take; a host that does not answer in time fails the run instead of hanging it. |
 
 ## What it checks
 
