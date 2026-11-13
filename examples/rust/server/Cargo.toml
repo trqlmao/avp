@@ -1,22 +1,29 @@
 [package]
 name = "avp-reference-server"
 version = "0.0.0"
-edition = "2021"
-rust-version = "1.74"
-description = "In-memory reference server for the Alt Vault Protocol (HTTP/JSON profile). Illustrative, not production."
+edition = "2024"
+rust-version = "1.85"
+description = "In-memory AVP 0.5 reference host (HTTP/JSON profile, client-facing API) over the shared avp crate. Illustrative, not production."
 license = "MIT"
 publish = false
+
+[lib]
+name = "avp_reference_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "avp-reference-server"
 path = "src/main.rs"
 
 [dependencies]
+avp = { path = "../avp" }
+ed25519-dalek = "=3.0.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
 tiny_http = "=0.12.0"
-serde_json = "=1.0.150"
-ed25519-dalek = "=2.2.0"
-base64 = "=0.22.1"
-rand = "=0.8.6"
 
 [profile.release]
 opt-level = 2
+
+[dev-dependencies]
+x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
