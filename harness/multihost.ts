@@ -8,7 +8,8 @@
  * says both hosts must converge on:
  *
  *   - write-while-b-paused-converges: a write on A while B is paused reaches B after it heals, and a
- *     write on B reaches A (SPEC 9.2, 9.3);
+ *     write on B reaches A; a leave request on B is offered to A, and a newer one made on A while B
+ *     is paused reaches B by catch-up `fetch` (SPEC 8.4, 9.1, 9.2, 9.3);
  *   - concurrent-writes-two-heads-then-merge: concurrent writes on A and B give the same two heads on
  *     both hosts, and a merge on A collapses them on both (SPEC 7.4, 9.2);
  *   - removed-member-rejected-on-both: a commit the removed member wrote on B while B was paused is
@@ -39,13 +40,18 @@ import {
   commitFromWire,
   ed25519Sign,
   importEd25519Private,
+  leaveFromWire,
+  leaveToWire,
   manifestHash,
+  signLeave,
   signManifest,
   verifyAcceptance,
+  verifyLeave,
   type Commit,
   type HostRef,
   type SignedManifest,
   type WireCommit,
+  type WireLeaveRequest,
   type WireSignedManifest,
 } from "./crypto.ts";
 import {
@@ -326,6 +332,20 @@ async function newRepo(w: World, withCarol = false): Promise<Repo> {
 const write = (repo: Repo, author: Party, parents: Buffer[], manifest = repo.m2, dataKey = repo.k0) =>
   makeCommit({ repoId: repo.repoId, author, parents, manifest, dataKey, plaintext: payloadWith(MARKER, author) });
 
+const leaveOf = (repo: Repo, p: Party, at: number): WireLeaveRequest =>
+  leaveToWire(signLeave({ repoId: repo.repoId, memberKey: p.pub, at }, p.seed));
+
+/** Waits until `h` serves exactly the one pending leave request `want`, unchanged, and records the check. */
+async function expectLeave(section: string, name: string, h: Host, p: Party, repo: Repo, want: WireLeaveRequest): Promise<void> {
+  const same = (r: Resp) => {
+    const ls: WireLeaveRequest[] = Array.isArray(r.body?.leaves) ? r.body.leaves : [];
+    return r.status === 200 && ls.length === 1 && ls[0].repoId === want.repoId && ls[0].memberKey === want.memberKey
+      && ls[0].at === want.at && ls[0].signature === want.signature && verifyLeave(leaveFromWire(ls[0]));
+  };
+  const r = await until(() => pull(h, p, repo.repoId), same);
+  check(section, name, r.ok, `want the one leave at ${want.at} by ${want.memberKey} within ${CONVERGE_MS} ms, ${show(r.value)}`);
+}
+
 async function expectPushed(name: string, h: Host, p: Party, repo: Repo, c: Commit, heads: Buffer[]): Promise<void> {
   const r = await push(h, p, repo.repoId, c);
   check("§10.1", name, r.status === 200 && r.body?.accepted === true && sameSet(idsOf(r.body?.heads), heads.map(b64)), show(r));
@@ -360,6 +380,22 @@ async function writeWhileBPausedConverges(w: World): Promise<void> {
   const b2 = write(repo, bob, [a1.commitId]);
   await expectPushed("bob's write on B on top of a1 is accepted", b, bob, repo, b2, [b2.commitId]);
   await expectConverged("§9.2", "a write accepted on B is offered to A: A's heads become exactly [b2]", a, alice, repo.repoId, [b2.commitId]);
+
+  // SPEC 8.4, 9.1, 9.2: leave requests replicate like any accepted write, by offer and by catch-up.
+  const l1 = leaveOf(repo, bob, Date.now() - 1000);
+  {
+    const r = await req(b, "POST", repoPath(repo.repoId, "leave"), l1, tok(bob, b));
+    check("§8.4", "bob's leave request on B is 200 {}", r.status === 200 && r.text.trim() === "{}", show(r));
+  }
+  await expectLeave("§9.2", "the leave accepted on B is offered to A: A's pull serves it unchanged, and it verifies", a, alice, repo, l1);
+  await setPaused(b, true);
+  const l2 = leaveOf(repo, bob, Date.now());
+  {
+    const r = await req(a, "POST", repoPath(repo.repoId, "leave"), l2, tok(bob, a));
+    check("§8.4", "bob's newer leave request on A, while B is paused, is 200 {}", r.status === 200 && r.text.trim() === "{}", show(r));
+  }
+  await setPaused(b, false);
+  await expectLeave("§9.1", "after the heal B's catch-up fetch brings the newer leave: B serves exactly it, unchanged", b, alice, repo, l2);
 }
 
 async function concurrentWritesTwoHeadsThenMerge(w: World): Promise<void> {

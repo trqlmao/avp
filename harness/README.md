@@ -53,9 +53,11 @@ reference test control (SPEC §9.3), so it runs against any pair of hosts that s
 language pairing.
 
 ```sh
-bun multihost.ts --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203```
+bun multihost.ts --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
+```
 
-Start each host with `AVP_TEST_CONTROL=1`, a distinct `AVP_HOST_SEED`, and `AVP_PEERS` naming the others
+Start each host with `AVP_TEST_CONTROL=1`, `AVP_BIND=127.0.0.1` (the test control must not face a
+network), a distinct `AVP_HOST_SEED`, and `AVP_PEERS` naming the others
 (`<base64 hostKey>@http://127.0.0.1:<port>`; the host key is the one each host's `/.well-known/avp`
 serves). A and B peer with each other; C peers with A and B (and they with C) but is never listed in a
 repository's `hosts`. Without `--c` the `unlisted-host-refused` scenario is skipped with a printed note.
@@ -75,7 +77,7 @@ copy always arrives by replication. "Paused" means the test control `POST /v1/te
 
 | Scenario | SPEC | Checks |
 |---|---|---|
-| `write-while-b-paused-converges` | §9.1, §9.2, §9.3 | B gets its first copy from A; a paused B answers a host route with `503` and receives nothing for one sweep; after the heal B's heads are exactly A's write, served unchanged; a write on B then reaches A. |
+| `write-while-b-paused-converges` | §8.4, §9.1, §9.2, §9.3 | B gets its first copy from A; a paused B answers a host route with `503` and receives nothing for one sweep; after the heal B's heads are exactly A's write, served unchanged; a write on B then reaches A. Leave requests replicate both ways: bob's leave on B is offered to A, which serves it unchanged; a newer leave on A while B is paused reaches B by catch-up `fetch` after the heal and replaces the older one there. |
 | `concurrent-writes-two-heads-then-merge` | §7.4, §9.2 | concurrent writes on A and on paused B on the same parent leave the same two heads on both hosts (no conflict outcome); the owner's merge on A collapses them on both. |
 | `removed-member-rejected-on-both` | §7.1, §7.3, §7.4, §8.3 | carol writes on paused B while the owner removes her on A with frontier `[cc1]`; after the heal B adopts the removal and drops her commit outside the frontier (heads exactly the rotation commit), A never accepts it, her pull and push are `403 forbidden` on both, and a child of the dropped commit is `403 forbidden` on B and refused on A. |
 | `unlisted-host-refused` | §6.1, §9.2, §9.3 | C, peered but not listed, answers `404 not_found` for the repository's pull and push, before and after a sweep interval of writes on A; A and B serve the same chain and heads. (A direct signed host request from C is out of scope: the harness holds no host key of C's.) |
