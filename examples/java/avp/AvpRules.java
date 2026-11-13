@@ -392,7 +392,9 @@ public final class AvpRules {
      * #heads()}, {@link #held()}, and {@link #tip()}. Every {@code apply} method is atomic: an item
      * that is rejected changes nothing, except that a state that loses the tie rule but verifies is
      * retained as a verified losing state (SPEC 6.5), a rejected or held commit keeps its status, and
-     * a commit header that verifies stays known for ancestry (SPEC 7.3). Every input is
+     * the verified header of a commit applied alone stays known for ancestry (SPEC 7.3) when a rule
+     * after the caller check refuses it. A commit whose caller is refused, and a state refused
+     * together with its commit, leave no header behind. Every input is
      * attacker-controlled: no {@code apply} method throws; every failure is a verdict code. The view
      * stores its own copies of the records it is given and returns copies from its readers, so no
      * caller can change its state through a record's arrays. A view is not thread safe; a host
@@ -881,23 +883,12 @@ public final class AvpRules {
             return out;
         }
 
+        /**
+         * Undoes a rejected operation completely, the headers it learned included: a rejected item
+         * changes nothing, as on the offer path, where a rejected commit is not kept at all.
+         */
         private void restore(Store snap) {
-            // Verified headers stay known: ancestry uses them whether or not the commit was accepted
-            // (SPEC 7.3). The re-check that ran inside the failed operation was reverted with it, so
-            // run it again over the restored state for any header the operation learned.
-            Map<String, List<String>> headers = st.headers;
             st = snap;
-            boolean learned = false;
-            for (Map.Entry<String, List<String>> e : headers.entrySet()) {
-                if (!st.headers.containsKey(e.getKey())) {
-                    st.headers.put(e.getKey(), e.getValue());
-                    learned = true;
-                }
-            }
-            if (learned) {
-                recheckCutoffs();
-                propagate();
-            }
         }
 
         private StateRec tipRec() {
@@ -1211,10 +1202,10 @@ public final class AvpRules {
                 return fail(BAD_REQUEST);
             }
             String id = key(c.commitId());
-            recordHeader(c);
 
             // Caller check on the client routes: the caller is the author (the owner for a carried
-            // commit) and is a member of the tip.
+            // commit) and is a member of the tip. It runs before the header is recorded, so a caller
+            // the host refuses leaves nothing behind.
             if (via == Via.PUSH) {
                 if (carried && !Arrays.equals(c.author(), tip.state().ownerKey())) {
                     return fail(FORBIDDEN);
@@ -1223,6 +1214,7 @@ public final class AvpRules {
                     return fail(FORBIDDEN);
                 }
             }
+            recordHeader(c);
 
             CommitStatus existing = statusOf(id);
             if (existing != null) {

@@ -15,6 +15,7 @@
  */
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -79,6 +81,7 @@ public final class AvpVectors {
         section("hlc", AvpVectors::hlc);
         section("acceptance", AvpVectors::acceptance);
         section("rules-extra", AvpVectors::rulesExtra);
+        section("refused-writes", AvpVectors::refusedWrites);
         section("decoder-lengths", AvpVectors::decoderLengths);
         section("token-rejects", AvpVectors::tokenRejects);
         section("bip39-rejects", AvpVectors::bip39Rejects);
@@ -1324,6 +1327,111 @@ public final class AvpVectors {
                 f.root().authorSignature());
         eq(Optional.of("bad_request"), v3.applyCommit(dupParents), "duplicate parent ids");
         rejects(() -> AvpCommit.headerBytes(dupParents), "duplicate parent header");
+    }
+
+    // ─── A refused write leaves nothing behind (SPEC 7.1, 7.3) ────────────────────────
+
+    /**
+     * Everything a view holds, read from its private store, so that a check can tell that a refused
+     * write changed nothing (its verified headers included). The store's values are immutable and
+     * shared by its copies, so equal contents print equally.
+     */
+    private static String contents(AvpRules.RepoView view) throws ReflectiveOperationException {
+        Field stField = AvpRules.RepoView.class.getDeclaredField("st");
+        stField.setAccessible(true);
+        Object st = stField.get(view);
+        StringBuilder out = new StringBuilder();
+        for (Field f : st.getClass().getDeclaredFields()) {
+            f.setAccessible(true);
+            Object v = f.get(st);
+            out.append(f.getName())
+                    .append('=')
+                    .append(v instanceof Map<?, ?> map ? new TreeMap<>(map) : v)
+                    .append('\n');
+        }
+        return out.toString();
+    }
+
+    /** A commit sealed by {@code authorSeed} on {@code parents}, citing {@code cites} at {@code seq}. */
+    private static AvpCommit.Commit sealed(Fixture f, byte[] authorSeed, List<byte[]> parents, long seq, byte[] cites)
+            throws Exception {
+        byte[] dataKey = new byte[32];
+        Arrays.fill(dataKey, (byte) 0x42);
+        return AvpCommit.seal(
+                dataKey,
+                new AvpCommit.Header(f.genesis().state().repoId(), parents, seq, cites, 0),
+                "{}".getBytes(StandardCharsets.UTF_8),
+                authorSeed);
+    }
+
+    private static void refusedWrites() throws Exception {
+        // bob, removed at seq 3 with frontier {a1, b1, b2}, pushes frontier commit b2 himself.
+        Map<String, Object> sc =
+                find(l(m(load("acceptance.json")).get("scenarios")), "name", "removed-member-ancestor-of-frontier");
+        List<Object> steps = l(sc.get("steps"));
+        AvpRules.RepoView view = new AvpRules.RepoView(b64(s(sc, "hostKey")), 16);
+        for (int k = 0; k < 6; k++) {
+            eq(s(m(steps.get(k)), "expect"), apply(view, m(steps.get(k))), "frontier scenario step " + k);
+        }
+        AvpCommit.Commit b0 = AvpCommit.fromJson(m(steps.get(5)).get("item"));
+        AvpCommit.Commit b2 = AvpCommit.fromJson(m(steps.get(6)).get("item"));
+        eq(List.of(AvpEncoding.base64(b2.commitId())), sortedB64(view.missingFor(b0)), "b0 waits for b2");
+        String before = contents(view);
+        // bob is not a member of the tip, so his push is refused (SPEC 7.1), and its header does not
+        // decide b0's cutoff: nothing changed.
+        eq(Optional.of("forbidden"), view.applyCommit(b2), "the removed member's push is refused");
+        eq(before, contents(view), "a refused caller changes nothing");
+        eq(List.of(AvpEncoding.base64(b2.commitId())), sortedB64(view.missingFor(b0)), "b0 still waits for b2");
+        eq(Optional.of("missing_parents"), view.applyCommit(b0, AvpRules.Via.OFFER), "b0 is still undecided");
+        // b2 by replication then decides it, as the scenario expects.
+        for (int k = 6; k < steps.size(); k++) {
+            eq(s(m(steps.get(k)), "expect"), apply(view, m(steps.get(k))), "frontier scenario step " + k);
+        }
+        eq(sortedStrings(sc.get("finalHeads")), sortedB64(view.heads()), "frontier scenario final heads");
+
+        // A key the tip does not list: the signature is checked first (400 before 403), then the
+        // signed commit is refused and stores nothing, its header included.
+        Fixture f = fixture();
+        AvpRules.RepoView v = started(f);
+        String start = contents(v);
+        byte[] stranger = new byte[32];
+        Arrays.fill(stranger, (byte) 0x66);
+        List<byte[]> parents = new ArrayList<>();
+        for (int j = 0; j < 200; j++) {
+            byte[] p = new byte[32];
+            Arrays.fill(p, (byte) j);
+            parents.add(p);
+        }
+        AvpCommit.Commit c = sealed(f, stranger, parents, 1, AvpManifest.hash(f.genesis()));
+        byte[] sig = c.authorSignature().clone();
+        sig[0] ^= 1;
+        AvpCommit.Commit forged = new AvpCommit.Commit(
+                c.repoId(),
+                c.commitId(),
+                c.parents(),
+                c.manifestSeq(),
+                c.manifestHash(),
+                c.keyEpoch(),
+                c.author(),
+                c.iv(),
+                c.ciphertext(),
+                sig);
+        eq(Optional.of("bad_request"), v.applyCommit(forged), "a forged stranger commit");
+        eq(Optional.of("forbidden"), v.applyCommit(c), "a stranger's signed commit");
+        eq(start, contents(v), "a refused stranger changes nothing");
+        eq(Optional.empty(), v.status(c.commitId()), "the stranger's commit is not stored");
+
+        // A state and its commit are applied together or not at all (SPEC 8.3): the commit's unknown
+        // parent refuses both, and the commit's header is not kept either.
+        byte[] unknown = new byte[32];
+        Arrays.fill(unknown, (byte) 7);
+        AvpManifest.SignedManifest x = seq2(f, f.alice());
+        AvpCommit.Commit carried = sealed(f, f.ownerSeed(), List.of(unknown), 2, AvpManifest.hash(x));
+        eq(
+                Optional.of("missing_parents"),
+                v.applyManifest(x, Optional.of(carried), AvpRules.Via.PUSH),
+                "a publish whose commit lacks a parent");
+        eq(start, contents(v), "a refused publish changes nothing");
     }
 
     /** A seq 3 state on {@code prev} that changes only the refresh-token policy. */
