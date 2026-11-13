@@ -394,6 +394,15 @@ async function writeWhileBPausedConverges(w: World): Promise<void> {
     const r = await req(a, "POST", repoPath(repo.repoId, "leave"), l2, tok(bob, a));
     check("§8.4", "bob's newer leave request on A, while B is paused, is 200 {}", r.status === 200 && r.text.trim() === "{}", show(r));
   }
+  // Wait out A's one offer of l2 (refused with 503) and a sweep, so after the heal l2 can reach B
+  // only by B's catch-up fetch.
+  await sleep(QUIET_MS);
+  {
+    const r = await pull(b, alice, repo.repoId);
+    const ls: WireLeaveRequest[] = Array.isArray(r.body?.leaves) ? r.body.leaves : [];
+    check("§9.3", `while paused, B receives no host traffic: after ${QUIET_MS} ms it still serves exactly the older leave`,
+      r.status === 200 && ls.length === 1 && ls[0].at === l1.at && ls[0].signature === l1.signature, show(r));
+  }
   await setPaused(b, false);
   await expectLeave("§9.1", "after the heal B's catch-up fetch brings the newer leave: B serves exactly it, unchanged", b, alice, repo, l2);
 }
