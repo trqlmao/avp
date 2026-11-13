@@ -100,7 +100,7 @@ fn sorted_ids(ids: Vec<[u8; 32]>) -> Vec<String> {
 fn acceptance_scenarios() {
     let file = load("acceptance.json");
     let scenarios = file["scenarios"].as_array().unwrap();
-    assert_eq!(scenarios.len(), 77);
+    assert_eq!(scenarios.len(), 78);
     for sc in scenarios {
         let name = sc["name"].as_str().unwrap();
         let bound = usize::try_from(sc["headBound"].as_u64().unwrap()).unwrap();
@@ -335,4 +335,54 @@ fn malformed_leave_is_bad_request() {
     };
     assert_eq!(view.apply_leave(leave), Err(RejectCode::BadRequest));
     assert!(view.leaves().is_empty());
+}
+
+// ─── The hosted rule by path (SPEC 6.1 rule 6, 9.2, 10.1) ──────────────────────────────────
+
+#[test]
+fn tip_lists_host_follows_a_first_copy_by_replication() {
+    let file = load("acceptance.json");
+    let sc = file["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "new-host-first-copy-by-offer")
+        .unwrap();
+    let steps = sc["steps"].as_array().unwrap();
+    let mut view = RepoView::new(b64_32(sc["hostKey"].as_str().unwrap()), 16);
+    assert!(!view.tip_lists_host(), "no tip before genesis");
+    // The genesis lists only b.vault.example: accepted by offer, but the tip does not list a.
+    assert_eq!(apply(&mut view, &steps[0]), Ok(()));
+    assert!(!view.tip_lists_host(), "the genesis does not list a.vault.example");
+    // The seq 2 state adds a.vault.example.
+    assert_eq!(apply(&mut view, &steps[1]), Ok(()));
+    assert!(view.tip_lists_host(), "seq 2 lists a.vault.example");
+}
+
+#[test]
+fn unlisted_genesis_is_not_hosted_on_push_and_taken_by_offer() {
+    // The manifest.json genesis lists a.vault.example and b.vault.example; this host is neither.
+    let f = fixture();
+    let unlisted = [0x55; 32];
+    assert!(!f.genesis.state.has_host(&unlisted));
+
+    let mut pushed = RepoView::new(unlisted, 16);
+    assert_eq!(
+        pushed.apply_manifest_with(f.genesis.clone(), Some(f.root.clone()), Via::Push),
+        Err(RejectCode::NotHosted)
+    );
+    assert!(pushed.tip().is_none(), "a rejected client write stores nothing");
+
+    let mut offered = RepoView::new(unlisted, 16);
+    assert_eq!(
+        offered.apply_manifest_with(f.genesis.clone(), Some(f.root.clone()), Via::Offer),
+        Ok(())
+    );
+    assert!(!offered.tip_lists_host(), "the host layer refuses to serve this tip");
+
+    let mut listed = RepoView::new(f.host_a, 16);
+    listed
+        .apply_manifest_with(f.genesis.clone(), Some(f.root.clone()), Via::Push)
+        .unwrap();
+    assert!(listed.tip_lists_host());
 }

@@ -32,10 +32,13 @@ pub enum Via {
     /// authenticated the caller and passes the item only when the caller is the commit's author
     /// (the owner for a manifest and the commit carried with it, `memberKey` for a leave). The
     /// engine then checks that the author is a member of the tip (SPEC 7.1) and applies the head
-    /// bound (SPEC 7.4); a manifest must be at tip + 1 (SPEC 6.3).
+    /// bound (SPEC 7.4); a manifest must be at tip + 1 (SPEC 6.3) and list this host (SPEC 6.1
+    /// rule 6).
     Push,
     /// An item of a peer host's replication `offer` (SPEC 9.1): no caller check and no head bound,
-    /// and diverged states meet the tie rule (SPEC 6.5).
+    /// and diverged states meet the tie rule (SPEC 6.5). A state is not rejected for not listing
+    /// this host: rule 6 applies to the tip of the chain being received, which the host checks
+    /// before it applies the offer (SPEC 6.1, 9.2).
     Offer,
 }
 
@@ -424,6 +427,16 @@ impl RepoView {
         self.st.chain.last().map(|r| &r.m)
     }
 
+    /// Whether the tip of the winning chain lists this host; `false` before genesis.
+    ///
+    /// A host does not serve a repository whose tip does not list it (SPEC 8.6, 10.1). States
+    /// before the tip may not list it when the host got its first copy by replication (SPEC 6.1
+    /// rule 6, 9.2).
+    #[must_use]
+    pub fn tip_lists_host(&self) -> bool {
+        self.st.chain.last().is_some_and(|r| r.state().has_host(&self.host_key))
+    }
+
     /// The head commits whose ids are not in `known`, sorted by id: the `heads` of a pull
     /// (SPEC 10.1).
     #[must_use]
@@ -675,7 +688,9 @@ impl RepoView {
             if !content_ok(s, None) {
                 return Ok(Err(RejectCode::BadRequest));
             }
-            if !s.has_host(&self.host_key) {
+            // Rule 6, hosted, on a client write. By replication it applies to the tip of the chain
+            // being received, which the host checks before it applies any item (SPEC 6.1, 9.2).
+            if via == Via::Push && !s.has_host(&self.host_key) {
                 return Ok(Err(RejectCode::NotHosted));
             }
             return self.adopt(&rec, None, commit, via);
@@ -728,8 +743,8 @@ impl RepoView {
             self.retain_losing(&rec, &prev, commit.as_ref())?;
             return Ok(Err(RejectCode::ManifestConflict));
         }
-        // Appends to the tip, or wins the tie rule at its seq (lower manifestHash).
-        if !s.has_host(&self.host_key) {
+        // Appends to the tip, or wins the tie rule at its seq (lower manifestHash). Rule 6 as above.
+        if via == Via::Push && !s.has_host(&self.host_key) {
             return Ok(Err(RejectCode::NotHosted));
         }
         self.adopt(&rec, Some(&prev), commit, via)
