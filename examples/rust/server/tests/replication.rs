@@ -189,6 +189,12 @@ fn raw_call(addr: SocketAddr, method: &str, path: &str, headers: &[(String, Stri
     let _ = stream.read_to_end(&mut raw);
     let text = String::from_utf8(raw).expect("utf-8 reply");
     let (head, body) = text.split_once("\r\n\r\n").expect("header/body split");
+    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        dechunk(body)
+    } else {
+        body.to_string()
+    };
+    let body = body.as_str();
     let status = head
         .lines()
         .next()
@@ -201,6 +207,20 @@ fn raw_call(addr: SocketAddr, method: &str, path: &str, headers: &[(String, Stri
         serde_json::from_str(body).expect("json body")
     };
     Reply { status, json }
+}
+
+/// The body of a `Transfer-Encoding: chunked` reply (large answers come chunked).
+fn dechunk(mut rest: &str) -> String {
+    let mut out = String::new();
+    while let Some((size, tail)) = rest.split_once("\r\n") {
+        let n = usize::from_str_radix(size.trim(), 16).expect("chunk size");
+        if n == 0 {
+            break;
+        }
+        out.push_str(&tail[..n]);
+        rest = &tail[n + 2..];
+    }
+    out
 }
 
 fn host_path(repo: &str, op: &str) -> String {
@@ -2007,4 +2027,257 @@ fn losing_raising_state_without_its_rotation_commit_is_retained() {
     let r = b.host(&p.sign, &id, "fetch", &fetch_body(&id, &[hash(&lose)]));
     assert_eq!(r.json["manifests"], json!([to_json(&repo.genesis), to_json(&lose)]));
     assert_eq!(r.json["commits"], json!([]));
+}
+
+// ─── Fix round 2: bounded work, long histories, rotation candidates, honest replies ────
+
+/// Builds `n` rotations offline on `repo`, each after a commit: `x_k` cites the current state with
+/// the previous head as parent, then the next state raises the epoch with a rotation commit whose
+/// parent is `x_k`. Returns the states, the commits in order, and the final head.
+fn interleaved_rotations(repo: &mut Repo, n: usize, home: Id) -> (Vec<SignedManifest>, Vec<Commit>, Id) {
+    let mut states = Vec::new();
+    let mut commits = Vec::new();
+    let mut head = repo.root.commit_id;
+    for i in 0..n {
+        let x = repo.commit(&repo.owner.sign, vec![head], format!("x{i}").as_bytes());
+        let (s, rot, k) = rotation(repo, &[&repo.owner], None, vec![x.commit_id], home);
+        commits.push(x);
+        head = rot.commit_id;
+        commits.push(rot);
+        states.push(s.clone());
+        repo.tip = s;
+        repo.data_key = k;
+    }
+    (states, commits, head)
+}
+
+/// Commits that can never apply here: `loose` cite the genesis with a random parent; `chain` is a
+/// line of commits whose first parent is random.
+fn orphans(repo: &Repo, loose: usize, chain: usize) -> Vec<Commit> {
+    let mut out: Vec<Commit> = (0..loose)
+        .map(|i| {
+            commit_on(
+                &repo.genesis,
+                &random_bytes::<32>(),
+                &repo.owner.sign,
+                vec![random_bytes::<32>()],
+                format!("o{i}").as_bytes(),
+            )
+        })
+        .collect();
+    let mut parent = random_bytes::<32>();
+    for i in 0..chain {
+        let c = commit_on(
+            &repo.genesis,
+            &random_bytes::<32>(),
+            &repo.owner.sign,
+            vec![parent],
+            format!("c{i}").as_bytes(),
+        );
+        parent = c.commit_id;
+        out.push(c);
+    }
+    out
+}
+
+fn engine_applications(node: &Node) -> u64 {
+    node.state.lock().unwrap().replication_stats.engine_applications
+}
+
+/// Important 1: the engine work an offer costs is linear in its items, whatever their order: a
+/// listed peer's offer of interleaved rotations plus many items that can never apply (orphans and a
+/// chain of orphans, the shuffled order putting children first) cannot make the host retry them
+/// pass after pass under the state lock. Bounded by counting engine applications, not by time.
+#[test]
+fn offer_work_is_linear_in_its_items() {
+    let (b, p) = node_with_fake();
+    let p_key = p.key();
+    let mut repo = genesis(&[p_key, b.key()], p_key);
+    let id = repo.id();
+    let (states, commits, head) = interleaved_rotations(&mut repo, 30, p_key);
+    let junk = orphans(&repo, 1000, 200);
+
+    // A first copy: genesis, 30 rotations with their pushes, and the junk, children first.
+    let mut ms: Vec<&SignedManifest> = states.iter().rev().collect();
+    ms.push(&repo.genesis);
+    let mut cs: Vec<&Commit> = junk.iter().rev().collect();
+    cs.extend(commits.iter().rev());
+    cs.push(&repo.root);
+    let items = (ms.len() + cs.len()) as u64;
+    let before = engine_applications(&b);
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &ms, &cs, &[]));
+    let work = engine_applications(&b) - before;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(b.tip_hash(&id), Some(hash(&repo.tip)));
+    assert_eq!(b.heads(&id), vec![head]);
+    assert!(work <= 2 * items, "{work} engine applications for {items} items");
+    // The junk cannot apply here, so it is not even tried: the work is that of the honest items.
+    let honest = (states.len() + commits.len() + 2) as u64;
+    assert!(
+        work <= 3 * honest,
+        "{work} engine applications for {honest} honest items"
+    );
+
+    // The same junk against the held repository costs no more, nor do commits citing a state
+    // behind a gap nothing fills (its previous state is never offered).
+    let unpublished = repo.next(|s| s.share_refresh_tokens = true);
+    let behind_gap = next_of(&unpublished, &repo.owner.sign, |_| {});
+    let gapped: Vec<Commit> = (0..300)
+        .map(|i| {
+            commit_on(
+                &behind_gap,
+                &repo.data_key,
+                &repo.owner.sign,
+                vec![head],
+                format!("g{i}").as_bytes(),
+            )
+        })
+        .collect();
+    let before = engine_applications(&b);
+    let js: Vec<&Commit> = junk.iter().chain(gapped.iter()).collect();
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&behind_gap], &js, &[]));
+    let work = engine_applications(&b) - before;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert!(
+        work <= js.len() as u64,
+        "{work} engine applications for {} items",
+        js.len()
+    );
+    assert!(work <= 64, "{work} engine applications for items that cannot apply");
+    assert_eq!(b.heads(&id), vec![head]);
+}
+
+/// Minor 3: owner commits shaped like the rotation commit (they cite the epoch-raising state at
+/// its epoch) that cannot pair with it do not block the pair: each candidate is tried. One decoy has
+/// an unknown parent; one has a parent the engine rejects (a stranger's commit), so pairing with it
+/// is `forbidden`; one has accepted parents but a forged signature and comes first among the
+/// candidates, so pairing with it is `bad_request`.
+#[test]
+fn decoy_rotation_candidate_does_not_block_its_state() {
+    let (b, p) = node_with_fake();
+    let p_key = p.key();
+    let repo = genesis(&[p_key, b.key()], p_key);
+    let id = repo.id();
+    // The real rotation commit's parent is one level deeper than the decoys', so the decoys come
+    // first among the candidates.
+    let x = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"x");
+    let (s2, rot, new_key_2) = rotation(&repo, &[&repo.owner], None, vec![x.commit_id], p_key);
+    let stranger = repo.commit(&new_key(), vec![repo.root.commit_id], b"stranger");
+    let rejected_parent = commit_on(&s2, &new_key_2, &repo.owner.sign, vec![stranger.commit_id], b"decoy-1");
+    let unknown_parent = commit_on(
+        &s2,
+        &new_key_2,
+        &repo.owner.sign,
+        vec![random_bytes::<32>()],
+        b"decoy-2",
+    );
+    let mut forged = commit_on(&s2, &new_key_2, &repo.owner.sign, vec![repo.root.commit_id], b"decoy-3");
+    forged.author_signature[0] ^= 1;
+    let r = b.host(
+        &p.sign,
+        &id,
+        "offer",
+        &offer(
+            &id,
+            &[&repo.genesis, &s2],
+            &[
+                &repo.root,
+                &stranger,
+                &x,
+                &forged,
+                &unknown_parent,
+                &rejected_parent,
+                &rot,
+            ],
+            &[],
+        ),
+    );
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(b.tip_hash(&id), Some(hash(&s2)));
+    assert_eq!(
+        b.view(&id, |v| v.rotation_commit(&hash(&s2)).cloned()),
+        Some(Some(rot.clone()))
+    );
+    assert_eq!(
+        id_set(&r.json["accepted"]),
+        b64_set(&[
+            hash(&repo.genesis),
+            hash(&s2),
+            repo.root.commit_id,
+            x.commit_id,
+            rot.commit_id
+        ])
+    );
+    let rej = rejected(&r);
+    assert!(rej.contains(&pair(&stranger.commit_id, "forbidden")), "{}", r.json);
+    assert!(
+        rej.contains(&pair(&rejected_parent.commit_id, "forbidden")),
+        "{}",
+        r.json
+    );
+    assert!(
+        rej.contains(&pair(&unknown_parent.commit_id, "missing_parents")),
+        "{}",
+        r.json
+    );
+    assert!(rej.contains(&pair(&forged.commit_id, "bad_request")), "{}", r.json);
+    assert_eq!(b.heads(&id), vec![rot.commit_id]);
+}
+
+/// Minor 3, losing side: a verified losing epoch-raising state keeps its real rotation commit as a
+/// held commit (SPEC 6.5, 8.3) even when a forged candidate is tried first.
+#[test]
+fn losing_state_keeps_its_real_rotation_commit() {
+    let (b, p) = node_with_fake();
+    let repo = genesis(&[b.key(), p.key()], b.key());
+    let token = create(&b, &repo);
+    let id = repo.id();
+    let b_key = b.key();
+    let (lose, rot, key) = upper_half(
+        |n| {
+            let new_key = random_bytes::<32>();
+            let entry = repo.owner.entry(&new_key, 1, b_key);
+            let state = repo.next(|s| {
+                s.key_epoch = 1;
+                s.members = vec![entry];
+                if let Some(h) = s.hosts.last_mut() {
+                    h.locator = format!("l{n}.vault.example");
+                }
+            });
+            let commit = commit_on(
+                &state,
+                &new_key,
+                &repo.owner.sign,
+                vec![repo.root.commit_id],
+                b"rotation",
+            );
+            (state, commit, new_key)
+        },
+        |(m, _, _)| m,
+    );
+    let win = winner_against(&repo, &lose);
+    assert_eq!(publish(&b, &repo, &token, &win, None).status, 200);
+    let mut forged = commit_on(&lose, &key, &repo.owner.sign, vec![repo.root.commit_id], b"forged");
+    forged.author_signature[0] ^= 1;
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&lose], &[&forged, &rot], &[]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    // The answer pairs the losing state with its real rotation commit (SPEC 9.1: same code).
+    assert_eq!(
+        rejected(&r),
+        HashSet::from([
+            pair(&hash(&lose), "manifest_conflict"),
+            pair(&rot.commit_id, "manifest_conflict"),
+            pair(&forged.commit_id, "bad_request"),
+        ])
+    );
+    assert_eq!(
+        b.view(&id, |v| v.rotation_commit(&hash(&lose)).cloned()),
+        Some(Some(rot.clone()))
+    );
+    assert_eq!(
+        b.view(&id, |v| v.status(&rot.commit_id)),
+        Some(Some(CommitStatus::Held))
+    );
+    let r = b.host(&p.sign, &id, "fetch", &fetch_body(&id, &[hash(&lose)]));
+    assert_eq!(r.json["commits"], json!([to_json(&rot)]));
 }

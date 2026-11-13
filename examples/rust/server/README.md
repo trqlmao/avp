@@ -101,10 +101,14 @@ Checks, in order:
    peer (SPEC 9.2).
 5. `offer`: `403 forbidden` if the host holds the repository and its tip does not list the sender.
    The items are then validated by the engine on a trial copy in dependency order, whatever order
-   the sender used: passes apply each state whose previous state is known (ascending seq, each
-   epoch-raising state with its rotation commit as one atomic pair) and each commit whose cited
-   state and parents are known (parents first), and repeat while something applies (at most 32
-   passes); leave requests come last. The **received tip** then decides (SPEC 9.2):
+   the sender used. Each item is tried once (states by ascending seq, each epoch-raising state with
+   its rotation commit as one atomic pair, then commits parents first); one that cannot apply yet
+   waits on the ids it misses and is tried again only when one of them settles, so the engine work
+   is linear in the items, and it is capped at three engine applications per item plus 64. A commit
+   that cannot apply in the offer at all (a parent or cited state neither held nor offered, or a
+   state behind a gap nothing fills) is not tried. An epoch-raising state tries each commit shaped
+   like its rotation commit (at most 8) until one pairs with it, so a decoy does not block it.
+   Leave requests come last. The **received tip** then decides (SPEC 9.2):
    - it does not list this host: `403 not_hosted`. A first copy stores nothing; a held repository
      keeps the validated states (with their rotation commits, not the other items) and is then not
      hosted.
@@ -164,7 +168,10 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
   of diverged owner states converges through this sweep, since a peer offers only to hosts its own
   tip lists.
 
-The state lock is never held across an outbound call. Outbound calls time out after 10 seconds and
+The state lock is never held across an outbound call. A held repository is updated under it; a first
+copy is private until it is admitted, so the host validates it outside the lock (an offer, and every
+catch-up round) and takes the lock only to admit it, re-checking that the repository is still not
+held and the repository caps. Outbound calls time out after 10 seconds and
 read at most 16 MiB of response; a peer answer that is too large, malformed, or not `200` is dropped.
 Peer answers are decoded tolerantly (a field this host does not know is ignored, so another
 implementation may add fields), while every item in them still goes through the engine; the

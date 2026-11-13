@@ -413,6 +413,10 @@ fn percent_decode(segment: &str) -> Result<String, ApiError> {
 /// Routes a read request under the state lock.
 fn handle(req: &Incoming, state: &Mutex<State>) -> Answer {
     let route = parse_route(&req.method, &req.path)?;
+    if let Route::Host(repo_id, HostOp::Offer) = &route {
+        // An offer of a first copy is validated outside the state lock (SPEC 9.2).
+        return host_offer(state, req, repo_id);
+    }
     let mut guard = state.lock().map_err(|_| ApiError::internal())?;
     let st: &mut State = &mut guard;
     let body = req.body.as_slice();
@@ -447,7 +451,7 @@ fn handle(req: &Incoming, state: &Mutex<State>) -> Answer {
             match op {
                 HostOp::Heads => host_heads(st, &peer, &repo_id, body),
                 HostOp::Fetch => host_fetch(st, &peer, &repo_id, body),
-                HostOp::Offer => host_offer(st, &peer, &repo_id, body),
+                HostOp::Offer => Err(ApiError::internal()),
             }
         }
         Route::TestControl => test_control(st, body),
@@ -829,12 +833,25 @@ fn host_fetch(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> An
     })
 }
 
-/// `offer` (SPEC 9.1, 9.2). A held repository refuses a peer its tip does not list (`403
-/// forbidden`). The items are then validated on a trial copy and the received tip decides:
-/// `403 not_hosted` if it does not list this host (a held repository keeps the validated states),
-/// `403 forbidden` for a first copy whose tip does not list the sender, and otherwise the
-/// per-item answer. An incomplete offer also queues a catch-up from the sender.
-fn host_offer(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> Answer {
+/// `offer` (SPEC 9.1, 9.2), with the 503 and signature checks of every host route. A held
+/// repository refuses a peer its tip does not list (`403 forbidden`). The items are then validated
+/// on a trial copy and the received tip decides: `403 not_hosted` if it does not list this host (a
+/// held repository keeps the validated states), `403 forbidden` for a first copy whose tip does not
+/// list the sender, `429 quota_exceeded` for a first copy over the repository caps, and otherwise
+/// the per-item answer. An incomplete offer also queues a catch-up from the sender.
+///
+/// A held repository is updated under the state lock. A first copy is private until admitted, so
+/// it is validated outside the lock, which is then taken again only to admit it (re-checking that
+/// the repository is still not held, and the caps); if another path stored the repository
+/// meanwhile, the offer is applied to it as to a held repository.
+fn host_offer(state: &Mutex<State>, req: &Incoming, repo_id: &str) -> Answer {
+    let body = req.body.as_slice();
+    let mut guard = state.lock().map_err(|_| ApiError::internal())?;
+    if guard.repl.paused {
+        return Err(ApiError::paused());
+    }
+    let peer = replication::authenticate(&guard, req.method.as_str(), &req.path, body, &req.host)
+        .ok_or_else(|| ApiError::unauthorized("bad host request signature"))?;
     let request: OfferBody = decode(body)?;
     same_repo(request.repo_id.as_deref(), repo_id)?;
     let items = Items {
@@ -845,14 +862,38 @@ fn host_offer(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> An
     if !items.bounded() {
         return Err(ApiError::bad_request("too many items"));
     }
-    if let Some(view) = st.store.repos.get(repo_id) {
-        if !view.tip().is_some_and(|t| t.state.has_host(peer)) {
-            return Err(ApiError::forbidden("the calling host is not in the repository's hosts"));
+    let sender_listed = |st: &State| {
+        st.store
+            .repos
+            .get(repo_id)
+            .map(|view| view.tip().is_some_and(|t| t.state.has_host(&peer)))
+    };
+    let (admitted, applied) = match sender_listed(&guard) {
+        Some(false) => return Err(ApiError::forbidden("the calling host is not in the repository's hosts")),
+        Some(true) => replication::receive(&mut guard, repo_id, &peer, items),
+        None => {
+            let fresh = RepoView::new(guard.host_key(), guard.limits.head_bound);
+            let copy = items.clone();
+            drop(guard);
+            let (trial, applied) = replication::apply_kept(&fresh, repo_id, items, false);
+            guard = state.lock().map_err(|_| ApiError::internal())?;
+            guard.replication_stats.engine_applications += applied.applications;
+            match sender_listed(&guard) {
+                Some(false) => {
+                    return Err(ApiError::forbidden("the calling host is not in the repository's hosts"));
+                }
+                Some(true) => replication::receive(&mut guard, repo_id, &peer, copy),
+                None if applied.has_gap() => (Admitted::Incomplete, applied),
+                None => (
+                    replication::admit_first_copy(&mut guard, repo_id, &peer, trial),
+                    applied,
+                ),
+            }
         }
-    }
-    let (admitted, applied) = replication::receive(st, repo_id, peer, items);
+    };
+    let st: &mut State = &mut guard;
     if applied.incomplete || admitted == Admitted::Incomplete {
-        replication::queue_catchup(st, *peer, repo_id);
+        replication::queue_catchup(st, peer, repo_id);
     }
     match admitted {
         Admitted::Hosted | Admitted::Incomplete => to_json(&applied.reply()),

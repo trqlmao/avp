@@ -113,6 +113,8 @@ pub struct State {
     /// The peer list, the pause flag, and the queues the request handlers share with the
     /// replication workers.
     pub(crate) repl: replication::Runtime,
+    /// Counters of the work replication did, for tests and diagnostics.
+    pub replication_stats: replication::Stats,
 }
 
 impl State {
@@ -127,6 +129,7 @@ impl State {
             clock_offset_ms: 0,
             replication: replication::Config::default(),
             repl: replication::Runtime::default(),
+            replication_stats: replication::Stats::default(),
         }
     }
 
