@@ -38,8 +38,6 @@ import {
   aesGcmDecrypt,
   buildAadV2,
   commitFromWire,
-  ed25519Sign,
-  importEd25519Private,
   leaveFromWire,
   leaveToWire,
   manifestHash,
@@ -56,6 +54,7 @@ import {
 } from "./crypto.ts";
 import {
   b64,
+  challengeSignature,
   genesisState,
   hashOfWire,
   idsOf,
@@ -216,7 +215,7 @@ const tok = (p: Party, h: Host): string => tokens.get(`${p.name}@${h.url}`) ?? "
 async function login(p: Party, h: Host): Promise<void> {
   const c = await req(h, "POST", "/api/auth/keypair/challenge", { ed25519PublicKey: b64(p.pub) });
   if (c.status !== 200 || typeof c.body?.nonce !== "string") throw new Error(`challenge for ${p.name} on ${h.name}: ${show(c)}`);
-  const sig = ed25519Sign(importEd25519Private(p.seed), Buffer.from(c.body.nonce, "base64"));
+  const sig = challengeSignature(p, h.key, c.body.nonce);
   const t = await req(h, "POST", "/api/auth/keypair/token", { ed25519PublicKey: b64(p.pub), nonce: c.body.nonce, signature: b64(sig) });
   if (t.status !== 200 || typeof t.body?.token !== "string") throw new Error(`token for ${p.name} on ${h.name}: ${show(t)}`);
   tokens.set(`${p.name}@${h.url}`, t.body.token);

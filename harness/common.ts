@@ -27,6 +27,7 @@ import {
   manifestHash,
   mnemonicToSeed,
   ownerKeysFromSeed,
+  signChallenge,
   signCommit,
   signedManifestFromWire,
   signedManifestToWire,
@@ -73,6 +74,14 @@ export function newOwner(name: string): Party {
 }
 
 export const b64 = (b: Buffer) => b.toString("base64");
+
+/**
+ * `p`'s challenge signature for the host whose key is `hostKey` (SPEC 3.3): over the transcript
+ * `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(p.pub), bytes(nonce))`, never the raw nonce.
+ */
+export function challengeSignature(p: Party, hostKey: Buffer, nonceB64: string): Buffer {
+  return signChallenge(hostKey, p.seed, Buffer.from(nonceB64, "base64"));
+}
 
 export function wrapTo(p: Party, dataKey: Buffer) {
   return wrapSecret(p.xPub, randomBytes(32), randomBytes(12), dataKey);

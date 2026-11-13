@@ -5,7 +5,10 @@
  * SPEC MUSTs with the exact status and `code` of the SPEC 10.4 error table:
  *
  *   - discovery and host-issued authentication, including every challenge failure mode (expired,
- *     reused, not issued for the key, bad signature) and strict Ed25519 (SPEC 2, 3.3, 11.7);
+ *     reused, not issued for the key, bad signature, a signature over the raw nonce, a transcript for
+ *     another host key) and strict Ed25519 (SPEC 2, 3.3, 11.7);
+ *   - domain separation: a challenge signature is never accepted as a commit author signature
+ *     (SPEC 4.1);
  *   - createRepo: wrong repoId, host not listed, caller not the owner, bad genesis, duplicate
  *     (SPEC 6.1, 6.2, 8.2);
  *   - the manifest chain: publication at tip + 1 only, content rules, and pull returning the chain
@@ -39,6 +42,7 @@ import { randomBytes } from "node:crypto";
 import {
   aesGcmDecrypt,
   buildAadV2,
+  challengeMessage,
   commitFromWire,
   commitId,
   commitSigMessage,
@@ -53,6 +57,7 @@ import {
   leaveFromWire,
   leaveToWire,
   manifestHash,
+  signChallenge,
   signCommit,
   signLeave,
   signManifest,
@@ -74,6 +79,7 @@ import {
 } from "./crypto.ts";
 import {
   b64,
+  challengeSignature,
   genesisState,
   hashOfWire,
   idsOf,
@@ -257,7 +263,11 @@ async function redeem(key: Buffer, nonceB64: string, signature: Buffer): Promise
   return req("POST", "/api/auth/keypair/token", { ed25519PublicKey: b64(key), nonce: nonceB64, signature: b64(signature) });
 }
 
-const signNonce = (p: Party, nonceB64: string) => ed25519Sign(importEd25519Private(p.seed), Buffer.from(nonceB64, "base64"));
+/** The host key from discovery (SPEC 11.7); every challenge transcript names it (SPEC 3.3). */
+let HOST_KEY = Buffer.alloc(0);
+
+/** `p`'s signature over the SPEC 3.3 challenge transcript for this host's key and the nonce. */
+const signNonce = (p: Party, nonceB64: string) => challengeSignature(p, HOST_KEY, nonceB64);
 
 async function login(p: Party): Promise<void> {
   const c = await challenge(p.pub);
@@ -299,6 +309,7 @@ async function run(): Promise<void> {
   const hostKey = Buffer.from(String(disc.body?.hostKey ?? ""), "base64");
   check("§11.7", "discovery hostKey is a 32-byte base64 key", hostKey.length === 32, show(disc));
   if (hostKey.length !== 32) throw new Error("cannot continue without the host key");
+  HOST_KEY = hostKey;
   const hosts: HostRef[] = [{ hostKey, locator: LOCATOR }];
 
   const alice = newOwner("alice");
@@ -317,7 +328,7 @@ async function run(): Promise<void> {
   check("§3.3", "challenge returns a single nonce of at least 32 bytes",
     c1.status === 200 && Buffer.from(nonce1, "base64").length >= 32, show(c1));
   const t1 = await redeem(alice.pub, nonce1, signNonce(alice, nonce1));
-  check("§3.3", "a signature over the raw nonce bytes yields a token and expiresAt",
+  check("§3.3", "a signature over the avp/challenge/v1 transcript yields a token and expiresAt",
     t1.status === 200 && typeof t1.body?.token === "string" && Number.isInteger(t1.body?.expiresAt), show(t1));
   alice.token = String(t1.body?.token ?? "");
 
@@ -326,9 +337,28 @@ async function run(): Promise<void> {
 
   const c2 = await challenge(alice.pub);
   const nonce2 = String(c2.body?.nonce ?? "");
-  const overText = ed25519Sign(importEd25519Private(alice.seed), Buffer.from(nonce2, "utf8"));
-  expectError("§3.3", "a signature over the base64 text, not the raw nonce, is 401",
+  const overText = signChallenge(hostKey, alice.seed, Buffer.from(nonce2, "utf8"));
+  expectError("§3.3", "a transcript over the base64 text, not the raw nonce bytes, is 401",
     await redeem(alice.pub, nonce2, overText), 401, "unauthorized");
+
+  {
+    // SPEC 3.3, 4.1: the old construction, a signature over the raw nonce bytes alone, is refused.
+    const c = await challenge(alice.pub);
+    const n = String(c.body?.nonce ?? "");
+    const raw = ed25519Sign(importEd25519Private(alice.seed), Buffer.from(n, "base64"));
+    expectError("§3.3", "a signature over the raw nonce bytes (no transcript) is 401 unauthorized",
+      await redeem(alice.pub, n, raw), 401, "unauthorized");
+  }
+  {
+    // SPEC 3.3: the transcript binds the host key, so a signature made for another host (one that
+    // relayed this host's nonce) is refused here.
+    const c = await challenge(alice.pub);
+    const n = String(c.body?.nonce ?? "");
+    let elsewhere = randomBytes(32);
+    while (elsewhere.equals(hostKey)) elsewhere = randomBytes(32);
+    expectError("§3.3", "a transcript built with another host key is 401 unauthorized",
+      await redeem(alice.pub, n, challengeSignature(alice, elsewhere, n)), 401, "unauthorized");
+  }
 
   const c3 = await challenge(alice.pub);
   const nonce3 = String(c3.body?.nonce ?? "");
@@ -358,11 +388,11 @@ async function run(): Promise<void> {
     const c = await challenge(dave.pub);
     const n = String(c.body?.nonce ?? "");
     expectError("§2", "no token for an honest key's signature with R = identity (strict Ed25519)",
-      await redeem(dave.pub, n, identityRSignature(dave, Buffer.from(n, "base64"))), 401, "unauthorized");
+      await redeem(dave.pub, n, identityRSignature(dave, challengeMessage(hostKey, dave.pub, Buffer.from(n, "base64")))), 401, "unauthorized");
     const c2 = await challenge(dave.pub);
     const n2 = String(c2.body?.nonce ?? "");
     expectError("§2", "no token for a valid signature with L added to S (strict Ed25519)",
-      await redeem(dave.pub, n2, sPlusLSignature(dave, Buffer.from(n2, "base64"))), 401, "unauthorized");
+      await redeem(dave.pub, n2, sPlusLSignature(dave, challengeMessage(hostKey, dave.pub, Buffer.from(n2, "base64")))), 401, "unauthorized");
     const nc = await challenge(NONCANONICAL_KEY);
     if (nc.status === 200 && typeof nc.body?.nonce === "string") {
       expectError("§2", "no token for a non-canonical key's forged signature (strict Ed25519)",
@@ -627,6 +657,19 @@ async function run(): Promise<void> {
   }
   expectError("§7.1", "a commit whose author signature does not verify is 400 bad_request",
     await push(withForeignSignature(write(bob, [b1.commitId]), dave), bob.token), 400, "bad_request");
+  {
+    // SPEC 3.3, 4.1: a host that hands out a "nonce" shaped like another construction's message gets
+    // only a challenge-domain signature. The client side cannot be driven black-box, so this checks the
+    // host side: such a signature, over the commit id or the whole commit-sig message as the nonce, is
+    // never accepted as the commit's author signature.
+    const c = write(bob, [b1.commitId]);
+    const overId = { ...c, authorSignature: signChallenge(hostKey, bob.seed, c.commitId) };
+    expectError("§4.1", "a challenge signature whose nonce is the commit id is not an author signature (400)",
+      await push(overId, bob.token), 400, "bad_request");
+    const overSigMsg = { ...c, authorSignature: signChallenge(hostKey, bob.seed, commitSigMessage(c.commitId)) };
+    expectError("§4.1", "a challenge signature whose nonce is the commit-sig message is not an author signature (400)",
+      await push(overSigMsg, bob.token), 400, "bad_request");
+  }
   {
     const other = makeCommit({ repoId: deriveRepoId(alice.pub, randomBytes(16)), author: bob, parents: [b1.commitId], manifest: m2,
       dataKey: k0, plaintext: payloadWith(MARKER, bob) });
