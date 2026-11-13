@@ -350,7 +350,8 @@ paths:
         repository still adopts the validated states it received and does not serve the repository
         while its winning tip does not list it (SPEC §8.6). An offer that carries no states to a host
         whose tip does not list it is `403 not_hosted`. An offer from a host not in the repository's
-        `hosts` is `403 forbidden`.
+        `hosts` is `403 forbidden`. A first copy that would exceed the receiver's repository limits
+        stores nothing and is `429 quota_exceeded` (SPEC §9.2, §12.1).
       security: []
       parameters:
         - { $ref: "#/components/parameters/RepoId" }
@@ -373,6 +374,7 @@ paths:
         "403": { $ref: "#/components/responses/ForbiddenOrNotHosted" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/QuotaExceeded" }
         "503": { $ref: "#/components/responses/ReplicationPaused" }
 
   /.well-known/avp:

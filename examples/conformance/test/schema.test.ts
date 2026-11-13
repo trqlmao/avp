@@ -245,7 +245,7 @@ const EXPECTED_ROUTES: Record<string, RouteExpectation> = {
   "POST /v1/host/repos/{repoId}/offer": {
     request: "OfferRequest",
     response: "OfferResponse",
-    statuses: ["200", "400", "401", "403", "404", "413", "503"],
+    statuses: ["200", "400", "401", "403", "404", "413", "429", "503"],
     tag: "replication",
     security: "host",
   },
@@ -401,6 +401,7 @@ const EXPECTED_ERROR_CODES_BY_ROUTE: Record<string, Record<string, readonly stri
     "403": FORBIDDEN_CODES,
     "404": ["not_found"],
     "413": ["too_large"],
+    "429": ["quota_exceeded"],
   },
   "GET /.well-known/avp": {},
 };
