@@ -56,12 +56,18 @@ fn node() -> Node {
 }
 
 fn node_with(test_control: bool) -> Node {
+    node_cfg(|st| st.replication.test_control = test_control)
+}
+
+/// A host configured by `configure` after the test defaults.
+fn node_cfg(configure: impl FnOnce(&mut State)) -> Node {
     let sign = new_key();
     let mut state = State::new(sign.clone());
     state.replication.sweep_interval = SWEEP;
     state.replication.request_timeout = Duration::from_secs(1);
     state.replication.max_response_bytes = 256 * 1024;
-    state.replication.test_control = test_control;
+    state.replication.test_control = true;
+    configure(&mut state);
     let state = Arc::new(Mutex::new(state));
     let serving = serve("127.0.0.1:0", Arc::clone(&state)).expect("bind an ephemeral port");
     Node {
@@ -1578,4 +1584,168 @@ fn bad_peer_responses_do_not_stop_replication() {
     stop.store(true, Ordering::SeqCst);
     drop(b);
     let _ = server.join();
+}
+
+// ─── Fix round 1: rotations by catch-up, first copies across rotations, quotas ─────────
+
+/// SPEC 9.1, 9.2: a rotation commit whose parent this host lacks is applied after its parent,
+/// fetched by the catch-up, so the sweep repairs a rotation pair whose offers were missed.
+#[test]
+fn sweep_repairs_rotation_after_missed_offers() {
+    let mut a = node();
+    let mut b = node();
+    link(&mut [&mut a, &mut b]);
+    let mut repo = genesis(&[a.key(), b.key()], a.key());
+    let token = create(&a, &repo);
+    let id = repo.id();
+    eventually("B holds the repository", || b.heads(&id) == vec![repo.root.commit_id]);
+
+    b.pause(true);
+    let x = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"x");
+    assert_eq!(push(&a, &repo, &token, &x).status, 200);
+    let (s2, rot, new_key) = rotation(&repo, &[&repo.owner], None, vec![x.commit_id], a.key());
+    assert_eq!(publish(&a, &repo, &token, &s2, Some(&rot)).status, 200);
+    repo.tip = s2.clone();
+    repo.data_key = new_key;
+    // A's offers of x and of the pair reach B while it is paused: answered 503 and lost.
+    thread::sleep(SWEEP * 6);
+    assert_eq!(b.tip_hash(&id), Some(hash(&repo.genesis)));
+    b.pause(false);
+    eventually("B reaches A's tip by the sweep", || b.tip_hash(&id) == Some(hash(&s2)));
+    eventually("B has A's heads", || b.heads(&id) == vec![rot.commit_id]);
+    assert_eq!(b.view(&id, |v| v.rotation_commit(&hash(&s2)).cloned()), Some(Some(rot)));
+    assert_eq!(
+        b.view(&id, |v| v.status(&x.commit_id)),
+        Some(Some(CommitStatus::Accepted))
+    );
+}
+
+/// SPEC 8.1, 9.2: a host listed only after a key rotation takes its first copy by replication.
+#[test]
+fn newly_listed_after_rotation_bootstraps() {
+    let mut a = node();
+    let mut b = node();
+    link(&mut [&mut a, &mut b]);
+    let mut repo = genesis(&[a.key()], a.key());
+    let token = create(&a, &repo);
+    let id = repo.id();
+    let (s2, rot, new_key) = rotation(&repo, &[&repo.owner], None, vec![repo.root.commit_id], a.key());
+    assert_eq!(publish(&a, &repo, &token, &s2, Some(&rot)).status, 200);
+    repo.tip = s2.clone();
+    repo.data_key = new_key;
+    let bob = Device::new();
+    let entry = bob.entry(&repo.data_key, 1, b.key());
+    let b_key = b.key();
+    let s3 = repo.next(|s| {
+        s.hosts.push(HostRef {
+            key: b_key,
+            locator: "b.vault.example".to_string(),
+        });
+        s.members.push(entry);
+    });
+    assert_eq!(publish(&a, &repo, &token, &s3, None).status, 200);
+    eventually("B bootstraps to A's tip and heads", || {
+        b.tip_hash(&id) == Some(hash(&s3)) && b.heads(&id) == vec![rot.commit_id]
+    });
+    assert_eq!(b.view(&id, |v| v.rotation_commit(&hash(&s2)).cloned()), Some(Some(rot)));
+}
+
+/// SPEC 6.5, 9.2: a first copy whose chain has a diverged losing branch, with the losing state's
+/// rotation commit, in one offer: the winner is adopted, the loser retained with its rotation commit
+/// held, and the copy is stored because its received tip lists this host and the sender.
+#[test]
+fn first_copy_across_a_diverged_losing_branch() {
+    let (b, p) = node_with_fake();
+    let p_key = p.key();
+    let b_key = b.key();
+    let mut repo = genesis(&[p_key], p_key);
+    let id = repo.id();
+    let (lose, rot) = upper_half(
+        |n| {
+            let new_key = random_bytes::<32>();
+            let entry = repo.owner.entry(&new_key, 1, p_key);
+            let state = repo.next(|s| {
+                s.key_epoch = 1;
+                s.members = vec![entry];
+                if let Some(h) = s.hosts.last_mut() {
+                    h.locator = format!("l{n}.vault.example");
+                }
+            });
+            let commit = commit_on(
+                &state,
+                &new_key,
+                &repo.owner.sign,
+                vec![repo.root.commit_id],
+                b"rotation",
+            );
+            (state, commit)
+        },
+        |(m, _)| m,
+    );
+    let win = winner_against(&repo, &lose);
+    repo.tip = win.clone();
+    let s3 = repo.next(|s| {
+        s.hosts.push(HostRef {
+            key: b_key,
+            locator: "b.vault.example".to_string(),
+        })
+    });
+    // The items in an order that needs the dependency loop: the rotation commit before its parent,
+    // the states out of order.
+    let r = b.host(
+        &p.sign,
+        &id,
+        "offer",
+        &offer(&id, &[&s3, &lose, &repo.genesis, &win], &[&rot, &repo.root], &[]),
+    );
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(b.tip_hash(&id), Some(hash(&s3)));
+    assert_eq!(b.view(&id, |v| v.is_winning(&hash(&win))), Some(true));
+    assert_eq!(
+        b.view(&id, |v| v.manifest(&hash(&lose)).is_some()
+            && !v.is_winning(&hash(&lose))),
+        Some(true)
+    );
+    assert_eq!(
+        b.view(&id, |v| v.status(&rot.commit_id)),
+        Some(Some(CommitStatus::Held))
+    );
+    assert_eq!(b.heads(&id), vec![repo.root.commit_id]);
+    assert_eq!(
+        id_set(&r.json["accepted"]),
+        b64_set(&[hash(&repo.genesis), hash(&win), hash(&s3), repo.root.commit_id])
+    );
+}
+
+/// Minor a: a first-copy offer with a gap in its chain (seq 2 missing) has no validated received
+/// tip yet; it is answered per item, stores nothing, and the host catches up instead of answering
+/// `403 not_hosted` (SPEC 9.2: the received tip is computed with the catch-up when one is needed).
+#[test]
+fn first_copy_with_a_gap_waits_for_the_catch_up() {
+    let (b, p) = node_with_fake();
+    let p_key = p.key();
+    let b_key = b.key();
+    let mut repo = genesis(&[p_key], p_key);
+    let id = repo.id();
+    let s2 = repo.next(|s| s.share_refresh_tokens = true);
+    repo.tip = s2;
+    let s3 = repo.next(|s| {
+        s.hosts.push(HostRef {
+            key: b_key,
+            locator: "b.vault.example".to_string(),
+        })
+    });
+    let r = b.host(
+        &p.sign,
+        &id,
+        "offer",
+        &offer(&id, &[&repo.genesis, &s3], &[&repo.root], &[]),
+    );
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert!(
+        rejected(&r).contains(&pair(&hash(&s3), "manifest_conflict")),
+        "{}",
+        r.json
+    );
+    assert!(!b.holds(&id));
 }

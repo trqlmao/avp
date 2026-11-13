@@ -100,9 +100,11 @@ Checks, in order:
    its winning tip does not list this host, `403 forbidden` if that tip does not list the calling
    peer (SPEC 9.2).
 5. `offer`: `403 forbidden` if the host holds the repository and its tip does not list the sender.
-   The items are then validated by the engine on a trial copy (states by ascending seq, each
-   epoch-raising state with its rotation commit as one atomic pair, then commits parents first, then
-   leave requests), and the **received tip** decides (SPEC 9.2):
+   The items are then validated by the engine on a trial copy in dependency order, whatever order
+   the sender used: passes apply each state whose previous state is known (ascending seq, each
+   epoch-raising state with its rotation commit as one atomic pair) and each commit whose cited
+   state and parents are known (parents first), and repeat while something applies (at most 32
+   passes); leave requests come last. The **received tip** then decides (SPEC 9.2):
    - it does not list this host: `403 not_hosted`. A first copy stores nothing; a held repository
      keeps the validated states (with their rotation commits, not the other items) and is then not
      hosted.
@@ -112,9 +114,11 @@ Checks, in order:
      same code. A leave request that fails validation is dropped.
 
    An offer with missing items, or for a repository the host does not hold yet, also makes the host
-   catch up from the sender. A first copy with no validated tip yet (for example an offer of a seq 2
-   state alone) answers `200` with per-item rejections and stores nothing until the catch-up brings
-   the chain.
+   catch up from the sender. A first copy whose received tip is not known yet (no genesis, or a gap
+   in the chain such as a genesis and a seq 3 without the seq 2) answers `200` with per-item
+   rejections and stores nothing. The catch-up then builds the copy on one trial view kept across
+   its rounds and stores it once, at the end, only if the chain has no gap and its validated
+   received tip lists this host and the sender.
 
 `fetch` returns, for a manifest hash (winning or verified losing), that state and every state before
 it in ascending seq, with the rotation commit of each epoch-raising state among them even while held;
@@ -144,7 +148,10 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
   offered to each peer whose key is in the repository's tip `hosts`, while that tip lists this host.
 - **Every 5 seconds** each worker sweeps every held repository against its peer: `heads`, then `fetch`
   for the tip state and the heads this host lacks (and always once, for the leave requests), then
-  `fetch` for what the engine names as missing, at most 64 rounds and 4096 ids per catch-up. A peer
+  `fetch` for what the states and commits not applied yet still miss (a previous state, a parent, a
+  cited state, a frontier header), at most 64 rounds and 4096 ids per catch-up. What is not applied
+  yet is carried into the next round, so a rotation pair whose parent this host lacks is applied
+  once that parent arrives. A peer
   that answers `403` or `404` for one repository does not stop the others. A host on the losing side
   of diverged owner states converges through this sweep, since a peer offers only to hosts its own
   tip lists.

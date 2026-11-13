@@ -76,9 +76,10 @@ const MAX_ROUNDS: usize = 64;
 /// Most ids one catch-up requests in all.
 const MAX_REQUESTED: usize = 4096;
 
-/// Most passes over the commits of one offer (commits are sorted parents first, so one pass
-/// usually suffices; a pass that applies nothing ends the loop).
-const MAX_PASSES: usize = 8;
+/// Most passes of the dependency loop over the items of one offer or catch-up round (commits are
+/// sorted parents first, so a few passes usually suffice; a pass that applies nothing ends the
+/// loop). What is left is reported and carried into the next catch-up round.
+const MAX_PASSES: usize = 32;
 
 // ─── Configuration ──────────────────────────────────────────────────────────────────────
 
@@ -407,7 +408,11 @@ pub(crate) struct Applied {
     pub(crate) accepted: Vec<Id>,
     /// Ids the engine rejected, with the code it would give a client.
     pub(crate) rejected: Vec<(Id, RejectCode)>,
-    /// Commits that still miss a parent, a cited state, or a frontier header.
+    /// States not applied yet: their previous state is unknown (a gap in the chain), or they raise
+    /// the epoch and their rotation commit still misses a parent, a cited state, or a frontier
+    /// header. A catch-up carries them into its next round.
+    pub(crate) deferred: Vec<SignedManifest>,
+    /// Commits not applied yet for the same reasons, rotation commits of deferred states included.
     pub(crate) waiting: Vec<Commit>,
     /// Whether the sender may hold what this host lacks (`missing_parents` or `manifest_conflict`).
     pub(crate) incomplete: bool,
@@ -419,6 +424,11 @@ impl Applied {
             self.incomplete = true;
         }
         self.rejected.push((id, code));
+    }
+
+    /// Whether some state could not be placed on a chain yet: the received tip is not known.
+    pub(crate) fn has_gap(&self) -> bool {
+        !self.deferred.is_empty()
     }
 
     /// The `OfferResponse` body.
@@ -443,100 +453,171 @@ fn prev_epoch(view: &RepoView, m: &SignedManifest) -> Option<i64> {
     view.manifest(&prev).map(|p| p.state.key_epoch)
 }
 
-/// Applies received items to `view` with [`Via::Offer`], in the dependency order of SPEC 9.1:
-/// states by ascending `manifestSeq`, each epoch-raising one with its rotation commit as one atomic
-/// pair; then the other commits, parents first; then the leave requests (a failing one is dropped).
+/// Whether `c` has the shape of the rotation commit of the state `m` whose hash is `hash` (SPEC
+/// 8.3): it cites that state and its epoch and is authored by the owner. The engine checks the rest.
+fn is_rotation_for(c: &Commit, m: &SignedManifest, hash: &Id) -> bool {
+    c.manifest_hash == *hash
+        && c.manifest_seq == m.state.manifest_seq
+        && c.author == m.state.owner_key
+        && c.key_epoch == m.state.key_epoch
+}
+
+/// A received state with its hash.
+struct Pending {
+    hash: Id,
+    m: SignedManifest,
+}
+
+/// Applies received items to `view` with [`Via::Offer`] in the dependency order of SPEC 9.1, as a
+/// bounded fixed point: each pass applies every state whose previous state is known (in ascending
+/// `manifestSeq`, each epoch-raising one with its rotation commit as one atomic pair), then every
+/// commit (parents first), and passes repeat while one of them applies something, at most
+/// [`MAX_PASSES`] times. A pair whose rotation commit misses a parent stays deferred until that
+/// parent is applied, so "a commit after the state it cites and after its parents" holds whatever
+/// order the sender used. Leave requests come last (a failing one is dropped).
 ///
-/// With `states_only`, only the states and their rotation commits are applied. Every item is
+/// What still cannot be applied is reported (`missing_parents` for a deferred pair and a waiting
+/// commit, `manifest_conflict` for a state with an unknown previous state) and returned in
+/// [`Applied::deferred`] and [`Applied::waiting`], so a catch-up can fetch what they name and
+/// retry. With `states_only`, only states and their rotation commits are applied. Every item is
 /// validated by the engine; nothing here trusts the sender.
 pub(crate) fn apply_items(view: &mut RepoView, repo_id: &str, items: Items, states_only: bool) -> Applied {
     let mut out = Applied::default();
     let Items {
-        mut manifests,
+        manifests,
         commits,
         leaves,
     } = items;
-    manifests.sort_by_key(|m| m.state.manifest_seq);
-    let mut commits: Vec<Option<Commit>> = commits.into_iter().map(Some).collect();
-
+    let mut seen: HashSet<Id> = HashSet::new();
+    let mut states: Vec<Pending> = Vec::new();
     for m in manifests {
         let Ok(hash) = m.hash() else {
             // A state whose canonical bytes cannot be built has no id to report; it is dropped.
             continue;
         };
+        if !seen.insert(hash) {
+            continue;
+        }
         if m.state.repo_id != repo_id {
             out.reject(hash, RejectCode::BadRequest);
             continue;
         }
-        if view.is_winning(&hash) {
-            // Already on the chain: accepted again with no change. Its rotation commit, if offered,
-            // is applied with the other commits and is accepted again the same way.
-            out.accepted.push(hash);
-            continue;
-        }
-        let raising = prev_epoch(view, &m).and_then(|e| e.checked_add(1)) == Some(m.state.key_epoch);
-        let rotation = if raising {
-            let seq = m.state.manifest_seq;
-            let (owner, epoch) = (m.state.owner_key, m.state.key_epoch);
-            commits
-                .iter_mut()
-                .find(|c| {
-                    c.as_ref().is_some_and(|c| {
-                        c.manifest_hash == hash && c.manifest_seq == seq && c.author == owner && c.key_epoch == epoch
-                    })
-                })
-                .and_then(Option::take)
-        } else {
-            None
-        };
-        let rotation_id = rotation.as_ref().map(|c| c.commit_id);
-        match view.apply_manifest_with(m, rotation, Via::Offer) {
-            Ok(()) => {
-                out.accepted.push(hash);
-                out.accepted.extend(rotation_id);
-            }
-            Err(code) => {
-                // Both items of a rejected pair carry the same code (SPEC 9.1).
-                out.reject(hash, code);
-                if let Some(id) = rotation_id {
-                    out.reject(id, code);
-                }
-            }
-        }
+        states.push(Pending { hash, m });
     }
-    if states_only {
-        return out;
-    }
+    states.sort_by_key(|p| p.m.state.manifest_seq);
+    let mut commits = parents_first(commits);
 
-    let mut pending = parents_first(commits.into_iter().flatten().collect());
     for _ in 0..MAX_PASSES {
-        let mut next = Vec::new();
         let mut progress = false;
-        for c in pending {
-            let id = c.commit_id;
-            let probe = c.clone();
-            match view.apply_commit_via(c, Via::Offer) {
+
+        let mut deferred = Vec::new();
+        for p in std::mem::take(&mut states) {
+            if view.is_winning(&p.hash) {
+                // Already on the chain: accepted again with no change. Its rotation commit, if
+                // offered, is applied with the other commits and is accepted again the same way.
+                out.accepted.push(p.hash);
+                progress = true;
+                continue;
+            }
+            let genesis = p.m.state.manifest_seq == 1;
+            let raising = match prev_epoch(view, &p.m) {
+                Some(e) => e.checked_add(1) == Some(p.m.state.key_epoch),
+                None if genesis => false,
+                None => {
+                    // A gap: the previous state has not arrived. Try again after the others.
+                    deferred.push(p);
+                    continue;
+                }
+            };
+            let rotation = if raising {
+                commits.iter().find(|c| is_rotation_for(c, &p.m, &p.hash)).cloned()
+            } else {
+                None
+            };
+            let rotation_id = rotation.as_ref().map(|c| c.commit_id);
+            match view.apply_manifest_with(p.m.clone(), rotation, Via::Offer) {
                 Ok(()) => {
-                    out.accepted.push(id);
+                    out.accepted.push(p.hash);
+                    out.accepted.extend(rotation_id);
+                    commits.retain(|c| Some(c.commit_id) != rotation_id);
                     progress = true;
                 }
-                Err(RejectCode::MissingParents) => next.push(probe),
-                Err(code) => out.reject(id, code),
+                Err(RejectCode::MissingParents) => deferred.push(p),
+                Err(code) => {
+                    // Both items of a rejected pair carry the same code (SPEC 9.1).
+                    out.reject(p.hash, code);
+                    if let Some(id) = rotation_id {
+                        out.reject(id, code);
+                        commits.retain(|c| c.commit_id != id);
+                    }
+                    progress = true;
+                }
             }
         }
-        pending = next;
-        if !progress || pending.is_empty() {
+        states = deferred;
+
+        if !states_only {
+            // The rotation commit of a deferred state waits for its state (SPEC 8.3).
+            let reserved: HashSet<Id> = commits
+                .iter()
+                .filter(|c| states.iter().any(|p| is_rotation_for(c, &p.m, &p.hash)))
+                .map(|c| c.commit_id)
+                .collect();
+            let mut next = Vec::new();
+            for c in std::mem::take(&mut commits) {
+                if reserved.contains(&c.commit_id) {
+                    next.push(c);
+                    continue;
+                }
+                let id = c.commit_id;
+                match view.apply_commit_via(c.clone(), Via::Offer) {
+                    Ok(()) => {
+                        out.accepted.push(id);
+                        progress = true;
+                    }
+                    Err(RejectCode::MissingParents) => next.push(c),
+                    Err(code) => {
+                        out.reject(id, code);
+                        progress = true;
+                    }
+                }
+            }
+            commits = next;
+        }
+
+        if !progress || (states.is_empty() && commits.is_empty()) {
             break;
         }
     }
-    for c in &pending {
-        out.reject(c.commit_id, RejectCode::MissingParents);
-    }
-    out.waiting = pending;
 
-    for l in leaves {
-        let _ = view.apply_leave_via(l, Via::Offer);
+    for p in &states {
+        let pair = commits
+            .iter()
+            .find(|c| is_rotation_for(c, &p.m, &p.hash))
+            .map(|c| c.commit_id);
+        let code = if prev_epoch(view, &p.m).is_some() {
+            RejectCode::MissingParents
+        } else {
+            RejectCode::ManifestConflict
+        };
+        out.reject(p.hash, code);
+        if let Some(id) = pair {
+            out.reject(id, code);
+        }
     }
+    let paired: HashSet<Id> = out.rejected.iter().map(|(id, _)| *id).collect();
+    if !states_only {
+        for c in &commits {
+            if !paired.contains(&c.commit_id) {
+                out.reject(c.commit_id, RejectCode::MissingParents);
+            }
+        }
+        for l in leaves {
+            let _ = view.apply_leave_via(l, Via::Offer);
+        }
+    }
+    out.deferred = states.into_iter().map(|p| p.m).collect();
+    out.waiting = commits;
     out
 }
 
@@ -594,6 +675,13 @@ fn parents_first(commits: Vec<Commit>) -> Vec<Commit> {
         .collect()
 }
 
+/// Applies `items` to a copy of `base` and returns it with the per-item outcome.
+pub(crate) fn apply_copy(base: &RepoView, repo_id: &str, items: Items, states_only: bool) -> (RepoView, Applied) {
+    let mut trial = base.clone();
+    let applied = apply_items(&mut trial, repo_id, items, states_only);
+    (trial, applied)
+}
+
 /// What happened to a trial view after the received-tip check (SPEC 9.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Admitted {
@@ -604,52 +692,56 @@ pub(crate) enum Admitted {
     NotHosted,
     /// A first copy whose received tip does not list the sender: nothing stored.
     Forbidden,
-    /// A first copy with no validated tip yet (the chain has not arrived): nothing stored.
+    /// A first copy whose received tip is not known yet (no tip, or a gap in the chain): nothing
+    /// stored; the catch-up decides.
     Incomplete,
+}
+
+/// The decision on a validated first copy (SPEC 9.2): stored only if its received tip lists this
+/// host and the sender; otherwise nothing is stored.
+pub(crate) fn admit_first_copy(st: &mut State, repo_id: &str, sender: &Id, trial: RepoView) -> Admitted {
+    let Some(tip) = trial.tip() else {
+        return Admitted::Incomplete;
+    };
+    if tip.state.repo_id != repo_id || !trial.tip_lists_host() {
+        return Admitted::NotHosted;
+    }
+    if !tip.state.has_host(sender) {
+        return Admitted::Forbidden;
+    }
+    st.store.repos.insert(repo_id.to_string(), trial);
+    Admitted::Hosted
 }
 
 /// Applies `items` from `sender` to a trial copy of `repo_id` (or a new view for a first copy),
 /// checks the validated received tip, and installs what SPEC 6.1 rule 6, 8.6, and 9.2 allow.
 ///
-/// A first copy is all or nothing: it is stored only if its tip lists this host and the sender. A
-/// held repository always gets the result; when the received tip does not list this host, only the
-/// validated states with their rotation commits are kept, not the other items.
+/// A first copy is all or nothing ([`admit_first_copy`]); one with a gap in its chain is
+/// [`Admitted::Incomplete`] and waits for the catch-up. A held repository always gets the result;
+/// when the received tip does not list this host, only the validated states with their rotation
+/// commits are kept, not the other items.
 pub(crate) fn receive(st: &mut State, repo_id: &str, sender: &Id, items: Items) -> (Admitted, Applied) {
-    let held = st.store.repos.get(repo_id).cloned();
-    let was_held = held.is_some();
-    let base = held.unwrap_or_else(|| RepoView::new(st.host_key(), st.limits.head_bound));
-    let mut trial = base.clone();
-    let states: Vec<SignedManifest> = items.manifests.clone();
-    let commits_for_states: Vec<Commit> = items.commits.clone();
-    let applied = apply_items(&mut trial, repo_id, items, false);
-    let lists = trial.tip_lists_host();
-
-    if !was_held {
-        let Some(tip) = trial.tip() else {
+    let Some(base) = st.store.repos.get(repo_id).cloned() else {
+        let fresh = RepoView::new(st.host_key(), st.limits.head_bound);
+        let (trial, applied) = apply_copy(&fresh, repo_id, items, false);
+        if applied.has_gap() {
             return (Admitted::Incomplete, applied);
-        };
-        if !lists {
-            return (Admitted::NotHosted, applied);
         }
-        if !tip.state.has_host(sender) {
-            return (Admitted::Forbidden, applied);
-        }
-        st.store.repos.insert(repo_id.to_string(), trial);
-        return (Admitted::Hosted, applied);
-    }
-    if lists {
+        return (admit_first_copy(st, repo_id, sender, trial), applied);
+    };
+    let states = Items {
+        manifests: items.manifests.clone(),
+        commits: items.commits.clone(),
+        leaves: Vec::new(),
+    };
+    let (trial, applied) = apply_copy(&base, repo_id, items, false);
+    if trial.tip_lists_host() {
         st.store.repos.insert(repo_id.to_string(), trial);
         return (Admitted::Hosted, applied);
     }
     // Held, and the received tip drops this host: keep the validated states (each epoch-raising
     // one with its rotation commit), not the other items (SPEC 8.6, 9.2).
-    let mut kept = base;
-    let states_only = Items {
-        manifests: states,
-        commits: commits_for_states,
-        leaves: Vec::new(),
-    };
-    let _ = apply_items(&mut kept, repo_id, states_only, true);
+    let (kept, _) = apply_copy(&base, repo_id, states, true);
     st.store.repos.insert(repo_id.to_string(), kept);
     (Admitted::NotHosted, applied)
 }
@@ -898,9 +990,15 @@ impl Worker {
     }
 
     /// Catch-up from the peer (SPEC 9.2): `heads`, then `fetch` for the tip state and the heads
-    /// this host lacks, then for what the engine names as missing, for at most [`MAX_ROUNDS`]
-    /// rounds and [`MAX_REQUESTED`] ids. Every round goes through [`receive`]. A peer that refuses
-    /// (`403`, `404`, `503`) or answers badly ends the catch-up of this repository only.
+    /// this host lacks, then, round after round, for what the deferred states and waiting commits
+    /// still miss (a previous state, a parent, a cited state, a frontier header), at most
+    /// [`MAX_ROUNDS`] rounds and [`MAX_REQUESTED`] ids. Deferred states and waiting commits are
+    /// carried into the next round, so a rotation pair whose parent arrives later is applied then.
+    ///
+    /// A held repository goes through [`receive`] every round. A first copy is built on one trial
+    /// view kept across the rounds and decided once at the end by [`admit_first_copy`] (all or
+    /// nothing; nothing is stored while the chain still has a gap). A peer that refuses (`403`,
+    /// `404`, `503`) or answers badly ends the catch-up of this repository only.
     fn catch_up(&self, repo_id: &str) {
         let heads_body = HeadsBody {
             repo_id: Some(repo_id.to_string()),
@@ -911,7 +1009,7 @@ impl Worker {
         if heads.tip.seq < 1 || heads.heads.len() > MAX_ITEMS {
             return;
         }
-        let mut want: Vec<Id> = {
+        let (mut want, mut first_copy): (Vec<Id>, Option<RepoView>) = {
             let Ok(st) = self.state.lock() else {
                 return;
             };
@@ -925,15 +1023,19 @@ impl Worker {
                     w.push(h);
                 }
             }
-            w
+            let trial = view
+                .is_none()
+                .then(|| RepoView::new(st.host_key(), st.limits.head_bound));
+            (w, trial)
         };
         let mut requested: HashSet<Id> = HashSet::new();
+        let mut deferred: Vec<SignedManifest> = Vec::new();
         let mut waiting: Vec<Commit> = Vec::new();
         for round in 0..MAX_ROUNDS {
             // The first round runs even with nothing wanted: a fetch also returns the pending
             // leave requests (SPEC 9.1).
             if (round > 0 && want.is_empty()) || self.stopping() {
-                return;
+                break;
             }
             requested.extend(want.iter().copied());
             let body = FetchBody {
@@ -941,18 +1043,20 @@ impl Worker {
                 ids: std::mem::take(&mut want),
             };
             let Some(mut items) = self.post_json::<Items>(&host_path(repo_id, "fetch"), &body) else {
-                return;
+                break;
             };
             if !items.bounded() {
-                return;
+                break;
             }
             let Ok(mut st) = self.state.lock() else {
                 return;
             };
+            let held = st.store.repos.contains_key(repo_id);
             // A sweep of a peer in step brings only known leave requests: nothing to apply.
             let nothing_new = items.manifests.is_empty()
                 && items.commits.is_empty()
                 && waiting.is_empty()
+                && deferred.is_empty()
                 && st
                     .store
                     .repos
@@ -961,24 +1065,57 @@ impl Worker {
             if nothing_new {
                 return;
             }
+            items.manifests.append(&mut deferred);
             items.commits.append(&mut waiting);
-            let (_, applied) = receive(&mut st, repo_id, &self.peer.key, items);
-            let Some(view) = st.store.repos.get(repo_id) else {
+            let applied = if held {
+                // Another path may have stored the repository meanwhile: it is held now.
+                first_copy = None;
+                receive(&mut st, repo_id, &self.peer.key, items).1
+            } else {
+                let base = first_copy
+                    .take()
+                    .unwrap_or_else(|| RepoView::new(st.host_key(), st.limits.head_bound));
+                let (trial, applied) = apply_copy(&base, repo_id, items, false);
+                first_copy = Some(trial);
+                applied
+            };
+            let Some(view) = st.store.repos.get(repo_id).or(first_copy.as_ref()) else {
                 return;
             };
+            let known: HashSet<Id> = applied.deferred.iter().filter_map(|m| m.hash().ok()).collect();
             let mut next: HashSet<Id> = HashSet::new();
-            for c in &applied.waiting {
-                for id in view.missing_for(c) {
-                    if requested.len().saturating_add(next.len()) >= MAX_REQUESTED {
-                        break;
-                    }
-                    if !requested.contains(&id) {
-                        next.insert(id);
+            let ask = |id: Id, next: &mut HashSet<Id>| {
+                if !known.contains(&id)
+                    && !requested.contains(&id)
+                    && requested.len().saturating_add(next.len()) < MAX_REQUESTED
+                {
+                    next.insert(id);
+                }
+            };
+            for m in &applied.deferred {
+                // A gap: fetching the previous state by hash returns its chain (SPEC 9.1).
+                if let Ok(prev) = <[u8; 32]>::try_from(m.state.prev_manifest_hash.as_slice()) {
+                    if view.manifest(&prev).is_none() {
+                        ask(prev, &mut next);
                     }
                 }
             }
+            for c in &applied.waiting {
+                for id in view.missing_for(c) {
+                    ask(id, &mut next);
+                }
+            }
+            deferred = applied.deferred;
             waiting = applied.waiting;
             want = next.into_iter().collect();
+        }
+        // A first copy is decided once, on the validated received tip, and only without a gap.
+        if let (Some(trial), true) = (first_copy, deferred.is_empty()) {
+            if let Ok(mut st) = self.state.lock() {
+                if !st.store.repos.contains_key(repo_id) {
+                    let _ = admit_first_copy(&mut st, repo_id, &self.peer.key, trial);
+                }
+            }
         }
     }
 }
