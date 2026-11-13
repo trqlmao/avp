@@ -1,983 +1,1470 @@
 /*
- * Micro reference server for the Alt Vault Protocol (AVP), HTTP/JSON profile.
- *
- * It implements the whole wire contract against an in-memory store so an implementer can point a client
- * at something real. It is intentionally tiny and NOT production code: state lives in memory and is lost
- * on restart, there is no TLS, and the bearer token is an opaque random string mapped to a member id in
- * this same process (a real deployment mints a JWT verifiable via JWKS, as the spec describes). What it
- * does honour is the part that matters: it is zero-knowledge. It stores only the manifest, the encrypted
- * envelope, the per-member wrapped keys, public keys, and counters that clients send, and decrypts
- * nothing. Field shapes follow ../../schema/avp.schema.json.
- *
- * Single file, no dependencies: com.sun.net.httpserver.HttpServer plus the JDK's built-in Ed25519
- * (java.security) and a tiny hand-rolled JSON parser/serializer.
- *
- * Run on JDK 17+ with the single-file source launcher:
- *
- *     java Server.java          # listens on http://localhost:8787 (set PORT to change)
+ * In-memory AVP 0.5 reference host, HTTP/JSON profile: the client-facing API and the host routes of
+ * host-to-host replication.
  *
  * SPDX-License-Identifier: MIT
  */
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
-import java.security.PublicKey;
-import java.security.SecureRandom;
-import java.security.Signature;
-import java.security.spec.X509EncodedKeySpec;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Base64;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Micro reference server for the Alt Vault Protocol (AVP), HTTP/JSON profile.
+ * The AVP 0.5 reference host (SPEC 3.3, 6 to 10, 12), in memory, over the HTTP/JSON profile.
  *
- * <p>This class implements the entire wire contract against an in-memory store so that an implementer
- * can point a client at something real. It is intentionally tiny and is <strong>not</strong> production
- * code: all state lives in memory and is lost on restart, there is no TLS, and the bearer token is an
- * opaque random string mapped to a member id within this same process (a real deployment mints a JWT
- * verifiable via JWKS, as the spec describes).
+ * <p>The host is a thin layer over the shared {@code avp} sources: each request is read up to the size
+ * limit ({@code 413}), routed ({@code 404}), authenticated ({@code 401}), decoded ({@code 400}), checked
+ * against the repository ({@code 404 not_found}, {@code 403 not_hosted}) and the caller identity each
+ * operation requires (SPEC 10.1, {@code 403 forbidden}), and handed to {@link AvpRules.RepoView}, which
+ * makes every SPEC 6 and 7 decision. An engine verdict maps to the SPEC 10.4 status table. An accepted
+ * client write is queued for the repository's other hosts ({@link Replication}).
  *
- * <p>What it does honour is the part that matters: it is zero-knowledge. It stores only the manifest, the
- * encrypted envelope, the per-member wrapped keys, public keys, and the version/epoch counters that
- * clients send, and it decrypts nothing. The only cryptography it performs is verifying the Ed25519
- * challenge signature over the raw nonce bytes. Field shapes follow {@code ../../schema/avp.schema.json}.
+ * <p>The host routes of the reference host-to-host profile (SPEC 9.3) answer {@code 503} while
+ * replication is paused by the test control, then check the host request signature ({@code 401}), and
+ * the repository: {@code 404 not_found} if not held, {@code 403 not_hosted} if this host's winning tip
+ * does not list it, {@code 403 forbidden} if that tip does not list the calling peer (SPEC 9.2). {@code
+ * offer} checks the received tip after validating the items.
  *
- * <p>The implementation is a single file with no dependencies: it uses
- * {@link com.sun.net.httpserver.HttpServer} plus the JDK's built-in Ed25519 provider ({@code java.security})
- * and a tiny hand-rolled JSON parser/serializer.
+ * <p>It is zero-knowledge: it stores only manifest states, commits (ciphertext), and leave requests,
+ * never a data key, decrypts nothing, and never logs a request body. No handler lets an exception escape
+ * on any input: every failure is an error body. Illustrative reference code, not production: state lives
+ * in memory and there is no TLS.
  *
- * <p>Run on JDK 17+ with the single-file source launcher:
- *
- * <pre>{@code
- *     java Server.java          // listens on http://localhost:8787 (set PORT to change)
- * }</pre>
+ * <p>Build and run from this directory: {@code javac -d build ../avp/*.java *.java} then {@code java -cp
+ * build Server}. Environment: {@code PORT} (default 8787), {@code AVP_HOST_SEED} (64 hex digits, else a
+ * random host key), {@code AVP_PEERS} ({@code <base64 hostKey>@<http base url>,...}), and {@code
+ * AVP_TEST_CONTROL=1} for the test control route.
  */
 public final class Server {
 
-    // ─── In-memory state ────────────────────────────────────────────────────
-    //
-    // A repo holds exactly what clients send and nothing the server can decrypt: the manifest (public
-    // metadata + per-member wrapped keys + public keys), and the current encrypted envelope.
+    /** The default port of the binary ({@code PORT} overrides it). */
+    public static final int DEFAULT_PORT = 8787;
 
-    /** repoId -> stored repo (manifest + current envelope). */
-    private final Map<String, StoredRepo> repos = new ConcurrentHashMap<>();
-    /** nonce (base64) -> challenge (the pubkey it was issued for + its expiry). Single-use. */
-    private final Map<String, Challenge> nonces = new ConcurrentHashMap<>();
-    /** opaque bearer token -> member id (the base64 Ed25519 public key). */
-    private final Map<String, String> tokens = new ConcurrentHashMap<>();
+    /** How long an acceptance from {@code prepareJoin} stays valid (SPEC 8.2: 15 minutes). */
+    static final long ACCEPTANCE_TTL_MS = 15 * 60 * 1000L;
 
-    /** How long an issued challenge nonce remains redeemable before it expires. */
-    private static final long NONCE_TTL_MS = 2 * 60 * 1000L;
-    /** How long a minted bearer token remains valid (advisory; this server never garbage-collects). */
-    private static final long TOKEN_TTL_MS = 60 * 60 * 1000L;
+    /** How long a challenge nonce stays valid (SPEC 3.3: RECOMMENDED at most 2 minutes). */
+    static final long CHALLENGE_TTL_MS = 2 * 60 * 1000L;
 
-    private final SecureRandom random = new SecureRandom();
-    private final Base64.Encoder b64 = Base64.getEncoder();          // standard alphabet, padded
-    private final Base64.Encoder b64url = Base64.getUrlEncoder().withoutPadding();
-    private final Base64.Decoder b64decode = Base64.getDecoder();
+    /** How long a minted token stays valid (SPEC 3.3: tokens SHOULD be short-lived). */
+    static final long TOKEN_TTL_MS = 15 * 60 * 1000L;
+
+    /** The protocol version in discovery (SPEC 11.7). */
+    private static final String VERSION = "0.5";
+
+    /** The threads that serve requests. */
+    private static final int WORKERS = 8;
+
+    /** The state of each running server, for {@link #host(HttpServer)}, {@link #stop(HttpServer)}. */
+    private static final Map<HttpServer, Host> HOSTS = new ConcurrentHashMap<>();
+
+    private Server() {}
+
+    // ─── Configuration ──────────────────────────────────────────────────────────────────
 
     /**
-     * The server-side state for a single repo: the manifest plus its current encrypted envelope.
-     *
-     * <p>The manifest is held as the parsed JSON object exactly as the client sent it. The server mutates
-     * only the version/epoch counters and the member roster; it never touches any wrapped-key or
-     * ciphertext bytes.
+     * The deployment limits of SPEC 12.1, each answered with the terminal error SPEC 12.1 names. Mutable so
+     * that tests can lower a limit; the host reads it under its lock.
      */
-    private static final class StoredRepo {
-        /** The repo manifest: public metadata, the member roster, and the version/epoch counters. */
-        Map<String, Object> manifest;
-        /** The current encrypted envelope (opaque ciphertext the server never decrypts). */
-        Object envelope;
+    public static final class Limits {
+        /** Largest request body in bytes; a larger one is {@code 413 too_large}. */
+        int maxBodyBytes = 4 * 1024 * 1024;
+        /** Most members a manifest state may list; more is {@code 429 quota_exceeded}. */
+        int maxMembers = 500;
+        /** Most repositories one owner key may have on this host; more is {@code 429 quota_exceeded}. */
+        int maxReposPerOwner = 1000;
+        /** Most repositories this host holds in all, by createRepo and replication. */
+        int maxRepos = 10_000;
+        /** Most outstanding challenges in all; at the cap the oldest is evicted. */
+        int maxChallenges = 10_000;
+        /** Most outstanding challenges for one key; more is {@code 429 quota_exceeded}. */
+        int maxChallengesPerKey = 16;
+        /** Most live bearer tokens in all; at the cap the oldest is evicted. */
+        int maxTokens = 100_000;
+        /** Most live bearer tokens for one key; more is {@code 429 quota_exceeded}. */
+        int maxTokensPerKey = 32;
+        /** Most recorded unexpired acceptances (SPEC 8.2) in all; at the cap the oldest is evicted. */
+        int maxPendingJoins = 10_000;
+        /** Most recorded unexpired acceptances for one member key; more is {@code 429 quota_exceeded}. */
+        int maxPendingJoinsPerKey = 64;
+        /** The head bound for client writes (SPEC 7.4); more is {@code 409 too_many_heads}. */
+        int headBound = 16;
+
+        /** The default limits. */
+        public Limits() {}
+
+        Limits copy() {
+            Limits l = new Limits();
+            l.maxBodyBytes = maxBodyBytes;
+            l.maxMembers = maxMembers;
+            l.maxReposPerOwner = maxReposPerOwner;
+            l.maxRepos = maxRepos;
+            l.maxChallenges = maxChallenges;
+            l.maxChallengesPerKey = maxChallengesPerKey;
+            l.maxTokens = maxTokens;
+            l.maxTokensPerKey = maxTokensPerKey;
+            l.maxPendingJoins = maxPendingJoins;
+            l.maxPendingJoinsPerKey = maxPendingJoinsPerKey;
+            l.headBound = headBound;
+            return l;
+        }
+    }
+
+    /**
+     * How to start a host.
+     *
+     * @param bindHost the address to listen on ({@code 0.0.0.0} in the binary)
+     * @param hostSeed the 32-byte Ed25519 seed of the host key
+     * @param peers the static peer list (SPEC 9.3)
+     * @param limits the deployment limits, copied at start
+     * @param replication the replication settings
+     */
+    public record ServerConfig(
+            String bindHost, byte[] hostSeed, Replication.Peers peers, Limits limits, Replication.Config replication) {
+        /** Copies the seed. */
+        public ServerConfig {
+            hostSeed = hostSeed.clone();
+        }
+    }
+
+    // ─── Host state ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Everything one host process holds. The request handlers and the replication workers share it under
+     * one lock ({@link #lock()}); nobody holds that lock across an outbound host call.
+     */
+    static final class Host {
+        /** This host's Ed25519 seed; it signs acceptances and host requests. */
+        final byte[] seed;
+        /** This host's public host key. */
+        final byte[] hostKey;
+        /** The replication settings. */
+        final Replication.Config replication;
+
+        private final ReentrantLock mutex = new ReentrantLock();
+        /** Wakes the replication workers; it waits on {@link #mutex}. */
+        final Condition wake = mutex.newCondition();
+        /** Set by a test to model a broken state: every handler then fails with {@code 500}. */
+        private volatile boolean poisoned;
+
+        /** The deployment limits. */
+        Limits limits;
+        /** Added to the system clock. Zero in the binary; tests move it to expire challenges and tokens. */
+        long clockOffsetMs;
+        /** Each repository's engine view, by repoId. */
+        final Map<String, AvpRules.RepoView> repos = new HashMap<>();
+        /** {@link #joinKey(String, byte[])} of each acceptance this host issued, to its expiresAt. */
+        final Map<String, Long> pendingJoin = new HashMap<>();
+        /** The accepted client writes waiting to be offered to the repository's other hosts. */
+        final Replication.Outbox outbox = new Replication.Outbox();
+        /** Outstanding challenges and live tokens. */
+        final Auth auth = new Auth();
+        /** The peer list the host routes authenticate against. */
+        Replication.Peers peers = Replication.Peers.none();
+        /** Set by the test control: no outbound host traffic, inbound host routes answer {@code 503}. */
+        boolean paused;
+        /** Bumped when replication is unpaused, so every worker sweeps at once. */
+        long kick;
+        /** {@code (peer, repoId)} pairs to catch up from, queued by incomplete offers. */
+        final ArrayDeque<Replication.Catchup> catchups = new ArrayDeque<>();
+        /** Engine applications of received items, for tests and diagnostics. */
+        long engineApplications;
+
+        /** The running replication workers; guarded by {@code this}. */
+        private Replication.Running running;
+        /** The request threads. */
+        private ExecutorService pool;
+
+        Host(ServerConfig cfg) throws AvpException {
+            this.seed = cfg.hostSeed();
+            this.hostKey = AvpCrypto.ed25519Public(seed);
+            this.replication = cfg.replication();
+            this.limits = cfg.limits().copy();
+        }
 
         /**
-         * Creates a stored repo.
+         * Takes the state lock.
          *
-         * @param manifest the repo manifest as parsed from the client request
-         * @param envelope the initial encrypted envelope, or {@code null} if none was supplied
+         * @throws IllegalStateException if the state is poisoned (a test hook)
          */
-        StoredRepo(Map<String, Object> manifest, Object envelope) {
-            this.manifest = manifest;
-            this.envelope = envelope;
-        }
-    }
-
-    /**
-     * A single-use authentication challenge, bound to the public key it was issued for.
-     *
-     * @param publicKey the base64 Ed25519 public key the challenge was issued for
-     * @param expiresAt the wall-clock time (epoch millis) after which the nonce is no longer redeemable
-     */
-    private record Challenge(String publicKey, long expiresAt) {}
-
-    // ─── Crypto: verify an Ed25519 signature over raw bytes (SPEC section 3) ──
-
-    /**
-     * Wraps a raw 32-byte Ed25519 public key into a {@link PublicKey} the JDK provider can use.
-     *
-     * <p>The JDK's {@code KeyFactory} expects an X.509 {@code SubjectPublicKeyInfo} (SPKI) encoding, so
-     * this prepends the fixed Ed25519 SPKI header to the raw key bytes before decoding.
-     *
-     * @param rawBase64 the raw 32-byte Ed25519 public key, base64-encoded (standard alphabet)
-     * @return the corresponding {@link PublicKey}
-     * @throws Exception if the input is not valid base64 or the bytes are not a valid Ed25519 key
-     */
-    private PublicKey ed25519PublicKeyObject(String rawBase64) throws Exception {
-        // SubjectPublicKeyInfo prefix for an Ed25519 key, then the raw 32-byte key.
-        byte[] prefix = hexToBytes("302a300506032b6570032100");
-        byte[] raw = b64decode.decode(rawBase64);
-        byte[] der = new byte[prefix.length + raw.length];
-        System.arraycopy(prefix, 0, der, 0, prefix.length);
-        System.arraycopy(raw, 0, der, prefix.length, raw.length);
-        return KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(der));
-    }
-
-    /**
-     * Verifies an Ed25519 signature over the given message bytes.
-     *
-     * <p>Any failure (malformed key, malformed signature, or a signature that does not match) is reported
-     * as a plain {@code false} rather than an exception, so callers can treat verification as a simple
-     * predicate.
-     *
-     * @param publicKeyBase64 the signer's raw Ed25519 public key, base64-encoded
-     * @param message the exact message bytes that were signed
-     * @param signatureBase64 the candidate signature, base64-encoded
-     * @return {@code true} if the signature is valid for the message and key, {@code false} otherwise
-     */
-    private boolean verifyEd25519(String publicKeyBase64, byte[] message, String signatureBase64) {
-        try {
-            Signature sig = Signature.getInstance("Ed25519");
-            sig.initVerify(ed25519PublicKeyObject(publicKeyBase64));
-            sig.update(message);
-            return sig.verify(b64decode.decode(signatureBase64));
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    // ─── Request handling ────────────────────────────────────────────────────
-
-    /**
-     * Dispatches a single HTTP request to the matching AVP operation and writes the response.
-     *
-     * <p>The two {@code /api/auth/keypair/*} endpoints are unauthenticated and implement the challenge ->
-     * token flow. Every other route requires a valid bearer token; the caller's member id is resolved
-     * from it and, for repo-scoped routes, checked for membership before the operation runs. Routing is
-     * performed against the <em>raw</em> request path because base64 member ids contain {@code + / =},
-     * which must survive into the path segment for this server to decode them itself.
-     *
-     * @param ex the HTTP exchange to read the request from and write the response to
-     * @throws IOException if reading the request body fails
-     */
-    private void route(HttpExchange ex) throws IOException {
-        String method = ex.getRequestMethod();
-        // Route on the RAW path: getPath() would percent-decode for us, but base64 member ids contain
-        // '+' '/' '=' which must survive into the segment so we can decode them ourselves (matching
-        // decodeURIComponent semantics — not URLDecoder, which turns '+' into a space).
-        String path = ex.getRequestURI().getRawPath();
-
-        // ── Auth: challenge -> token ──
-        if (method.equals("POST") && path.equals("/api/auth/keypair/challenge")) {
-            Map<String, Object> body = readJsonObject(ex);
-            byte[] raw = new byte[32];
-            random.nextBytes(raw);
-            String nonce = b64.encodeToString(raw);
-            nonces.put(nonce, new Challenge(str(body.get("ed25519PublicKey")), now() + NONCE_TTL_MS));
-            send(ex, 200, Map.of("nonce", nonce));
-            return;
-        }
-
-        if (method.equals("POST") && path.equals("/api/auth/keypair/token")) {
-            Map<String, Object> body = readJsonObject(ex);
-            String nonce = str(body.get("nonce"));
-            String pub = str(body.get("ed25519PublicKey"));
-            String signature = str(body.get("signature"));
-            Challenge challenge = nonces.remove(nonce); // single-use
-            if (challenge == null || !challenge.publicKey().equals(pub) || challenge.expiresAt() < now()) {
-                send(ex, 401, Map.of("error", "invalid or expired nonce"));
-                return;
+        void lock() {
+            mutex.lock();
+            if (poisoned) {
+                mutex.unlock();
+                throw new IllegalStateException("state lock poisoned");
             }
-            if (!verifyEd25519(pub, b64decode.decode(nonce), signature)) {
-                send(ex, 401, Map.of("error", "bad signature"));
-                return;
-            }
-            byte[] tokenBytes = new byte[32];
-            random.nextBytes(tokenBytes);
-            String token = b64url.encodeToString(tokenBytes);
-            tokens.put(token, pub);
-            send(ex, 200, orderedMap("token", token, "expiresAt", now() + TOKEN_TTL_MS));
-            return;
         }
 
-        // ── Everything below requires a bearer token ──
-        String caller = callerId(ex);
-        if (caller == null) {
-            send(ex, 401, Map.of("error", "missing or unknown bearer token"));
-            return;
+        /** Releases the state lock. */
+        void unlock() {
+            mutex.unlock();
         }
 
-        // createRepo
-        if (method.equals("POST") && path.equals("/v1/repos")) {
-            Map<String, Object> body = readJsonObject(ex);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> manifest = (Map<String, Object>) body.get("manifest");
-            List<Object> members = membersOf(manifest);
-            if (members.size() != 1 || !caller.equals(memberId(members.get(0)))) {
-                send(ex, 403, Map.of("error", "creator must be the sole member"));
-                return;
-            }
-            String repoId = str(manifest.get("repoId"));
-            if (repos.containsKey(repoId)) {
-                send(ex, 409, Map.of("error", "repo already exists"));
-                return;
-            }
-            repos.put(repoId, new StoredRepo(manifest, body.get("initialEnvelope")));
-            send(ex, 200, manifest);
-            return;
+        /** Takes the lock whatever the poison flag, for shutdown. */
+        void lockForShutdown() {
+            mutex.lock();
         }
 
-        // routes under /v1/repos/{repoId}/...
-        Matcher opMatch = OP_PATH.matcher(path);
-        Matcher memberMatch = MEMBER_PATH.matcher(path);
-        String repoIdRaw = null;
-        String op = null;
-        String memberIdRaw = null;
-        if (opMatch.matches()) {
-            repoIdRaw = opMatch.group(1);
-            op = opMatch.group(2);
-        } else if (memberMatch.matches()) {
-            repoIdRaw = memberMatch.group(1);
-            memberIdRaw = memberMatch.group(2);
-        }
-        if (repoIdRaw == null) {
-            send(ex, 404, Map.of("error", "no such route"));
-            return;
-        }
-        String repoId = urlDecode(repoIdRaw);
-        StoredRepo stored = repos.get(repoId);
-        if (stored == null) {
-            send(ex, 404, Map.of("error", "repo not found"));
-            return;
-        }
-        if (!isMember(stored.manifest, caller)) {
-            send(ex, 403, Map.of("error", "caller is not a member"));
-            return;
+        /** Marks the state broken, like a poisoned lock: every later request answers {@code 500}. */
+        void poison() {
+            poisoned = true;
         }
 
-        if (method.equals("POST") && "pull".equals(op)) {
-            Map<String, Object> body = readJsonObject(ex);
-            long current = asLong(stored.manifest.get("payloadVersion"));
-            if (asLong(body.get("knownPayloadVersion")) == current) {
-                send(ex, 200, orderedMap("manifest", stored.manifest, "envelope", null, "unchanged", true));
-            } else {
-                send(ex, 200, orderedMap("manifest", stored.manifest, "envelope", stored.envelope, "unchanged", false));
-            }
-            return;
+        /** The host's current time in epoch milliseconds. */
+        long nowMs() {
+            return saturatingAdd(System.currentTimeMillis(), clockOffsetMs);
         }
 
-        if (method.equals("POST") && "push".equals(op)) {
-            Map<String, Object> body = readJsonObject(ex);
-            long current = asLong(stored.manifest.get("payloadVersion"));
-            if (asLong(body.get("expectedPayloadVersion")) != current) {
-                send(ex, 200, orderedMap(
-                        "accepted", false,
-                        "conflict", true,
-                        "payloadVersion", current,
-                        "keyEpoch", asLong(stored.manifest.get("keyEpoch"))));
-                return;
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Object> envelope = (Map<String, Object>) body.get("envelope");
-            stored.envelope = envelope;
-            stored.manifest.put("payloadVersion", asLong(envelope.get("payloadVersion")));
-            stored.manifest.put("keyEpoch", asLong(envelope.get("keyEpoch")));
-            Object rotated = body.get("rotatedMembers");
-            if (rotated instanceof List) {
-                stored.manifest.put("members", rotated);
-            }
-            send(ex, 200, orderedMap(
-                    "accepted", true,
-                    "conflict", false,
-                    "payloadVersion", asLong(stored.manifest.get("payloadVersion")),
-                    "keyEpoch", asLong(stored.manifest.get("keyEpoch"))));
-            return;
+        /** What the store holds (repositories, acceptances, outbox), for a full rendering in tests. */
+        Map<String, Object> storeParts() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("repos", repos);
+            m.put("pendingJoin", pendingJoin);
+            m.put("outbox", outbox);
+            return m;
         }
 
-        if (method.equals("POST") && "add-member".equals(op)) {
-            Map<String, Object> body = readJsonObject(ex);
-            Object member = body.get("member");
-            if (!isMember(stored.manifest, memberId(member))) {
-                membersOf(stored.manifest).add(member);
-            }
-            send(ex, 200, stored.manifest);
-            return;
-        }
-
-        if (method.equals("POST") && "remove-member".equals(op)) {
-            Map<String, Object> body = readJsonObject(ex);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> rotatedEnvelope = (Map<String, Object>) body.get("rotatedEnvelope");
-            stored.manifest.put("members", body.get("rewrappedMembers"));
-            stored.envelope = rotatedEnvelope;
-            stored.manifest.put("keyEpoch", asLong(body.get("newKeyEpoch")));
-            stored.manifest.put("payloadVersion", asLong(rotatedEnvelope.get("payloadVersion")));
-            send(ex, 200, stored.manifest);
-            return;
-        }
-
-        if (method.equals("GET") && memberIdRaw != null) {
-            String wanted = urlDecode(memberIdRaw);
-            for (Object m : membersOf(stored.manifest)) {
-                if (wanted.equals(memberId(m))) {
-                    send(ex, 200, m);
-                    return;
+        /** How many repositories on this host have {@code owner} as their owner key. */
+        int reposOwnedBy(byte[] owner) {
+            int n = 0;
+            for (AvpRules.RepoView v : repos.values()) {
+                Optional<AvpManifest.SignedManifest> t = v.tip();
+                if (t.isPresent() && Arrays.equals(t.get().state().ownerKey(), owner)) {
+                    n++;
                 }
             }
-            send(ex, 404, Map.of("error", "member not found"));
-            return;
+            return n;
         }
 
-        send(ex, 404, Map.of("error", "no such route"));
-    }
-
-    /** Matches a repo operation route, capturing the repo id (group 1) and the operation name (group 2). */
-    private static final Pattern OP_PATH =
-            Pattern.compile("^/v1/repos/([^/]+)/(pull|push|add-member|remove-member)$");
-    /** Matches a single-member fetch route, capturing the repo id (group 1) and the member id (group 2). */
-    private static final Pattern MEMBER_PATH =
-            Pattern.compile("^/v1/repos/([^/]+)/member/([^/]+)$");
-
-    /**
-     * Resolves the caller's member id from the request's {@code Authorization: Bearer} header.
-     *
-     * @param ex the HTTP exchange whose request headers are inspected
-     * @return the caller's member id (base64 Ed25519 public key), or {@code null} if the header is absent,
-     *     malformed, or carries an unknown token
-     */
-    private String callerId(HttpExchange ex) {
-        String header = ex.getRequestHeaders().getFirst("Authorization");
-        if (header == null || !header.startsWith("Bearer ")) {
-            return null;
+        /**
+         * Records an issued acceptance after dropping expired ones; at the total cap the one that expires
+         * first is evicted.
+         *
+         * @return {@code false}, recording nothing, when the member already holds its share
+         */
+        boolean recordAcceptance(String repoId, byte[] member, long expiresAt, long now) {
+            pendingJoin.values().removeIf(exp -> exp <= now);
+            String key = joinKey(repoId, member);
+            if (!pendingJoin.containsKey(key)) {
+                String suffix = "|" + AvpEncoding.base64(member);
+                long held = pendingJoin.keySet().stream()
+                        .filter(k -> k.endsWith(suffix))
+                        .count();
+                if (limits.maxPendingJoins == 0 || held >= limits.maxPendingJoinsPerKey) {
+                    return false;
+                }
+                while (pendingJoin.size() >= limits.maxPendingJoins) {
+                    String oldest = null;
+                    long min = Long.MAX_VALUE;
+                    for (Map.Entry<String, Long> e : pendingJoin.entrySet()) {
+                        if (oldest == null || e.getValue() < min) {
+                            oldest = e.getKey();
+                            min = e.getValue();
+                        }
+                    }
+                    if (oldest == null) {
+                        break;
+                    }
+                    pendingJoin.remove(oldest);
+                }
+            }
+            pendingJoin.put(key, expiresAt);
+            return true;
         }
-        return tokens.get(header.substring("Bearer ".length()));
     }
 
     /**
-     * Tests whether the given member id appears in a manifest's roster.
+     * The key of a recorded acceptance: the repoId and the base64 member key.
      *
-     * @param manifest the repo manifest to inspect
-     * @param memberId the candidate member id (base64 Ed25519 public key)
-     * @return {@code true} if a member with that id is on the roster, {@code false} otherwise
+     * @param repoId the repository
+     * @param member the member key
+     * @return the key in {@link Host#pendingJoin}
      */
-    private boolean isMember(Map<String, Object> manifest, String memberId) {
-        for (Object m : membersOf(manifest)) {
-            if (memberId.equals(memberId(m))) {
-                return true;
+    static String joinKey(String repoId, byte[] member) {
+        return repoId + "|" + AvpEncoding.base64(member);
+    }
+
+    // ─── Host-issued authentication (SPEC 3.3) ──────────────────────────────────────────
+
+    /**
+     * Challenges and bearer tokens (SPEC 3.3). A challenge is 32 CSPRNG bytes for one key, single-use,
+     * valid for {@link #CHALLENGE_TTL_MS}; a token is 32 random bytes (base64url), valid only here for
+     * {@link #TOKEN_TTL_MS}. Neither secret is stored: both tables are keyed by the SHA-256 digest of the
+     * secret, so a lookup compares digests and its timing says nothing about the secret. The challenge's
+     * bound key is compared in constant time. Each table has a per-key cap ({@code 429}) and a total cap at
+     * which the entry that expires first is evicted.
+     */
+    static final class Auth {
+        private record Entry(byte[] key, long expiresAt) {}
+
+        private final Map<String, Entry> challenges = new HashMap<>();
+        private final Map<String, Entry> tokens = new HashMap<>();
+
+        private static String digest(byte[] secret) {
+            return AvpEncoding.base64(AvpCrypto.sha256(secret));
+        }
+
+        private static boolean makeRoom(Map<String, Entry> map, byte[] key, long now, int total, int perKey) {
+            map.values().removeIf(e -> e.expiresAt() <= now);
+            long mine = map.values().stream()
+                    .filter(e -> Arrays.equals(e.key(), key))
+                    .count();
+            if (total == 0 || mine >= perKey) {
+                return false;
+            }
+            while (map.size() >= total) {
+                String oldest = null;
+                long min = Long.MAX_VALUE;
+                for (Map.Entry<String, Entry> e : map.entrySet()) {
+                    if (oldest == null || e.getValue().expiresAt() < min) {
+                        oldest = e.getKey();
+                        min = e.getValue().expiresAt();
+                    }
+                }
+                if (oldest == null) {
+                    break;
+                }
+                map.remove(oldest);
+            }
+            return true;
+        }
+
+        /** A fresh nonce for {@code key}, or {@code null} when the key holds its share of challenges. */
+        byte[] challenge(byte[] key, long now, Limits l) {
+            if (!makeRoom(challenges, key, now, l.maxChallenges, l.maxChallengesPerKey)) {
+                return null;
+            }
+            byte[] nonce = AvpCrypto.randomBytes(32);
+            challenges.put(digest(nonce), new Entry(key.clone(), saturatingAdd(now, CHALLENGE_TTL_MS)));
+            return nonce;
+        }
+
+        /**
+         * Redeems a signed challenge for a token whose subject is {@code key}. The nonce is consumed
+         * whatever the outcome.
+         */
+        Map<String, Object> token(byte[] key, byte[] nonce, byte[] signature, long now, Limits l) throws ApiError {
+            Entry challenge = challenges.remove(digest(nonce));
+            if (challenge == null
+                    || challenge.expiresAt() <= now
+                    || !AvpCrypto.constantTimeEquals(challenge.key(), key)
+                    || !AvpCrypto.ed25519Verify(key, nonce, signature)) {
+                throw ApiError.unauthorized(
+                        "challenge nonce unknown, used, expired, or not issued for this key, or bad signature");
+            }
+            if (!makeRoom(tokens, key, now, l.maxTokens, l.maxTokensPerKey)) {
+                throw ApiError.quota("too many live tokens for this key");
+            }
+            String token = AvpEncoding.base64Url(AvpCrypto.randomBytes(32));
+            long expiresAt = saturatingAdd(now, TOKEN_TTL_MS);
+            tokens.put(digest(token.getBytes(StandardCharsets.UTF_8)), new Entry(key.clone(), expiresAt));
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("expiresAt", expiresAt);
+            o.put("token", token);
+            return o;
+        }
+
+        /** The subject of a live token issued here, or {@code null}. */
+        byte[] subject(String token, long now) {
+            Entry e = tokens.get(digest(token.getBytes(StandardCharsets.UTF_8)));
+            return e == null || e.expiresAt() <= now ? null : e.key();
+        }
+    }
+
+    static long saturatingAdd(long a, long b) {
+        long sum = a + b;
+        if (((a ^ sum) & (b ^ sum)) < 0) {
+            return b < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+        }
+        return sum;
+    }
+
+    // ─── Errors ─────────────────────────────────────────────────────────────────────────
+
+    /** An error answer: the status, the SPEC 10.4 {@code code}, a message, and an optional detail. */
+    static final class ApiError extends Exception {
+        private static final long serialVersionUID = 1L;
+
+        final int status;
+        final String code;
+        final String detail;
+        final Long retryAfterS;
+
+        ApiError(int status, String code, String message, String detail, Long retryAfterS) {
+            super(message, null, false, false);
+            this.status = status;
+            this.code = code;
+            this.detail = detail;
+            this.retryAfterS = retryAfterS;
+        }
+
+        static ApiError of(int status, String code, String message) {
+            return new ApiError(status, code, message, null, null);
+        }
+
+        static ApiError badRequest(String message) {
+            return of(400, AvpRules.BAD_REQUEST, message);
+        }
+
+        static ApiError unauthorized(String message) {
+            return of(401, "unauthorized", message);
+        }
+
+        static ApiError forbidden(String message) {
+            return of(403, AvpRules.FORBIDDEN, message);
+        }
+
+        static ApiError notFound(String message) {
+            return of(404, "not_found", message);
+        }
+
+        static ApiError quota(String message) {
+            return of(429, "quota_exceeded", message);
+        }
+
+        static ApiError tooLarge() {
+            return of(413, "too_large", "request body too large");
+        }
+
+        /** {@code 503} while replication is paused by the test control (SPEC 9.3); no SPEC code. */
+        static ApiError paused() {
+            return new ApiError(503, null, "replication is paused", null, null);
+        }
+
+        /** A failure that is not the caller's fault. */
+        static ApiError internal() {
+            return new ApiError(500, null, "internal error", null, null);
+        }
+
+        /** The SPEC 10.4 answer for an engine verdict. */
+        static ApiError reject(String code) {
+            return switch (code) {
+                case AvpRules.BAD_REQUEST -> of(400, code, "malformed or invalid item");
+                case AvpRules.FORBIDDEN -> of(403, code, "not allowed by the repository's manifest");
+                case AvpRules.NOT_HOSTED -> of(403, code, "this host is not in the manifest's hosts");
+                case AvpRules.TOO_MANY_HEADS -> of(409, code, "too many heads; merge first");
+                case AvpRules.MANIFEST_CONFLICT -> of(409, code, "manifest state is not the tip + 1");
+                case AvpRules.MISSING_PARENTS -> of(422, code, "unknown parent, manifest state, or frontier commit");
+                default -> of(400, AvpRules.BAD_REQUEST, "rejected");
+            };
+        }
+
+        /** {@code 422 missing_parents} with {@code detail} listing the ids, base64, joined by commas. */
+        static ApiError missing(List<byte[]> ids) {
+            ApiError base = reject(AvpRules.MISSING_PARENTS);
+            if (ids.isEmpty()) {
+                return base;
+            }
+            List<String> parts = new ArrayList<>();
+            for (byte[] id : ids) {
+                parts.add(AvpEncoding.base64(id));
+            }
+            return new ApiError(base.status, base.code, base.getMessage(), String.join(",", parts), null);
+        }
+
+        Map<String, Object> body() {
+            // The keys in the order the Rust host writes them (sorted).
+            Map<String, Object> o = new LinkedHashMap<>();
+            if (code != null) {
+                o.put("code", code);
+            }
+            if (detail != null) {
+                o.put("detail", detail);
+            }
+            o.put("error", getMessage());
+            return o;
+        }
+    }
+
+    // ─── Decoding ───────────────────────────────────────────────────────────────────────
+
+    private interface Decoder<T> {
+        T run() throws AvpException;
+    }
+
+    /** Runs a decoder; any malformed value, missing field, wrong type, or bad base64 is {@code 400}. */
+    static <T> T decode(Decoder<T> d) throws ApiError {
+        try {
+            return d.run();
+        } catch (AvpException | RuntimeException e) {
+            throw ApiError.badRequest("malformed body: " + e.getMessage());
+        }
+    }
+
+    /** Parses a JSON object body that may hold only {@code fields}. */
+    static Map<String, Object> strict(byte[] body, String... fields) throws ApiError {
+        Map<String, Object> o = decode(() -> AvpJson.object(AvpJson.parse(body), "body"));
+        Set<String> allowed = Set.of(fields);
+        for (String k : o.keySet()) {
+            if (!allowed.contains(k)) {
+                throw ApiError.badRequest("malformed body: unknown field `" + k + "`");
             }
         }
-        return false;
+        return o;
     }
+
+    /** An optional field: absent and {@code null} both mean none. */
+    static Object optional(Map<String, Object> o, String key) {
+        return o.get(key);
+    }
+
+    static byte[] key32(Map<String, Object> o, String key) throws AvpException {
+        return AvpEncoding.fromBase64(AvpJson.string(o, key), 32);
+    }
+
+    // ─── Starting and stopping ──────────────────────────────────────────────────────────
 
     /**
-     * Returns the live member roster of a manifest.
+     * Binds {@code port} and serves the client-facing API and the host routes, and starts replication with
+     * {@code cfg.peers()}.
      *
-     * <p>The returned list is the manifest's own backing list, so mutating it (for example to add a
-     * member) updates the manifest in place.
-     *
-     * @param manifest the repo manifest
-     * @return the list of member entries
+     * @param port the port, or {@code 0} for one the OS chooses (read it from the returned server)
+     * @param cfg the configuration
+     * @return the running server
+     * @throws IOException if the port cannot be bound
      */
-    @SuppressWarnings("unchecked")
-    private static List<Object> membersOf(Map<String, Object> manifest) {
-        return (List<Object>) manifest.get("members");
-    }
-
-    /**
-     * Extracts the member id (its base64 Ed25519 public key) from a member entry.
-     *
-     * @param member a member entry object (a JSON object as parsed into a map)
-     * @return the member's {@code ed25519PublicKey} value
-     */
-    @SuppressWarnings("unchecked")
-    private static String memberId(Object member) {
-        return str(((Map<String, Object>) member).get("ed25519PublicKey"));
-    }
-
-    /** Drops all repos, nonces, and tokens. Exposed package-private so tests can start from a clean slate. */
-    void resetState() {
-        repos.clear();
-        nonces.clear();
-        tokens.clear();
-    }
-
-    /**
-     * Creates and starts the HTTP server on the given port.
-     *
-     * <p>A single catch-all context routes every request through {@link #route(HttpExchange)}; any
-     * exception escaping a handler is turned into a {@code 400} JSON error response so a buggy request can
-     * never wedge the server.
-     *
-     * @param port the TCP port to bind, or {@code 0} to let the OS pick an ephemeral free port
-     * @return the started {@link HttpServer} (its bound address reveals the actual port)
-     * @throws IOException if the server cannot bind the requested port
-     */
-    HttpServer start(int port) throws IOException {
-        HttpServer http = HttpServer.create(new InetSocketAddress(port), 0);
-        http.createContext("/", ex -> {
-            try (ex) {
-                route(ex);
-            } catch (Exception e) {
-                send(ex, 400, orderedMap("error", "bad request", "detail", String.valueOf(e)));
-            }
+    public static HttpServer start(int port, ServerConfig cfg) throws IOException {
+        Host host;
+        try {
+            host = new Host(cfg);
+        } catch (AvpException e) {
+            throw new IOException("bad host seed", e);
+        }
+        HttpServer http = HttpServer.create(new InetSocketAddress(cfg.bindHost(), port), 64);
+        http.createContext("/", ex -> exchange(ex, host));
+        AtomicInteger n = new AtomicInteger();
+        host.pool = Executors.newFixedThreadPool(WORKERS, r -> {
+            Thread t = new Thread(r, "avp-worker-" + n.getAndIncrement());
+            t.setDaemon(true);
+            return t;
         });
+        http.setExecutor(host.pool);
         http.start();
+        HOSTS.put(http, host);
+        peerWith(http, cfg.peers());
         return http;
     }
 
     /**
-     * Program entry point: starts the reference server and blocks (the HTTP server runs its own threads).
+     * The state of a running server, for in-process tests.
      *
-     * <p>The listen port defaults to {@code 8787} and can be overridden with the {@code PORT} environment
-     * variable.
-     *
-     * @param args ignored
-     * @throws IOException if the server cannot bind its port
+     * @param http a server from {@link #start(int, ServerConfig)}
+     * @return its state
      */
-    public static void main(String[] args) throws IOException {
-        int port = 8787;
-        String env = System.getenv("PORT");
-        if (env != null && !env.isBlank()) {
-            port = Integer.parseInt(env.trim());
+    static Host host(HttpServer http) {
+        Host h = HOSTS.get(http);
+        if (h == null) {
+            throw new IllegalArgumentException("not a running AVP host");
         }
-        new Server().start(port);
-        System.out.println("AVP reference server (in-memory) listening on http://localhost:" + port);
+        return h;
     }
 
-    // ─── HTTP helpers ─────────────────────────────────────────────────────────
-
     /**
-     * Serializes {@code body} to JSON and writes it as the response with the given status code.
+     * Installs {@code peers} as the host's peer list and (re)starts one replication worker per peer.
      *
-     * <p>If the client has already disconnected the write is silently dropped; a reference server has
-     * nothing useful to do about a half-closed connection.
-     *
-     * @param ex the HTTP exchange to respond on
-     * @param status the HTTP status code to send
-     * @param body the response body, serialized via {@link Json#write(Object)}
+     * @param http a running server
+     * @param peers the new peer list; empty stops replication
      */
-    private static void send(HttpExchange ex, int status, Object body) {
-        try {
-            byte[] bytes = Json.write(body).getBytes(StandardCharsets.UTF_8);
-            ex.getResponseHeaders().set("Content-Type", "application/json");
-            ex.sendResponseHeaders(status, bytes.length);
-            ex.getResponseBody().write(bytes);
-        } catch (IOException e) {
-            // The client went away mid-response; nothing useful to do in a reference server.
+    static void peerWith(HttpServer http, Replication.Peers peers) {
+        Host h = host(http);
+        synchronized (h) {
+            if (h.running != null) {
+                h.running.close();
+            }
+            h.running = Replication.run(h, peers);
         }
     }
 
     /**
-     * Reads the request body and parses it as a JSON object.
+     * Stops replication, the listener, and the request threads.
      *
-     * <p>An empty body, or a body whose top-level JSON value is not an object, yields an empty map rather
-     * than an error, which keeps the route handlers simple.
-     *
-     * @param ex the HTTP exchange whose request body is read
-     * @return the parsed object as a map (empty if the body is blank or not an object)
-     * @throws IOException if reading the request body fails
+     * @param http a running server; a stopped one is ignored
      */
-    private static Map<String, Object> readJsonObject(HttpExchange ex) throws IOException {
-        String raw = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-        if (raw.isBlank()) {
-            return new LinkedHashMap<>();
+    static void stop(HttpServer http) {
+        Host h = HOSTS.remove(http);
+        if (h == null) {
+            return;
         }
-        Object parsed = Json.parse(raw);
-        if (parsed instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> m = (Map<String, Object>) parsed;
-            return m;
-        }
-        return new LinkedHashMap<>();
-    }
-
-    /**
-     * Percent-decodes a single URI path segment with {@code decodeUriComponent} semantics: only
-     * {@code %XX} escapes are decoded, and a literal {@code '+'} stays a {@code '+'} (it is NOT a space).
-     * This matters because base64 member ids contain {@code + / =}, so {@link URLDecoder} (form decoding)
-     * would corrupt them by turning {@code '+'} into a space.
-     */
-    private static String urlDecode(String s) {
-        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '%' && i + 2 < s.length()) {
-                out.write(Integer.parseInt(s.substring(i + 1, i + 3), 16));
-                i += 2;
-            } else {
-                out.write(c);
+        synchronized (h) {
+            if (h.running != null) {
+                h.running.close();
+                h.running = null;
             }
         }
-        return out.toString(StandardCharsets.UTF_8);
+        http.stop(0);
+        h.pool.shutdownNow();
     }
 
     /**
-     * Returns the current wall-clock time.
+     * Parses {@code AVP_HOST_SEED}: exactly 64 hex digits (spaces around them ignored), the 32-byte Ed25519
+     * seed of the host key.
      *
-     * @return the current time in epoch milliseconds
+     * @param hex the text
+     * @return the seed
+     * @throws IllegalArgumentException naming the problem
      */
-    private static long now() {
-        return System.currentTimeMillis();
-    }
-
-    /**
-     * Coerces an arbitrary value to its string form, preserving {@code null}.
-     *
-     * @param o the value to stringify, possibly {@code null}
-     * @return {@code null} if {@code o} is {@code null}, otherwise {@code String.valueOf(o)}
-     */
-    private static String str(Object o) {
-        return o == null ? null : String.valueOf(o);
-    }
-
-    /**
-     * Coerces a parsed JSON value to a {@code long}.
-     *
-     * <p>The spec's counters are int64, but a value may arrive as a {@link Number} (from JSON parsing) or
-     * as a numeric {@link String}; both are accepted.
-     *
-     * @param o the value to interpret, expected to be a {@link Number} or numeric {@link String}
-     * @return the value as a {@code long}
-     * @throws IllegalArgumentException if {@code o} is neither a number nor a numeric string
-     * @throws NumberFormatException if {@code o} is a string that does not parse as a {@code long}
-     */
-    private static long asLong(Object o) {
-        if (o instanceof Number n) {
-            return n.longValue();
+    static byte[] parseHostSeed(String hex) {
+        String text = hex.trim();
+        if (text.length() != 64 || !text.chars().allMatch(c -> c < 128)) {
+            throw new IllegalArgumentException("AVP_HOST_SEED must be 64 hex digits (32 bytes)");
         }
-        if (o instanceof String s) {
-            return Long.parseLong(s);
-        }
-        throw new IllegalArgumentException("expected a number, got " + o);
-    }
-
-    /**
-     * Builds an insertion-ordered map from alternating key/value arguments.
-     *
-     * <p>Using a {@link LinkedHashMap} keeps JSON fields serialized in a stable, readable order.
-     *
-     * @param kv alternating {@code String} keys and arbitrary values ({@code key0, value0, key1, value1, ...})
-     * @return a {@link LinkedHashMap} populated in argument order
-     */
-    private static Map<String, Object> orderedMap(Object... kv) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        for (int i = 0; i < kv.length; i += 2) {
-            m.put((String) kv[i], kv[i + 1]);
-        }
-        return m;
-    }
-
-    /**
-     * Decodes a hexadecimal string into its raw bytes.
-     *
-     * @param hex an even-length string of hexadecimal digits
-     * @return the decoded bytes (half as many bytes as input characters)
-     */
-    private static byte[] hexToBytes(String hex) {
-        byte[] out = new byte[hex.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        byte[] out = new byte[32];
+        for (int i = 0; i < 32; i++) {
+            int hi = hexDigit(text.charAt(2 * i));
+            int lo = hexDigit(text.charAt(2 * i + 1));
+            if (hi < 0 || lo < 0) {
+                throw new IllegalArgumentException("AVP_HOST_SEED has a non-hex digit");
+            }
+            out[i] = (byte) (hi << 4 | lo);
         }
         return out;
     }
 
-    // ─── Minimal JSON (no dependencies) ───────────────────────────────────────
-    //
-    // Just enough JSON to move the contract's message shapes over the wire: objects become LinkedHashMap,
-    // arrays become ArrayList, numbers that are integral become Long (the spec's counters are int64),
-    // others Double. This is a reference server, not a JSON library.
+    private static int hexDigit(char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    }
 
-    static final class Json {
-
-        /**
-         * Parses a JSON document into Java values.
-         *
-         * <p>Objects become {@link LinkedHashMap}, arrays become {@link ArrayList}, integral numbers
-         * become {@link Long} (the spec's counters are int64), non-integral numbers become {@link Double},
-         * strings/booleans map to {@link String}/{@link Boolean}, and {@code null} maps to {@code null}.
-         *
-         * @param text the JSON document to parse
-         * @return the parsed value
-         * @throws IllegalArgumentException if the text is not well-formed JSON or has trailing content
-         */
-        static Object parse(String text) {
-            Parser p = new Parser(text);
-            Object value = p.value();
-            p.skipWhitespace();
-            if (!p.atEnd()) {
-                throw new IllegalArgumentException("trailing content at index " + p.pos);
+    /**
+     * The binary: listens on {@code 0.0.0.0:$PORT} and replicates with {@code AVP_PEERS}. A bad value exits
+     * with code 1 and a message.
+     *
+     * @param args ignored
+     */
+    public static void main(String[] args) {
+        int port = DEFAULT_PORT;
+        String portText = System.getenv("PORT");
+        if (portText != null) {
+            try {
+                port = Integer.parseInt(portText.trim());
+            } catch (NumberFormatException e) {
+                port = -1;
             }
-            return value;
+            if (port < 0 || port > 65535) {
+                System.err.println("PORT must be a port number");
+                System.exit(1);
+            }
         }
-
-        /**
-         * Serializes a Java value to a compact JSON string.
-         *
-         * @param value the value to serialize ({@link Map}, {@link List}, {@link String}, {@link Number},
-         *     {@link Boolean}, or {@code null})
-         * @return the JSON text
-         * @throws IllegalArgumentException if {@code value} (or a nested value) is of a type this minimal
-         *     serializer cannot represent
-         */
-        static String write(Object value) {
-            StringBuilder sb = new StringBuilder();
-            writeValue(sb, value);
-            return sb.toString();
+        byte[] seed;
+        String seedText = System.getenv("AVP_HOST_SEED");
+        try {
+            seed = seedText == null ? AvpCrypto.randomBytes(32) : parseHostSeed(seedText);
+        } catch (IllegalArgumentException e) {
+            System.err.println(e.getMessage());
+            System.exit(1);
+            return;
         }
+        Replication.Peers peers;
+        try {
+            String peersText = System.getenv("AVP_PEERS");
+            peers = Replication.Peers.fromEnv(peersText == null ? "" : peersText);
+        } catch (AvpException e) {
+            System.err.println(e.getMessage());
+            System.exit(1);
+            return;
+        }
+        String control = System.getenv("AVP_TEST_CONTROL");
+        Replication.Config d = Replication.Config.defaults();
+        Replication.Config config = new Replication.Config(
+                d.sweepIntervalMs(),
+                d.requestTimeoutMs(),
+                d.maxResponseBytes(),
+                control != null && control.trim().equals("1"));
+        HttpServer http;
+        try {
+            http = start(port, new ServerConfig("0.0.0.0", seed, peers, new Limits(), config));
+        } catch (IOException e) {
+            System.err.println("cannot listen on port " + port + ": " + e.getMessage());
+            System.exit(1);
+            return;
+        }
+        Host h = host(http);
+        System.out.println("AVP 0.5 reference host listening on http://0.0.0.0:"
+                + http.getAddress().getPort()
+                + ", host key " + AvpEncoding.base64(h.hostKey) + ", " + peers.size() + " peer(s)");
+    }
 
-        /**
-         * Appends the JSON form of a single value to {@code sb}, recursing into maps and lists.
-         *
-         * @param sb the buffer to append to
-         * @param value the value to serialize
-         * @throws IllegalArgumentException if {@code value} is of an unsupported type
-         */
-        private static void writeValue(StringBuilder sb, Object value) {
-            if (value == null) {
-                sb.append("null");
-            } else if (value instanceof String s) {
-                writeString(sb, s);
-            } else if (value instanceof Boolean || value instanceof Long || value instanceof Integer) {
-                sb.append(value);
-            } else if (value instanceof Double d) {
-                // Emit integral doubles without a trailing ".0" so versions/epochs stay clean.
-                if (d == Math.floor(d) && !d.isInfinite()) {
-                    sb.append(d.longValue());
-                } else {
-                    sb.append(d);
+    // ─── One exchange ───────────────────────────────────────────────────────────────────
+
+    /** A request read off the wire. */
+    private record Incoming(
+            String method,
+            String path,
+            String authorization,
+            String hostKey,
+            String hostTime,
+            String hostSig,
+            byte[] body) {}
+
+    /** Handles one request end to end; every outcome is a response, never an escaped exception. */
+    private static void exchange(HttpExchange ex, Host host) {
+        int status;
+        Object value;
+        Long retryAfter = null;
+        try {
+            try {
+                value = handle(read(ex, host), host);
+                status = 200;
+            } catch (ApiError e) {
+                status = e.status;
+                value = e.body();
+                retryAfter = e.retryAfterS;
+            }
+        } catch (RuntimeException e) {
+            // A broken state or a bug, not the caller's fault. Nothing about the request is logged.
+            status = 500;
+            value = Map.of("error", "internal error");
+            retryAfter = null;
+        }
+        byte[] bytes;
+        try {
+            bytes = AvpJson.writeUtf8(value);
+        } catch (RuntimeException e) {
+            status = 500;
+            bytes = "{\"error\":\"internal error\"}".getBytes(StandardCharsets.UTF_8);
+        }
+        try {
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            if (retryAfter != null) {
+                ex.getResponseHeaders().set("Retry-After", Long.toString(retryAfter));
+            }
+            ex.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = ex.getResponseBody()) {
+                out.write(bytes);
+            }
+        } catch (IOException e) {
+            // A client that hung up is not an error for the host.
+        } finally {
+            ex.close();
+        }
+    }
+
+    /** Reads the request line, the headers it needs, and the body up to the size limit. */
+    private static Incoming read(HttpExchange ex, Host host) throws ApiError {
+        int max;
+        host.lock();
+        try {
+            max = host.limits.maxBodyBytes;
+        } finally {
+            host.unlock();
+        }
+        String length = ex.getRequestHeaders().getFirst("Content-Length");
+        if (length != null) {
+            try {
+                if (Long.parseLong(length.trim()) > max) {
+                    throw ApiError.tooLarge();
                 }
-            } else if (value instanceof Number n) {
-                sb.append(n);
-            } else if (value instanceof Map<?, ?> map) {
-                sb.append('{');
-                boolean first = true;
-                for (Map.Entry<?, ?> e : map.entrySet()) {
-                    if (!first) {
-                        sb.append(',');
-                    }
-                    first = false;
-                    writeString(sb, String.valueOf(e.getKey()));
-                    sb.append(':');
-                    writeValue(sb, e.getValue());
+            } catch (NumberFormatException e) {
+                throw ApiError.badRequest("bad Content-Length");
+            }
+        }
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        try (InputStream in = ex.getRequestBody()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                body.write(buf, 0, n);
+                if (body.size() > max) {
+                    throw ApiError.tooLarge();
                 }
-                sb.append('}');
-            } else if (value instanceof List<?> list) {
-                sb.append('[');
-                boolean first = true;
-                for (Object item : list) {
-                    if (!first) {
-                        sb.append(',');
-                    }
-                    first = false;
-                    writeValue(sb, item);
+            }
+        } catch (IOException e) {
+            throw ApiError.badRequest("unreadable request body");
+        }
+        String path = ex.getRequestURI().getRawPath();
+        var h = ex.getRequestHeaders();
+        return new Incoming(
+                ex.getRequestMethod(),
+                path == null ? "" : path,
+                h.getFirst("Authorization"),
+                h.getFirst(Replication.HEADER_KEY),
+                h.getFirst(Replication.HEADER_TIME),
+                h.getFirst(Replication.HEADER_SIGNATURE),
+                body.toByteArray());
+    }
+
+    // ─── Routing ────────────────────────────────────────────────────────────────────────
+
+    private enum Kind {
+        DISCOVERY,
+        CHALLENGE,
+        TOKEN,
+        CREATE_REPO,
+        PREPARE_JOIN,
+        REPO,
+        HOST,
+        TEST_CONTROL
+    }
+
+    private record Route(Kind kind, String repoId, String op) {}
+
+    private static Route parseRoute(String method, String path) throws ApiError {
+        if (method.equals("GET") && path.equals("/.well-known/avp")) {
+            return new Route(Kind.DISCOVERY, null, null);
+        }
+        if (!method.equals("POST")) {
+            throw ApiError.notFound("no such route");
+        }
+        switch (path) {
+            case "/api/auth/keypair/challenge":
+                return new Route(Kind.CHALLENGE, null, null);
+            case "/api/auth/keypair/token":
+                return new Route(Kind.TOKEN, null, null);
+            case "/v1/repos":
+                return new Route(Kind.CREATE_REPO, null, null);
+            case "/v1/prepare-join":
+                return new Route(Kind.PREPARE_JOIN, null, null);
+            case "/v1/test/replication":
+                return new Route(Kind.TEST_CONTROL, null, null);
+            default:
+                break;
+        }
+        String hostPrefix = "/v1/host/repos/";
+        if (path.startsWith(hostPrefix)) {
+            String[] parts = splitOnce(path.substring(hostPrefix.length()));
+            if (parts == null || !Set.of("heads", "fetch", "offer").contains(parts[1])) {
+                throw ApiError.notFound("no such route");
+            }
+            return new Route(Kind.HOST, percentDecode(parts[0]), parts[1]);
+        }
+        String repoPrefix = "/v1/repos/";
+        if (!path.startsWith(repoPrefix)) {
+            throw ApiError.notFound("no such route");
+        }
+        String[] parts = splitOnce(path.substring(repoPrefix.length()));
+        if (parts == null || !Set.of("pull", "push", "manifest", "leave").contains(parts[1])) {
+            throw ApiError.notFound("no such route");
+        }
+        // The host routes on the escaped path and decodes the segment (SPEC 10.2, 12.4).
+        return new Route(Kind.REPO, percentDecode(parts[0]), parts[1]);
+    }
+
+    private static String[] splitOnce(String rest) {
+        int slash = rest.indexOf('/');
+        return slash < 0 ? null : new String[] {rest.substring(0, slash), rest.substring(slash + 1)};
+    }
+
+    /** Decodes one percent-encoded path segment; a bad escape or a non-UTF-8 result is {@code 400}. */
+    static String percentDecode(String segment) throws ApiError {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = 0;
+        while (i < segment.length()) {
+            char c = segment.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= segment.length()) {
+                    throw ApiError.badRequest("bad percent-encoding in path");
                 }
-                sb.append(']');
+                int hi = hexDigit(segment.charAt(i + 1));
+                int lo = hexDigit(segment.charAt(i + 2));
+                if (hi < 0 || lo < 0) {
+                    throw ApiError.badRequest("bad percent-encoding in path");
+                }
+                out.write(hi << 4 | lo);
+                i += 3;
             } else {
-                throw new IllegalArgumentException("cannot serialize " + value.getClass());
+                byte[] b = String.valueOf(c).getBytes(StandardCharsets.UTF_8);
+                out.write(b, 0, b.length);
+                i++;
             }
         }
-
-        /**
-         * Appends a JSON string literal (quoted, with the required escapes) to {@code sb}.
-         *
-         * @param sb the buffer to append to
-         * @param s the raw string to encode
-         */
-        private static void writeString(StringBuilder sb, String s) {
-            sb.append('"');
-            for (int i = 0; i < s.length(); i++) {
-                char c = s.charAt(i);
-                switch (c) {
-                    case '"' -> sb.append("\\\"");
-                    case '\\' -> sb.append("\\\\");
-                    case '\n' -> sb.append("\\n");
-                    case '\r' -> sb.append("\\r");
-                    case '\t' -> sb.append("\\t");
-                    case '\b' -> sb.append("\\b");
-                    case '\f' -> sb.append("\\f");
-                    default -> {
-                        if (c < 0x20) {
-                            sb.append(String.format("\\u%04x", (int) c));
-                        } else {
-                            sb.append(c);
-                        }
-                    }
-                }
-            }
-            sb.append('"');
+        try {
+            return StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(out.toByteArray()))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            throw ApiError.badRequest("bad percent-encoding in path");
         }
+    }
 
-        /** A single-pass recursive-descent JSON parser over an in-memory string. */
-        private static final class Parser {
-            /** The full input being parsed. */
-            private final String s;
-            /** The index of the next character to consume. */
-            private int pos;
-
-            /**
-             * Creates a parser positioned at the start of the given input.
-             *
-             * @param s the JSON text to parse
-             */
-            Parser(String s) {
-                this.s = s;
+    private static Object handle(Incoming req, Host host) throws ApiError {
+        Route route = parseRoute(req.method(), req.path());
+        if (route.kind() == Kind.HOST && route.op().equals("offer")) {
+            // An offer of a first copy is validated outside the state lock (SPEC 9.2).
+            return hostOffer(host, req, route.repoId());
+        }
+        host.lock();
+        try {
+            byte[] body = req.body();
+            switch (route.kind()) {
+                case DISCOVERY:
+                    return discovery(host);
+                case CHALLENGE:
+                    return challenge(host, body);
+                case TOKEN:
+                    return token(host, body);
+                case CREATE_REPO:
+                    return createRepo(host, authenticate(host, req.authorization()), body);
+                case PREPARE_JOIN:
+                    return prepareJoin(host, authenticate(host, req.authorization()), body);
+                case REPO: {
+                    byte[] caller = authenticate(host, req.authorization());
+                    return switch (route.op()) {
+                        case "pull" -> pull(host, caller, route.repoId(), body);
+                        case "push" -> push(host, caller, route.repoId(), body);
+                        case "manifest" -> publishManifest(host, caller, route.repoId(), body);
+                        default -> leave(host, caller, route.repoId(), body);
+                    };
+                }
+                case HOST: {
+                    if (host.paused) {
+                        throw ApiError.paused();
+                    }
+                    // SPEC 9.3: signed over the method, the path as sent, and the exact body bytes.
+                    byte[] peer = Replication.authenticate(
+                            host, req.method(), req.path(), body, req.hostKey(), req.hostTime(), req.hostSig());
+                    if (peer == null) {
+                        throw ApiError.unauthorized("bad host request signature");
+                    }
+                    return route.op().equals("heads")
+                            ? hostHeads(host, peer, route.repoId(), body)
+                            : hostFetch(host, peer, route.repoId(), body);
+                }
+                case TEST_CONTROL:
+                    return testControl(host, body);
+                default:
+                    throw ApiError.notFound("no such route");
             }
+        } finally {
+            host.unlock();
+        }
+    }
 
-            /**
-             * Reports whether the cursor has reached the end of the input.
-             *
-             * @return {@code true} if no characters remain
-             */
-            boolean atEnd() {
-                return pos >= s.length();
-            }
+    /** The token subject of {@code Authorization: Bearer <token>}; anything else is {@code 401}. */
+    private static byte[] authenticate(Host host, String authorization) throws ApiError {
+        if (authorization == null) {
+            throw ApiError.unauthorized("missing bearer token");
+        }
+        int space = authorization.indexOf(' ');
+        if (space < 0 || !authorization.substring(0, space).equalsIgnoreCase("bearer")) {
+            throw ApiError.unauthorized("missing bearer token");
+        }
+        byte[] subject = host.auth.subject(authorization.substring(space + 1).trim(), host.nowMs());
+        if (subject == null) {
+            throw ApiError.unauthorized("unknown or expired bearer token");
+        }
+        return subject;
+    }
 
-            /** Advances the cursor past any run of JSON whitespace (space, tab, newline, carriage return). */
-            void skipWhitespace() {
-                while (pos < s.length()) {
-                    char c = s.charAt(pos);
-                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                        pos++;
-                    } else {
-                        break;
+    // ─── Discovery and authentication (SPEC 11.7, 3.3) ──────────────────────────────────
+
+    private static Object discovery(Host host) {
+        Map<String, Object> o = new LinkedHashMap<>();
+        o.put("hostKey", AvpEncoding.base64(host.hostKey));
+        o.put("profiles", List.of("http-json"));
+        o.put("version", VERSION);
+        return o;
+    }
+
+    private static Object challenge(Host host, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "ed25519PublicKey");
+        byte[] key = decode(() -> key32(o, "ed25519PublicKey"));
+        byte[] nonce = host.auth.challenge(key, host.nowMs(), host.limits);
+        if (nonce == null) {
+            throw new ApiError(
+                    429,
+                    "quota_exceeded",
+                    "too many outstanding challenges for this key",
+                    null,
+                    CHALLENGE_TTL_MS / 1000);
+        }
+        return Map.of("nonce", AvpEncoding.base64(nonce));
+    }
+
+    private static Object token(Host host, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "ed25519PublicKey", "nonce", "signature");
+        byte[] key = decode(() -> key32(o, "ed25519PublicKey"));
+        byte[] nonce = decode(() -> AvpEncoding.fromBase64(AvpJson.string(o, "nonce")));
+        byte[] signature = decode(() -> AvpEncoding.fromBase64(AvpJson.string(o, "signature"), 64));
+        return host.auth.token(key, nonce, signature, host.nowMs(), host.limits);
+    }
+
+    // ─── createRepo and prepareJoin (SPEC 8.2) ──────────────────────────────────────────
+
+    private static Object createRepo(Host host, byte[] caller, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "manifest", "commit");
+        AvpManifest.SignedManifest manifest =
+                decode(() -> AvpManifest.signedManifestFromJson(AvpJson.required(o, "manifest")));
+        AvpCommit.Commit commit = decode(() -> AvpCommit.fromJson(AvpJson.required(o, "commit")));
+        AvpManifest.ManifestState s = manifest.state();
+        // SPEC 8.2: the authenticated caller MUST equal the genesis ownerKey.
+        if (!Arrays.equals(s.ownerKey(), caller)) {
+            throw ApiError.forbidden("caller is not the genesis ownerKey");
+        }
+        // createRepo carries the genesis state (SPEC 6.2, 10.1); any other seq is malformed.
+        if (s.manifestSeq() != 1) {
+            throw ApiError.badRequest("createRepo needs the genesis state (manifestSeq 1)");
+        }
+        if (s.members().size() > host.limits.maxMembers) {
+            throw ApiError.quota("member limit exceeded");
+        }
+        // Validate first, on a fresh view: structure, owner signature, repoId recomputation, genesis and
+        // first-commit rules, and the hosted check (SPEC 6, 8.2). Only a valid genesis can collide with a
+        // held repoId, so a forged one never learns whether that id exists here. The genesis state and its
+        // first commit are accepted together or not at all (SPEC 8.2).
+        AvpRules.RepoView view = new AvpRules.RepoView(host.hostKey, host.limits.headBound);
+        Optional<String> verdict = view.applyManifest(manifest, Optional.of(commit), AvpRules.Via.PUSH);
+        if (verdict.isPresent()) {
+            throw ApiError.reject(verdict.get());
+        }
+        AvpManifest.SignedManifest tip = view.tip().orElseThrow(ApiError::internal);
+        String repoId = tip.state().repoId();
+        if (host.repos.containsKey(repoId)) {
+            throw ApiError.of(409, "duplicate_repo", "repository already exists");
+        }
+        if (host.reposOwnedBy(caller) >= host.limits.maxReposPerOwner) {
+            throw ApiError.quota("repository quota for this owner key exceeded");
+        }
+        if (host.repos.size() >= host.limits.maxRepos) {
+            throw ApiError.quota("repository quota of this host exceeded");
+        }
+        host.repos.put(repoId, view);
+        Replication.queueOffer(host, new Replication.Outgoing(repoId, List.of(tip), List.of(commit), List.of()));
+        return AvpManifest.toJson(tip);
+    }
+
+    /** Whether {@code id} is 22 characters of base64url-nopad over 16 bytes (SPEC 4.2, 12.4). */
+    private static boolean isRepoId(String id) {
+        if (id.length() != 22) {
+            return false;
+        }
+        try {
+            return AvpEncoding.fromBase64Url(id).length == 16;
+        } catch (AvpException e) {
+            return false;
+        }
+    }
+
+    private static Object prepareJoin(Host host, byte[] caller, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "repoId", "memberKey");
+        String repoId = decode(() -> AvpJson.string(o, "repoId"));
+        byte[] memberKey = decode(() -> key32(o, "memberKey"));
+        if (!isRepoId(repoId)) {
+            throw ApiError.badRequest("repoId is not a 22-character base64url id");
+        }
+        // SPEC 8.2: the authenticated caller MUST equal memberKey.
+        if (!Arrays.equals(memberKey, caller)) {
+            throw ApiError.forbidden("caller is not memberKey");
+        }
+        long now = host.nowMs();
+        long expiresAt = saturatingAdd(now, ACCEPTANCE_TTL_MS);
+        AvpTokens.Acceptance acceptance;
+        try {
+            acceptance = AvpTokens.signAcceptance(repoId, memberKey, expiresAt, host.seed);
+        } catch (AvpException e) {
+            throw ApiError.internal();
+        }
+        if (!host.recordAcceptance(repoId, memberKey, expiresAt, now)) {
+            throw ApiError.quota("too many outstanding acceptances for this key");
+        }
+        return AvpTokens.toJson(acceptance);
+    }
+
+    // ─── Repository operations (SPEC 10.1) ──────────────────────────────────────────────
+
+    /**
+     * The repository's view: {@code 404 not_found} if not held, {@code 403 not_hosted} if its winning tip
+     * does not list this host (SPEC 8.6, 10.1).
+     */
+    private static AvpRules.RepoView hosted(Host host, String repoId) throws ApiError {
+        AvpRules.RepoView view = host.repos.get(repoId);
+        if (view == null) {
+            throw ApiError.notFound("repository not found");
+        }
+        if (!view.tipListsHost()) {
+            throw ApiError.reject(AvpRules.NOT_HOSTED);
+        }
+        return view;
+    }
+
+    private static AvpManifest.SignedManifest tip(AvpRules.RepoView view) throws ApiError {
+        return view.tip().orElseThrow(() -> ApiError.notFound("repository not found"));
+    }
+
+    private static List<Object> manifestsJson(List<AvpManifest.SignedManifest> ms) {
+        List<Object> out = new ArrayList<>();
+        for (AvpManifest.SignedManifest m : ms) {
+            out.add(AvpManifest.toJson(m));
+        }
+        return out;
+    }
+
+    private static List<Object> commitsJson(List<AvpCommit.Commit> cs) {
+        List<Object> out = new ArrayList<>();
+        for (AvpCommit.Commit c : cs) {
+            out.add(AvpCommit.toJson(c));
+        }
+        return out;
+    }
+
+    private static List<Object> leavesJson(List<AvpTokens.LeaveRequest> ls) {
+        List<Object> out = new ArrayList<>();
+        for (AvpTokens.LeaveRequest l : ls) {
+            out.add(AvpTokens.toJson(l));
+        }
+        return out;
+    }
+
+    static List<Object> idsJson(List<byte[]> ids) {
+        List<Object> out = new ArrayList<>();
+        for (byte[] id : ids) {
+            out.add(AvpEncoding.base64(id));
+        }
+        return out;
+    }
+
+    private static Object pull(Host host, byte[] caller, String repoId, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "sinceManifestSeq", "knownHeads");
+        long since = decode(() -> AvpJson.integer(o, "sinceManifestSeq"));
+        List<byte[]> known = decode(() -> AvpManifest.ids(o, "knownHeads"));
+        AvpRules.RepoView view = hosted(host, repoId);
+        // SPEC 10.1: the caller is a member of the tip.
+        if (!tip(view).state().hasMember(caller)) {
+            throw ApiError.forbidden("caller is not a member of the tip");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("manifests", manifestsJson(view.manifestsSince(since)));
+        out.put("heads", commitsJson(view.commitsSince(known)));
+        out.put("leaves", leavesJson(view.leaves()));
+        return out;
+    }
+
+    private static Object push(Host host, byte[] caller, String repoId, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "commit");
+        AvpCommit.Commit commit = decode(() -> AvpCommit.fromJson(AvpJson.required(o, "commit")));
+        AvpRules.RepoView view = hosted(host, repoId);
+        // SPEC 7.1 order: the commit matches the repository and its id and signature verify (400) before
+        // the caller check (403).
+        if (!commit.repoId().equals(repoId) || !AvpCommit.verify(commit)) {
+            throw ApiError.reject(AvpRules.BAD_REQUEST);
+        }
+        // SPEC 7.1, 10.1: the caller is the author; the engine checks the author is a member of the tip.
+        if (!Arrays.equals(commit.author(), caller)) {
+            throw ApiError.forbidden("caller is not the commit's author");
+        }
+        Optional<String> verdict = view.applyCommit(commit, AvpRules.Via.PUSH);
+        if (verdict.isPresent()) {
+            throw verdict.get().equals(AvpRules.MISSING_PARENTS)
+                    ? ApiError.missing(view.missingFor(commit))
+                    : ApiError.reject(verdict.get());
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("accepted", true);
+        out.put("heads", idsJson(view.heads()));
+        Replication.queueOffer(host, new Replication.Outgoing(repoId, List.of(), List.of(commit), List.of()));
+        return out;
+    }
+
+    private static Object publishManifest(Host host, byte[] caller, String repoId, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "manifest", "commit");
+        AvpManifest.SignedManifest manifest =
+                decode(() -> AvpManifest.signedManifestFromJson(AvpJson.required(o, "manifest")));
+        Object commitJson = optional(o, "commit");
+        Optional<AvpCommit.Commit> commit =
+                commitJson == null ? Optional.empty() : Optional.of(decode(() -> AvpCommit.fromJson(commitJson)));
+        AvpRules.RepoView view = hosted(host, repoId);
+        // SPEC 10.1: the caller is ownerKey.
+        AvpManifest.SignedManifest current = tip(view);
+        if (!Arrays.equals(current.state().ownerKey(), caller)) {
+            throw ApiError.forbidden("caller is not the ownerKey");
+        }
+        if (manifest.state().members().size() > host.limits.maxMembers) {
+            throw ApiError.quota("member limit exceeded");
+        }
+        byte[] submitted;
+        try {
+            submitted = AvpManifest.hash(manifest);
+        } catch (AvpException e) {
+            submitted = null;
+        }
+        long tipEpoch = current.state().keyEpoch();
+        Optional<String> verdict = view.applyManifest(manifest, commit, AvpRules.Via.PUSH);
+        if (verdict.isEmpty()) {
+            Object answer = AvpManifest.toJson(tip(view));
+            Replication.queueOffer(
+                    host,
+                    new Replication.Outgoing(
+                            repoId, List.of(manifest), commit.map(List::of).orElse(List.of()), List.of()));
+            return answer;
+        }
+        String code = verdict.get();
+        if (code.equals(AvpRules.NOT_HOSTED)) {
+            // SPEC 6.1 rule 6, 8.6: the state passed every other rule. The host keeps it (its winning tip
+            // then no longer lists this host), with only its rotation commit when it raises the epoch: a
+            // carried non-rotation commit is not kept, since the offer path skips the caller check and the
+            // head bound. It is not offered to peers.
+            boolean raising = tipEpoch != Long.MAX_VALUE
+                    && tipEpoch + 1 == manifest.state().keyEpoch();
+            view.applyManifest(manifest, raising ? commit : Optional.empty(), AvpRules.Via.OFFER);
+            throw ApiError.reject(AvpRules.NOT_HOSTED);
+        }
+        if (code.equals(AvpRules.MISSING_PARENTS)) {
+            // The engine rolled the state back, so missingFor also names the state this request carries; it
+            // is not missing (the commit was checked against it), so only the ids the host lacks are listed.
+            List<byte[]> ids = new ArrayList<>();
+            if (commit.isPresent()) {
+                for (byte[] id : view.missingFor(commit.get())) {
+                    if (submitted == null || !Arrays.equals(id, submitted)) {
+                        ids.add(id);
                     }
                 }
             }
+            throw ApiError.missing(ids);
+        }
+        throw ApiError.reject(code);
+    }
 
-            /**
-             * Parses the next JSON value at the cursor, dispatching on its first character.
-             *
-             * @return the parsed value
-             * @throws IllegalArgumentException if the input ends prematurely or is malformed
-             */
-            Object value() {
-                skipWhitespace();
-                if (atEnd()) {
-                    throw new IllegalArgumentException("unexpected end of input");
-                }
-                char c = s.charAt(pos);
-                return switch (c) {
-                    case '{' -> object();
-                    case '[' -> array();
-                    case '"' -> string();
-                    case 't', 'f' -> bool();
-                    case 'n' -> nul();
-                    default -> number();
-                };
-            }
+    private static Object leave(Host host, byte[] caller, String repoId, byte[] body) throws ApiError {
+        AvpTokens.LeaveRequest request = decode(() -> AvpTokens.leaveFromJson(AvpJson.parse(body)));
+        AvpRules.RepoView view = hosted(host, repoId);
+        // SPEC 8.4 order: the signature verifies and repoId matches (400), then the caller is memberKey, and
+        // memberKey is a member of the tip and not the owner (403, the engine).
+        if (!request.repoId().equals(repoId) || !AvpTokens.verifyLeave(request)) {
+            throw ApiError.reject(AvpRules.BAD_REQUEST);
+        }
+        if (!Arrays.equals(request.memberKey(), caller)) {
+            throw ApiError.forbidden("caller is not the leaving member");
+        }
+        Optional<String> verdict = view.applyLeave(request, AvpRules.Via.PUSH);
+        if (verdict.isPresent()) {
+            throw ApiError.reject(verdict.get());
+        }
+        Replication.queueOffer(host, new Replication.Outgoing(repoId, List.of(), List.of(), List.of(request)));
+        return new LinkedHashMap<String, Object>();
+    }
 
-            /**
-             * Parses a JSON object, assuming the cursor is at the opening {@code '{'}.
-             *
-             * @return the object as an insertion-ordered map
-             * @throws IllegalArgumentException if the object is malformed or unterminated
-             */
-            private Map<String, Object> object() {
-                expect('{');
-                Map<String, Object> map = new LinkedHashMap<>();
-                skipWhitespace();
-                if (peek() == '}') {
-                    pos++;
-                    return map;
-                }
-                while (true) {
-                    skipWhitespace();
-                    String key = string();
-                    skipWhitespace();
-                    expect(':');
-                    map.put(key, value());
-                    skipWhitespace();
-                    char c = next();
-                    if (c == '}') {
-                        return map;
+    // ─── Host routes (SPEC 9.1 to 9.3) and the test control ─────────────────────────────
+
+    /** A body repoId must name the path's repository; the field may be left out (SPEC 9.3). */
+    private static void sameRepo(Map<String, Object> o, String repoId) throws ApiError {
+        Object id = optional(o, "repoId");
+        if (id != null && !(id instanceof String s && s.equals(repoId))) {
+            throw ApiError.badRequest("body repoId does not match the path");
+        }
+    }
+
+    /**
+     * The view a peer may read: {@code 404 not_found} if not held, {@code 403 not_hosted} if this host's
+     * winning tip does not list it, {@code 403 forbidden} if that tip does not list the peer (SPEC 9.2).
+     */
+    private static AvpRules.RepoView served(Host host, String repoId, byte[] peer) throws ApiError {
+        AvpRules.RepoView view = host.repos.get(repoId);
+        if (view == null) {
+            throw ApiError.notFound("repository not found");
+        }
+        if (!view.tipListsHost()) {
+            throw ApiError.reject(AvpRules.NOT_HOSTED);
+        }
+        if (view.tip().map(t -> !t.state().hasHost(peer)).orElse(true)) {
+            throw ApiError.forbidden("the calling host is not in the repository's hosts");
+        }
+        return view;
+    }
+
+    /** {@code heads} (SPEC 9.1): the verified tip and the head ids; held and pending commits are not heads. */
+    private static Object hostHeads(Host host, byte[] peer, String repoId, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "repoId");
+        sameRepo(o, repoId);
+        AvpRules.RepoView view = served(host, repoId, peer);
+        AvpManifest.SignedManifest t = tip(view);
+        Map<String, Object> tipJson = new LinkedHashMap<>();
+        tipJson.put("manifestSeq", t.state().manifestSeq());
+        try {
+            tipJson.put("manifestHash", AvpEncoding.base64(AvpManifest.hash(t)));
+        } catch (AvpException e) {
+            throw ApiError.internal();
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("manifestTip", tipJson);
+        out.put("heads", idsJson(view.heads()));
+        return out;
+    }
+
+    /**
+     * {@code fetch} (SPEC 9.1): for a manifest hash (winning or verified losing), that state and every
+     * state before it, ascending, with the rotation commit of each epoch-raising state among them even
+     * while held; for a commit id, that commit if accepted or a rotation commit; every pending leave
+     * request. Unknown ids, other held commits, and pending commits are left out.
+     */
+    private static Object hostFetch(Host host, byte[] peer, String repoId, byte[] body) throws ApiError {
+        Map<String, Object> o = strict(body, "repoId", "ids");
+        sameRepo(o, repoId);
+        List<byte[]> ids = decode(() -> AvpManifest.ids(o, "ids"));
+        if (ids.size() > Replication.MAX_ITEMS) {
+            throw ApiError.badRequest("too many ids");
+        }
+        AvpRules.RepoView view = served(host, repoId, peer);
+        List<AvpManifest.SignedManifest> manifests = new ArrayList<>();
+        List<AvpCommit.Commit> commits = new ArrayList<>();
+        Set<String> seenStates = new HashSet<>();
+        Set<String> seenCommits = new HashSet<>();
+        for (byte[] id : ids) {
+            Optional<List<AvpManifest.SignedManifest>> chain = view.chainTo(id);
+            if (chain.isPresent()) {
+                for (AvpManifest.SignedManifest m : chain.get()) {
+                    byte[] h;
+                    try {
+                        h = AvpManifest.hash(m);
+                    } catch (AvpException e) {
+                        throw ApiError.internal();
                     }
-                    if (c != ',') {
-                        throw new IllegalArgumentException("expected ',' or '}' at index " + (pos - 1));
+                    if (!seenStates.add(AvpEncoding.base64(h))) {
+                        continue;
                     }
-                }
-            }
-
-            /**
-             * Parses a JSON array, assuming the cursor is at the opening {@code '['}.
-             *
-             * @return the array as a list
-             * @throws IllegalArgumentException if the array is malformed or unterminated
-             */
-            private List<Object> array() {
-                expect('[');
-                List<Object> list = new ArrayList<>();
-                skipWhitespace();
-                if (peek() == ']') {
-                    pos++;
-                    return list;
-                }
-                while (true) {
-                    list.add(value());
-                    skipWhitespace();
-                    char c = next();
-                    if (c == ']') {
-                        return list;
+                    Optional<AvpCommit.Commit> rc = view.rotationCommit(h);
+                    if (rc.isPresent()
+                            && seenCommits.add(AvpEncoding.base64(rc.get().commitId()))) {
+                        commits.add(rc.get());
                     }
-                    if (c != ',') {
-                        throw new IllegalArgumentException("expected ',' or ']' at index " + (pos - 1));
-                    }
+                    manifests.add(m);
                 }
-            }
-
-            /**
-             * Parses a JSON string literal, assuming the cursor is at the opening quote.
-             *
-             * @return the decoded string with escapes resolved
-             * @throws IllegalArgumentException if the string is unterminated or contains a bad escape
-             */
-            private String string() {
-                expect('"');
-                StringBuilder sb = new StringBuilder();
-                while (true) {
-                    char c = next();
-                    if (c == '"') {
-                        return sb.toString();
-                    }
-                    if (c == '\\') {
-                        char esc = next();
-                        switch (esc) {
-                            case '"' -> sb.append('"');
-                            case '\\' -> sb.append('\\');
-                            case '/' -> sb.append('/');
-                            case 'n' -> sb.append('\n');
-                            case 'r' -> sb.append('\r');
-                            case 't' -> sb.append('\t');
-                            case 'b' -> sb.append('\b');
-                            case 'f' -> sb.append('\f');
-                            case 'u' -> {
-                                String hex = s.substring(pos, pos + 4);
-                                pos += 4;
-                                sb.append((char) Integer.parseInt(hex, 16));
-                            }
-                            default -> throw new IllegalArgumentException("bad escape \\" + esc);
-                        }
-                    } else {
-                        sb.append(c);
-                    }
-                }
-            }
-
-            /**
-             * Parses a JSON number, consuming the run of numeric characters at the cursor.
-             *
-             * @return a {@link Long} for an integral token, otherwise a {@link Double}
-             * @throws IllegalArgumentException if no numeric characters are present
-             * @throws NumberFormatException if the token is not a valid number
-             */
-            private Object number() {
-                int start = pos;
-                while (pos < s.length()) {
-                    char c = s.charAt(pos);
-                    if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E') {
-                        pos++;
-                    } else {
-                        break;
-                    }
-                }
-                String token = s.substring(start, pos);
-                if (token.isEmpty()) {
-                    throw new IllegalArgumentException("invalid number at index " + start);
-                }
-                if (token.indexOf('.') < 0 && token.indexOf('e') < 0 && token.indexOf('E') < 0) {
-                    return Long.parseLong(token);
-                }
-                return Double.parseDouble(token);
-            }
-
-            /**
-             * Parses a {@code true} or {@code false} literal at the cursor.
-             *
-             * @return {@link Boolean#TRUE} or {@link Boolean#FALSE}
-             * @throws IllegalArgumentException if neither literal is present
-             */
-            private Boolean bool() {
-                if (s.startsWith("true", pos)) {
-                    pos += 4;
-                    return Boolean.TRUE;
-                }
-                if (s.startsWith("false", pos)) {
-                    pos += 5;
-                    return Boolean.FALSE;
-                }
-                throw new IllegalArgumentException("invalid literal at index " + pos);
-            }
-
-            /**
-             * Parses a {@code null} literal at the cursor.
-             *
-             * @return {@code null}
-             * @throws IllegalArgumentException if the literal is not {@code null}
-             */
-            private Object nul() {
-                if (s.startsWith("null", pos)) {
-                    pos += 4;
-                    return null;
-                }
-                throw new IllegalArgumentException("invalid literal at index " + pos);
-            }
-
-            /**
-             * Returns the character at the cursor without consuming it.
-             *
-             * @return the current character
-             * @throws IllegalArgumentException if the cursor is at end of input
-             */
-            private char peek() {
-                if (atEnd()) {
-                    throw new IllegalArgumentException("unexpected end of input");
-                }
-                return s.charAt(pos);
-            }
-
-            /**
-             * Returns the character at the cursor and advances past it.
-             *
-             * @return the consumed character
-             * @throws IllegalArgumentException if the cursor is at end of input
-             */
-            private char next() {
-                if (atEnd()) {
-                    throw new IllegalArgumentException("unexpected end of input");
-                }
-                return s.charAt(pos++);
-            }
-
-            /**
-             * Consumes the next character, requiring it to equal {@code c}.
-             *
-             * @param c the character that must appear next
-             * @throws IllegalArgumentException if the next character is not {@code c} (or input ended)
-             */
-            private void expect(char c) {
-                char got = next();
-                if (got != c) {
-                    throw new IllegalArgumentException("expected '" + c + "' but got '" + got + "' at index " + (pos - 1));
+            } else {
+                Optional<AvpCommit.Commit> c = view.fetchCommit(id);
+                if (c.isPresent() && seenCommits.add(AvpEncoding.base64(c.get().commitId()))) {
+                    commits.add(c.get());
                 }
             }
         }
+        manifests.sort((a, b) -> Long.compare(a.state().manifestSeq(), b.state().manifestSeq()));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("manifests", manifestsJson(manifests));
+        out.put("commits", commitsJson(commits));
+        out.put("leaves", leavesJson(view.leaves()));
+        return out;
+    }
+
+    /**
+     * {@code offer} (SPEC 9.1, 9.2), with the 503 and signature checks of every host route. A held
+     * repository refuses a peer its tip does not list ({@code 403 forbidden}). The items are validated on a
+     * trial copy and the received tip decides: {@code 403 not_hosted} if it does not list this host (a held
+     * repository keeps the validated states), {@code 403 forbidden} for a first copy whose tip does not list
+     * the sender, {@code 429 quota_exceeded} for a first copy over the repository caps, and otherwise the
+     * per-item answer. An incomplete offer also queues a catch-up from the sender.
+     *
+     * <p>A held repository is updated under the state lock. A first copy is private until admitted, so it
+     * is validated outside the lock, which is then taken again only to admit it (re-checking that the
+     * repository is still not held, and the caps); if another path stored the repository meanwhile, the
+     * offer is applied to it as to a held repository.
+     */
+    private static Object hostOffer(Host host, Incoming req, String repoId) throws ApiError {
+        byte[] body = req.body();
+        host.lock();
+        boolean locked = true;
+        try {
+            if (host.paused) {
+                throw ApiError.paused();
+            }
+            byte[] peer = Replication.authenticate(
+                    host, req.method(), req.path(), body, req.hostKey(), req.hostTime(), req.hostSig());
+            if (peer == null) {
+                throw ApiError.unauthorized("bad host request signature");
+            }
+            Map<String, Object> o = strict(body, "repoId", "manifests", "commits", "leaves");
+            sameRepo(o, repoId);
+            Replication.Items items = decode(() -> Replication.itemsFromJson(o));
+            if (!items.bounded()) {
+                throw ApiError.badRequest("too many items");
+            }
+            Boolean listed = senderListed(host, repoId, peer);
+            Replication.Received got;
+            if (Boolean.FALSE.equals(listed)) {
+                throw ApiError.forbidden("the calling host is not in the repository's hosts");
+            } else if (Boolean.TRUE.equals(listed)) {
+                got = Replication.receive(host, repoId, peer, items, Long.MAX_VALUE);
+            } else {
+                AvpRules.RepoView fresh = new AvpRules.RepoView(host.hostKey, host.limits.headBound);
+                host.unlock();
+                locked = false;
+                Replication.Kept kept = Replication.applyKept(fresh, repoId, items, false, Long.MAX_VALUE);
+                host.lock();
+                locked = true;
+                host.engineApplications += kept.applied().applications;
+                // The test control may have paused the host meanwhile (SPEC 9.3).
+                if (host.paused) {
+                    throw ApiError.paused();
+                }
+                Boolean again = senderListed(host, repoId, peer);
+                if (Boolean.FALSE.equals(again)) {
+                    throw ApiError.forbidden("the calling host is not in the repository's hosts");
+                } else if (Boolean.TRUE.equals(again)) {
+                    got = Replication.receive(host, repoId, peer, items, Long.MAX_VALUE);
+                } else if (kept.applied().hasGap()) {
+                    got = new Replication.Received(Replication.Admitted.INCOMPLETE, kept.applied());
+                } else {
+                    got = new Replication.Received(
+                            Replication.admitFirstCopy(host, repoId, peer, kept.view()), kept.applied());
+                }
+            }
+            if (got.applied().incomplete || got.admitted() == Replication.Admitted.INCOMPLETE) {
+                Replication.queueCatchup(host, peer, repoId);
+            }
+            return switch (got.admitted()) {
+                case HOSTED, INCOMPLETE -> got.applied().reply();
+                case NOT_HOSTED -> throw ApiError.reject(AvpRules.NOT_HOSTED);
+                case FORBIDDEN -> throw ApiError.forbidden("the sending host is not in the repository's hosts");
+                case QUOTA -> throw ApiError.quota("repository quota exceeded");
+            };
+        } finally {
+            if (locked) {
+                host.unlock();
+            }
+        }
+    }
+
+    /** Whether the held repository's tip lists {@code peer}; {@code null} when the repository is not held. */
+    private static Boolean senderListed(Host host, String repoId, byte[] peer) {
+        AvpRules.RepoView view = host.repos.get(repoId);
+        if (view == null) {
+            return null;
+        }
+        return view.tip().map(t -> t.state().hasHost(peer)).orElse(false);
+    }
+
+    /** {@code POST /v1/test/replication { paused }} (SPEC 9.3), only with {@code AVP_TEST_CONTROL=1}. */
+    private static Object testControl(Host host, byte[] body) throws ApiError {
+        if (!host.replication.testControl()) {
+            throw ApiError.notFound("no such route");
+        }
+        Map<String, Object> o = strict(body, "paused");
+        boolean paused = decode(() -> AvpJson.bool(o, "paused"));
+        host.paused = paused;
+        if (!paused) {
+            host.kick++;
+        }
+        host.wake.signalAll();
+        return Map.of("paused", paused);
     }
 }
