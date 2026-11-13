@@ -2147,6 +2147,39 @@ fn offer_work_is_linear_in_its_items() {
     assert_eq!(b.heads(&id), vec![head]);
 }
 
+/// Important 2: a host listed after a long history (40 rotations, each after a push) takes its
+/// first copy by replication; the bounds limit work, not the length of an honest history.
+#[test]
+fn first_copy_bootstraps_across_40_rotations_with_pushes() {
+    let mut a = node();
+    let mut b = node();
+    link(&mut [&mut a, &mut b]);
+    let mut repo = genesis(&[a.key()], a.key());
+    let token = create(&a, &repo);
+    let id = repo.id();
+    let mut head = repo.root.commit_id;
+    for i in 0..40 {
+        let x = repo.commit(&repo.owner.sign, vec![head], format!("x{i}").as_bytes());
+        assert_eq!(push(&a, &repo, &token, &x).status, 200);
+        let (s, rot, k) = rotation(&repo, &[&repo.owner], None, vec![x.commit_id], a.key());
+        assert_eq!(publish(&a, &repo, &token, &s, Some(&rot)).status, 200);
+        repo.tip = s;
+        repo.data_key = k;
+        head = rot.commit_id;
+    }
+    let b_key = b.key();
+    let listing = repo.next(|s| {
+        s.hosts.push(HostRef {
+            key: b_key,
+            locator: "b.vault.example".to_string(),
+        })
+    });
+    assert_eq!(publish(&a, &repo, &token, &listing, None).status, 200);
+    eventually("B bootstraps across 40 rotations", || {
+        b.tip_hash(&id) == Some(hash(&listing)) && b.heads(&id) == vec![head]
+    });
+}
+
 /// Minor 3: owner commits shaped like the rotation commit (they cite the epoch-raising state at
 /// its epoch) that cannot pair with it do not block the pair: each candidate is tried. One decoy has
 /// an unknown parent; one has a parent the engine rejects (a stranger's commit), so pairing with it

@@ -729,6 +729,11 @@ pub(crate) fn apply_items(view: &mut RepoView, repo_id: &str, items: Items, stat
                         .get(ci)
                         .is_none_or(|c| !c.parents.iter().all(|q| view.status(q) == Some(CommitStatus::Accepted)))
                 });
+                if live.is_empty() && raising && cands.iter().any(|&ci| commit_done.get(ci) == Some(&false)) {
+                    // Its rotation commit is offered but cannot apply in this batch (a parent is
+                    // neither held nor offered): the pair waits for the next catch-up round.
+                    continue;
+                }
                 if live.is_empty() {
                     out.applications += 1;
                     match view.apply_manifest_with(p.m.clone(), None, Via::Offer) {
@@ -1305,7 +1310,9 @@ impl Worker {
     /// this host lacks, then, round after round, for what the deferred states and waiting commits
     /// still miss (a previous state, a parent, a cited state, a frontier header), at most
     /// [`MAX_ROUNDS`] rounds and [`MAX_REQUESTED`] ids. Deferred states and waiting commits are
-    /// carried into the next round.
+    /// carried into the next round; a round whose engine-work budget ran out is followed by one that
+    /// continues on the carried items even when nothing new is fetched, so the length of an honest
+    /// history is not what bounds it.
     ///
     /// A held repository goes through [`receive`] under the state lock. A first copy is private
     /// until it is admitted: it is built outside the lock on one trial view kept across the rounds,
@@ -1342,6 +1349,7 @@ impl Worker {
         let mut requested: HashSet<Id> = HashSet::new();
         let mut deferred: Vec<SignedManifest> = Vec::new();
         let mut waiting: Vec<Commit> = Vec::new();
+        let mut again = false;
         for round in 0..MAX_ROUNDS {
             if self.stopping() {
                 break;
@@ -1349,7 +1357,7 @@ impl Worker {
             // The first round fetches even with nothing wanted: a fetch also returns the pending
             // leave requests (SPEC 9.1).
             let fetching = round == 0 || !want.is_empty();
-            if !fetching {
+            if !fetching && !again {
                 break;
             }
             let mut items = if fetching {
@@ -1408,6 +1416,7 @@ impl Worker {
                 first_copy = Some(trial);
                 (applied, next)
             };
+            again = applied.exhausted;
             deferred = applied.deferred;
             waiting = applied.waiting;
             want = next;

@@ -163,7 +163,9 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
   `fetch` for what the states and commits not applied yet still miss (a previous state, a parent, a
   cited state, a frontier header), at most 64 rounds and 4096 ids per catch-up. What is not applied
   yet is carried into the next round, so a rotation pair whose parent this host lacks is applied
-  once that parent arrives. A peer
+  once that parent arrives; a round whose engine-work cap ran out is followed by one that continues
+  on the carried items even when nothing new is fetched. The bounds are on work, not on the length
+  of an honest history: a first copy across 40 rotations, each after a push, bootstraps. A peer
   that answers `403` or `404` for one repository does not stop the others. A host on the losing side
   of diverged owner states converges through this sweep, since a peer offers only to hosts its own
   tip lists.
