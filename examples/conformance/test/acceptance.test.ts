@@ -15,7 +15,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { manifestHash, type Commit, type LeaveRequest, type SignedManifest } from "../src/constructions.ts";
+import { ed25519PublicRaw, importEd25519Private } from "../src/crypto.ts";
+import { manifestHash, signCommit, type Commit, type LeaveRequest, type SignedManifest } from "../src/constructions.ts";
 import { RepoView, type Verdict } from "../src/rules.ts";
 import { commitFromWire, leaveFromWire, signedManifestFromWire } from "../src/vectors.ts";
 
@@ -201,4 +202,88 @@ test("tipListsHost follows the tip's hosts during a first copy by replication (S
   // The seq 2 state adds a.vault.example.
   assert.equal(verdictCode(apply(view, steps[1])), "ok");
   assert.equal(view.tipListsHost(), true, "tip is seq 2, which lists a.vault.example");
+});
+
+// ─── A refused write leaves nothing behind (SPEC 7.1, 7.3) ───────────────────────────────────
+
+/**
+ * Everything a view holds, read from its private store, so that a check can tell that a refused write
+ * changed nothing (its verified headers included).
+ */
+function contents(view: RepoView): unknown {
+  const st = view["st"];
+  const keys = (m: Map<string, unknown>) => [...m.keys()].sort();
+  return {
+    chain: st.chain.map((r) => r.key),
+    states: keys(st.states),
+    rotation: [...st.rotation].sort(),
+    commits: [...st.commits].map(([id, r]) => [id, r.status]).sort(),
+    headers: keys(st.headers),
+    leaves: [...st.leaves].sort(),
+  };
+}
+
+function scenario(name: string): any {
+  return (acceptance.scenarios as any[]).find((x) => x.name === name);
+}
+
+test("a removed member's own push does not decide a cutoff (SPEC 7.1, 7.3)", () => {
+  const s = scenario("removed-member-ancestor-of-frontier");
+  const steps = s.steps as Step[];
+  const view = new RepoView(Buffer.from(s.hostKey, "base64"), 16);
+  // Up to bob's removal at seq 3 (frontier {a1, b1, b2}) and the first offer of b0, which waits for
+  // frontier commit b2.
+  steps.slice(0, 6).forEach((step, i) => assert.equal(verdictCode(apply(view, step)), step.expect, `step ${i}`));
+  const b0 = commitFromWire(steps[5].item);
+  const b2 = commitFromWire(steps[6].item);
+  const before = contents(view);
+  // bob is not a member of the tip, so his push of b2 is refused, and its header does not decide b0's
+  // cutoff: nothing changed.
+  assert.equal(verdictCode(view.applyCommit(b2, "push")), "forbidden");
+  assert.deepEqual(contents(view), before, "a refused caller changes nothing");
+  assert.equal(verdictCode(view.applyCommit(b0, "offer")), "missing_parents", "b0 still waits for b2");
+  // b2 by replication then decides it, as the scenario expects.
+  steps.slice(6).forEach((step, i) => assert.equal(verdictCode(apply(view, step)), step.expect, `step ${6 + i}`));
+  assert.deepEqual([...view.heads()].sort(), [...s.finalHeads].sort());
+});
+
+test("a stranger's push and a refused publish leave nothing behind (SPEC 7.1, 8.3)", () => {
+  const manifests = JSON.parse(readFileSync(join(root, "vectors", "manifest.json"), "utf8"));
+  const commits = JSON.parse(readFileSync(join(root, "vectors", "commit.json"), "utf8"));
+  const genesis = signedManifestFromWire(manifests.cases[0].signedManifest);
+  const added = signedManifestFromWire(manifests.cases[1].signedManifest);
+  const ownerSeed = Buffer.from(manifests.seeds.owner.ed25519SeedHex, "hex");
+  const view = new RepoView(Buffer.from(manifests.seeds.hosts[0].hostKey, "base64"));
+  assert.equal(verdictCode(view.applyManifest(genesis, commitFromWire(commits.cases[0].commit))), "ok");
+  const start = contents(view);
+  const sealed = (seed: Buffer, parents: Buffer[], cites: SignedManifest) =>
+    signCommit(
+      {
+        repoId: genesis.state.repoId,
+        parents,
+        manifestSeq: cites.state.manifestSeq,
+        manifestHash: manifestHash(cites),
+        keyEpoch: 0,
+        author: ed25519PublicRaw(importEd25519Private(seed)),
+        iv: Buffer.alloc(12),
+        ciphertext: Buffer.alloc(32),
+      },
+      seed,
+    );
+
+  // A key the tip does not list: the signature is checked first (400 before 403), then the signed
+  // commit is refused and stores nothing, its header included.
+  const parents = Array.from({ length: 200 }, (_, j) => Buffer.alloc(32, j));
+  const c = sealed(Buffer.alloc(32, 0x66), parents, genesis);
+  const forged = { ...c, authorSignature: Buffer.from(c.authorSignature) };
+  forged.authorSignature[0] ^= 1;
+  assert.equal(verdictCode(view.applyCommit(forged, "push")), "bad_request");
+  assert.equal(verdictCode(view.applyCommit(c, "push")), "forbidden");
+  assert.deepEqual(contents(view), start, "a refused stranger changes nothing");
+
+  // A state and its commit are applied together or not at all: the commit's unknown parent refuses
+  // both, and the commit's header is not kept either.
+  const carried = sealed(ownerSeed, [Buffer.alloc(32, 7)], added);
+  assert.equal(verdictCode(view.applyManifest(added, carried, "push")), "missing_parents");
+  assert.deepEqual(contents(view), start, "a refused publish changes nothing");
 });

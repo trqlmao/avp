@@ -335,22 +335,12 @@ export class RepoView {
     };
   }
 
+  /**
+   * Undoes a rejected operation completely, the headers it learned included: a rejected item changes
+   * nothing, as on the offer path, where a rejected commit is not kept at all.
+   */
   private restore(snap: Store): void {
-    // Verified headers stay known: ancestry uses them whether or not the commit was accepted (SPEC 7.3).
-    // The re-check that ran inside the failed operation was reverted with it, so run it again here
-    // over the restored state for any header the operation learned.
-    const headers = this.st.headers;
     this.st = snap;
-    let learned = false;
-    for (const [k, c] of headers) {
-      if (this.st.headers.has(k)) continue;
-      this.st.headers.set(k, c);
-      learned = true;
-    }
-    if (learned) {
-      this.recheckCutoffs();
-      this.propagate();
-    }
   }
 
   private tipRec(): StateRec | undefined {
@@ -533,14 +523,15 @@ export class RepoView {
     if (tip === undefined) return fail("missing_parents");
     if (c.repoId !== tip.m.state.repoId || !this.headerOk(c)) return fail("bad_request");
     const id = key(c.commitId);
-    this.recordHeader(c);
 
     // Caller check on the client routes: the caller is the author (the owner for a carried commit)
-    // and is a member of the tip.
+    // and is a member of the tip. It runs before the header is recorded, so a caller the host refuses
+    // leaves nothing behind.
     if (via === "push") {
       if (carried && !c.author.equals(tip.m.state.ownerKey)) return fail("forbidden");
       if (!hasMember(tip.m.state, c.author)) return fail("forbidden");
     }
+    this.recordHeader(c);
 
     const existing = this.st.commits.get(id);
     if (existing !== undefined) {
