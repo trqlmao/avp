@@ -773,6 +773,16 @@ public final class SmokeTest {
             }
         }
 
+        /** Freezes the host's clock at {@code ms} (epoch milliseconds), or lets it run again for {@code null}. */
+        void freezeClock(Long ms) {
+            st.lock();
+            try {
+                st.fixedNowMs = ms;
+            } finally {
+                st.unlock();
+            }
+        }
+
         <R> Optional<R> view(String repo, Function<AvpRules.RepoView, R> f) {
             st.lock();
             try {
@@ -870,6 +880,49 @@ public final class SmokeTest {
 
         String entry() {
             return b64(key()) + "@http://127.0.0.1:9";
+        }
+    }
+
+    /**
+     * A test-held host key listed in a host's {@code AVP_PEERS} at an address where the test listens: it
+     * records the path of every request it gets and answers {@code 403 forbidden}, as a host that does not
+     * list the caller would.
+     */
+    private static final class RecordingPeer implements AutoCloseable {
+        final byte[] seed = SmokeTest.seed();
+        final List<String> paths = new ArrayList<>();
+        final HttpServer http;
+
+        RecordingPeer() throws IOException {
+            http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            http.createContext("/", ex -> {
+                synchronized (paths) {
+                    paths.add(ex.getRequestURI().getRawPath());
+                }
+                ex.getRequestBody().readAllBytes();
+                byte[] answer = "{\"error\":\"forbidden\",\"code\":\"forbidden\"}".getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().set("Content-Type", "application/json");
+                ex.sendResponseHeaders(403, answer.length);
+                try (OutputStream out = ex.getResponseBody()) {
+                    out.write(answer);
+                }
+            });
+            http.start();
+        }
+
+        String entry() {
+            return b64(pk(seed)) + "@http://127.0.0.1:" + http.getAddress().getPort();
+        }
+
+        List<String> paths() {
+            synchronized (paths) {
+                return new ArrayList<>(paths);
+            }
+        }
+
+        @Override
+        public void close() {
+            http.stop(0);
         }
     }
 
@@ -2111,18 +2164,34 @@ public final class SmokeTest {
         Node b = node();
         Node c = node();
         link(a, b, c);
-        Repo repo = genesis(a.key(), a.key(), b.key());
-        create(a, repo);
-        String id = repo.id();
-        eventuallyTrue("B holds the repository", () -> b.holds(id));
+        try (RecordingPeer d = new RecordingPeer()) {
+            // D is in A's static peer list (AVP_PEERS) but not in the repository's hosts.
+            a.peerWith(b.entry(), c.entry(), d.entry());
+            Repo repo = genesis(a.key(), a.key(), b.key());
+            create(a, repo);
+            String id = repo.id();
+            eventuallyTrue("B holds the repository", () -> b.holds(id));
 
-        assertError(a.host(c.seed, id, "heads", obj("repoId", id)), 403, "forbidden");
-        assertError(a.host(c.seed, id, "fetch", fetchBody(id, hash(repo.genesis))), 403, "forbidden");
-        assertError(a.host(c.seed, id, "offer", offer(id, List.of(), List.of(repo.root), List.of())), 403, "forbidden");
+            assertError(a.host(c.seed, id, "heads", obj("repoId", id)), 403, "forbidden");
+            assertError(a.host(c.seed, id, "fetch", fetchBody(id, hash(repo.genesis))), 403, "forbidden");
+            assertError(
+                    a.host(c.seed, id, "offer", offer(id, List.of(), List.of(repo.root), List.of())), 403, "forbidden");
 
-        // A never offers the repository to C, and C never takes it.
-        Thread.sleep(SWEEP_MS * 6);
-        isTrue(!c.holds(id), "C does not hold it");
+            // A never offers the repository to C, and C never takes it.
+            Thread.sleep(SWEEP_MS * 6);
+            isTrue(!c.holds(id), "C does not hold it");
+
+            // SPEC 9.2 and 9.3: A offers each accepted write only to the peers in the repository's hosts. D
+            // is reachable (A's sweep calls it), yet it never gets an offer, so it never sees the manifest,
+            // the ciphertext, or the commits. The sweep's heads call carries only the repoId (SPEC 9.3
+            // cadence) and is not an offer.
+            List<String> got = d.paths();
+            isTrue(!got.isEmpty(), "A never called D, so the recorder proves nothing");
+            for (String p : got) {
+                isTrue(!p.equals(hostPath(id, "offer")), "A offered the repository to D: " + got);
+                isTrue(p.equals(hostPath(id, "heads")), "A sent D more than a heads call: " + got);
+            }
+        }
     }
 
     private static void badHostSignatureRejected() throws Exception {
@@ -2197,6 +2266,26 @@ public final class SmokeTest {
                     b.hosted(path, hostHeaders(p.seed, "POST", path, body, nowMs() + skew), body).status,
                     200,
                     "skew " + skew);
+        }
+        // The bound itself, on a frozen clock: SPEC 9.3 rejects only when |now - time| exceeds 60 seconds, so
+        // exactly 60 000 ms is accepted and 60 001 ms is refused, in either direction.
+        long frozen = nowMs();
+        b.freezeClock(frozen);
+        try {
+            for (long skew : new long[] {-60_000, 60_000}) {
+                eq(
+                        b.hosted(path, hostHeaders(p.seed, "POST", path, body, frozen + skew), body).status,
+                        200,
+                        "skew " + skew);
+            }
+            for (long skew : new long[] {-60_001, 60_001}) {
+                assertError(
+                        b.hosted(path, hostHeaders(p.seed, "POST", path, body, frozen + skew), body),
+                        401,
+                        "unauthorized");
+            }
+        } finally {
+            b.freezeClock(null);
         }
     }
 

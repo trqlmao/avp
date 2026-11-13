@@ -174,6 +174,11 @@ public final class Server {
         Limits limits;
         /** Added to the system clock. Zero in the binary; tests move it to expire challenges and tokens. */
         long clockOffsetMs;
+        /**
+         * When set, the host's clock reads this instant instead of the system clock (plus {@link
+         * #clockOffsetMs}). Unset in the binary; tests freeze the clock to pin exact time bounds.
+         */
+        Long fixedNowMs;
         /** Each repository's engine view, by repoId. */
         final Map<String, AvpRules.RepoView> repos = new HashMap<>();
         /** {@link #joinKey(String, byte[])} of each acceptance this host issued, to its expiresAt. */
@@ -235,7 +240,8 @@ public final class Server {
 
         /** The host's current time in epoch milliseconds. */
         long nowMs() {
-            return saturatingAdd(System.currentTimeMillis(), clockOffsetMs);
+            Long fixed = fixedNowMs;
+            return saturatingAdd(fixed == null ? System.currentTimeMillis() : fixed, clockOffsetMs);
         }
 
         /** What the store holds (repositories, acceptances, outbox), for a full rendering in tests. */
