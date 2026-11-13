@@ -116,6 +116,7 @@ final class ClientTest {
                 new Case(
                         "host_errors_without_a_json_body_are_reported_by_status",
                         ClientTest::hostErrorsWithoutAJsonBodyAreReportedByStatus),
+                new Case("connect_expecting_matches_the_host_key", ClientTest::connectExpectingMatchesTheHostKey),
                 new Case("worked_flow_one_host", ClientTest::workedFlowOneHost),
                 new Case("worked_flow_two_peered_hosts", ClientTest::workedFlowTwoPeeredHosts));
         List<String> wanted = List.of(args);
@@ -2074,6 +2075,25 @@ final class ClientTest {
             eq(garbled.kind(), Vault.ClientException.Kind.BAD_RESPONSE, "a 200 that is not JSON");
         } finally {
             stub.stop(0);
+        }
+    }
+
+    /**
+     * SPEC 3.3, 11.7: a client matches a host by key, never by locator alone. Connecting to host A while
+     * expecting host B's key (a key from a token or a manifest's hosts) fails; expecting A's own key
+     * succeeds.
+     */
+    private static void connectExpectingMatchesTheHostKey(T t) throws Exception {
+        Node a = t.node();
+        Node b = t.node();
+        Vault.ClientException r = thrown(() -> await(Vault.HostClient.connectExpecting(a.url(), b.key())));
+        eq(r.kind(), Vault.ClientException.Kind.HOST_KEY_MISMATCH, "A's address with B's key: " + r);
+        Vault.HostClient h = await(Vault.HostClient.connectExpecting(a.url(), a.key()));
+        try {
+            eq(h.key(), a.key(), "the matched key");
+            eq(h.locator(), a.addr(), "the locator");
+        } finally {
+            h.close();
         }
     }
 
