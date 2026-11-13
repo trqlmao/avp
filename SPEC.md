@@ -647,7 +647,8 @@ keep writing commits that cite them (backdating). The state that removes a membe
   lacks, and fetches them from a peer.
 - When a host accepts a state that adds a removal, it MUST re-check every commit it holds by the removed
   member, and MUST drop from its heads, and stop serving and offering, every commit that fails the cutoff
-  together with every descendant of it.
+  together with every descendant of it. A commit dropped this way counts as rejected for §7.4, so a commit
+  that later names it as a parent is rejected with `403 forbidden`.
 
 Consequence: a removed member's writes that never reached the owner before removal are dropped. That is the
 price of making removal real. Their content survives only in the local state of a client that already
@@ -661,7 +662,8 @@ every commit those heads descend from, by any author, stays valid on every host.
 - **Parents known.** Every parent MUST be a commit the host has accepted. Otherwise the host answers
   `422 missing_parents` with `detail` listing the missing ids (base64, separated by `,`), fetches them from a
   peer (§9), and the client MAY retry. A commit whose parent is held is held (§6.5); a commit whose parent
-  the host rejected is rejected with `403 forbidden`.
+  the host rejected is rejected with `403 forbidden`. A commit that the removal cutoff dropped (§7.3) counts
+  as rejected, so a child of a dropped commit is rejected with `403 forbidden`.
 - **Heads.** Heads are accepted commits with no accepted children. A host MUST keep every head; a commit
   stops being a head only when a commit naming it as a parent is accepted (or when §6.5 holds or drops it,
   or §7.3 drops it).
