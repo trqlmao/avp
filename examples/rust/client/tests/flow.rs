@@ -20,11 +20,13 @@ use std::time::{Duration, Instant};
 use avp::commit::{Commit, CommitHeader};
 use avp::crypto::{WRAP_INFO, random_bytes, unwrap};
 use avp::encoding::{b64_encode, b64url_encode};
-use avp::manifest::{HostRef, SignedManifest, derive_repo_id};
+use avp::manifest::{HostRef, ManifestState, Removal, SignedManifest, derive_repo_id};
 use avp::owner::mnemonic_to_seed;
 use avp::payload::{PayloadV2, Stamp};
 use avp::rules::RepoView;
-use avp::tokens::{Acceptance, InviteToken, LinkGrant, LinkRequest, decode_token, encode_token};
+use avp::tokens::{
+    Acceptance, InviteToken, LeaveRequest, LinkGrant, LinkRequest, decode_token, encode_token, owner_fingerprint,
+};
 use avp_reference_client::ClientError;
 use avp_reference_client::flow;
 use avp_reference_client::link::{LinkSession, OwnerIdentity, approve};
@@ -1320,6 +1322,251 @@ fn client_never_sends_secrets_or_plaintext() {
         }
         assert!(!served.contains(&b64_encode(raw)), "the host serves the {what}");
     }
+}
+
+/// Makes the proxy serve `chain ++ extra` to a pull from seq 0 and `extra` to any other pull.
+fn serve_states(proxy: &Proxy, chain: Vec<SignedManifest>, extra: Vec<SignedManifest>) {
+    proxy.on_pull(move |req, ans| {
+        let list: Vec<SignedManifest> = if req["sinceManifestSeq"] == json!(0) {
+            chain.iter().chain(&extra).cloned().collect()
+        } else {
+            extra.clone()
+        };
+        ans["manifests"] = serde_json::to_value(list).unwrap();
+    });
+}
+
+/// SPEC 6.1 rules 1, 4, 5: states signed with the real owner key that break a structure, link, or
+/// content rule are discarded by the client itself; the pin does not move. A valid next state is
+/// then adopted through the same path.
+#[test]
+fn owner_signed_states_breaking_chain_rules_are_discarded() {
+    let a = node();
+    let (id, mut dev1) = owner_vault(&a.url());
+    let bob = invite_member(&mut dev1, &a.url());
+    let repo = dev1.repo_id().to_string();
+    let proxy = Proxy::new(&a);
+    let mut dev2 = Vault::open(host(&proxy.url()), Member::from_owner(&id.keys), &repo).unwrap();
+    let chain = dev2.chain().states().to_vec();
+    let tip = dev2.tip().clone();
+    let pin = dev2.tip_hash();
+    let bob_key = bob.member().ed25519_public();
+    let bob_entry = tip
+        .state
+        .members
+        .iter()
+        .find(|m| m.ed25519_public_key == bob_key)
+        .unwrap()
+        .clone();
+    let next = || {
+        let mut s = tip.state.clone();
+        s.manifest_seq += 1;
+        s.prev_manifest_hash = pin.to_vec();
+        s
+    };
+    let sign = |s: ManifestState| s.sign(&id.keys.signing).unwrap();
+    let newcomer = |home: Id, ct_len: usize| {
+        let mut m = bob_entry.clone();
+        m.ed25519_public_key = Member::generate().ed25519_public();
+        m.home_host_key = home;
+        m.wrapped_data_key.ciphertext.truncate(ct_len);
+        m
+    };
+
+    let mut cases: Vec<(&str, SignedManifest)> = Vec::new();
+    let mut s = next();
+    s.prev_manifest_hash = random_bytes::<32>().to_vec();
+    cases.push(("wrong prevManifestHash (6.3)", sign(s)));
+    let mut s = next();
+    s.members.retain(|m| m.ed25519_public_key != bob_key);
+    s.removals.push(Removal {
+        member_key: bob_key,
+        removed_at_seq: s.manifest_seq,
+        frontier: Vec::new(),
+    });
+    cases.push(("removal without an epoch bump (6.1 rule 5)", sign(s)));
+    let mut s = next();
+    s.members.retain(|m| m.ed25519_public_key != bob_key);
+    cases.push(("member dropped without a removal (6.1 rule 5)", sign(s)));
+    let mut s = next();
+    s.members.push(newcomer(random_bytes::<32>(), 48));
+    cases.push(("homeHostKey not in hosts (6.1 rule 5)", sign(s)));
+    let mut s = next();
+    s.members.push(newcomer(a.key(), 47));
+    cases.push(("47-byte wrapped ciphertext (6.1 rule 1)", sign(s)));
+    // A state listing a member twice cannot be encoded, so no signature over it exists; the
+    // owner's signature over the same state without the duplicate is attached.
+    let mut s = next();
+    let signature = sign(s.clone()).owner_signature;
+    s.members.push(bob_entry.clone());
+    cases.push((
+        "duplicate members (4.2, 6.1 rule 1)",
+        SignedManifest {
+            state: s,
+            owner_signature: signature,
+        },
+    ));
+
+    for (what, bad) in cases {
+        serve_states(&proxy, chain.clone(), vec![bad]);
+        let r = dev2.pull().unwrap();
+        assert_eq!(r.discarded_states, 1, "{what}");
+        assert_eq!(r.new_states, 0, "{what}");
+        assert_eq!(dev2.tip_hash(), pin, "{what}: the pin does not move");
+    }
+
+    let mut s = next();
+    s.share_refresh_tokens = true;
+    let good = sign(s);
+    serve_states(&proxy, chain.clone(), vec![good.clone()]);
+    let r = dev2.pull().unwrap();
+    assert_eq!((r.discarded_states, r.new_states), (0, 1));
+    assert_eq!(dev2.tip_hash(), good.hash().unwrap());
+}
+
+/// SPEC 6.2: `open` refuses a genesis whose `repoId` does not recompute from `ownerKey` and
+/// `genesisNonce`, and a genesis with more than the owner, although both carry the owner's
+/// signature.
+#[test]
+fn open_rejects_an_invalid_genesis() {
+    let a = node();
+    let (id, dev1) = owner_vault(&a.url());
+    let repo = dev1.repo_id().to_string();
+    let proxy = Proxy::new(&a);
+    let g = dev1.chain().states()[0].clone();
+
+    let mut s = g.state.clone();
+    s.genesis_nonce = random_bytes::<16>().to_vec();
+    let wrong_id = s.sign(&id.keys.signing).unwrap();
+    let mut s = g.state.clone();
+    let mut extra = s.members[0].clone();
+    extra.ed25519_public_key = Member::generate().ed25519_public();
+    s.members.push(extra);
+    let two_members = s.sign(&id.keys.signing).unwrap();
+
+    for (what, bad) in [("repoId does not recompute", wrong_id), ("two members", two_members)] {
+        serve_states(&proxy, Vec::new(), vec![bad]);
+        let r = Vault::open(host(&proxy.url()), Member::from_owner(&id.keys), &repo);
+        assert!(matches!(r, Err(ClientError::StateRejected(_))), "{what}: {r:?}");
+    }
+    proxy.honest();
+    Vault::open(host(&proxy.url()), Member::from_owner(&id.keys), &repo).unwrap();
+}
+
+/// SPEC 6.4, 6.2: genesis fixes the repository, so a competing owner-signed genesis for the same
+/// `repoId` is never adopted, even with a lower `manifestHash` (the tie rule is not applied at seq 1).
+#[test]
+fn competing_genesis_is_never_adopted() {
+    let a = node();
+    let (id, dev1) = owner_vault(&a.url());
+    let repo = dev1.repo_id().to_string();
+    let proxy = Proxy::new(&a);
+    let mut dev2 = Vault::open(host(&proxy.url()), Member::from_owner(&id.keys), &repo).unwrap();
+    let real = dev2.tip_hash();
+    let lower = (0..)
+        .map(|i| {
+            let mut s = dev1.chain().states()[0].state.clone();
+            s.hosts[0].locator = format!("g{i}.vault.example:443");
+            s.sign(&id.keys.signing).unwrap()
+        })
+        .find(|m| m.hash().unwrap() < real)
+        .unwrap();
+    assert_eq!(lower.state.repo_id, repo, "a valid genesis of the same repoId");
+
+    serve_states(&proxy, Vec::new(), vec![lower]);
+    let r = dev2.pull().unwrap();
+    assert!(r.rejected_chain);
+    assert_eq!(dev2.tip_hash(), real);
+}
+
+/// SPEC 11.2: the joiner checks that the genesis `ownerKey` matches the locator's fingerprint.
+#[test]
+fn join_checks_the_owner_fingerprint() {
+    let a = node();
+    let (_id, mut owner) = owner_vault(&a.url());
+    let bob = Member::generate();
+    let mut home = host(&a.url());
+    let token = prepare_join(&mut home, &bob, owner.repo_id()).unwrap();
+    owner.invite(&token).unwrap();
+    let mut locator = owner.locator().unwrap();
+    locator.owner_fingerprint = owner_fingerprint(&random_bytes::<32>());
+    let r = Vault::join(host(&a.url()), bob.clone(), &locator);
+    assert!(matches!(r, Err(ClientError::OwnerMismatch)), "{r:?}");
+    Vault::join(home, bob, &owner.locator().unwrap()).unwrap();
+}
+
+/// SPEC 8.4: the owner acts only on leave requests that verify under `memberKey`, name this
+/// repository, and come from a current member who is not the owner.
+#[test]
+fn invalid_leave_requests_are_ignored() {
+    let a = node();
+    let proxy = Proxy::new(&a);
+    let (id, mut owner) = owner_vault(&proxy.url());
+    let repo = owner.repo_id().to_string();
+    let bob = invite_member(&mut owner, &a.url());
+    let seq = owner.tip().state.manifest_seq;
+    let leave = |repo_id: &str, key: &SigningKey| {
+        LeaveRequest {
+            repo_id: repo_id.to_string(),
+            member_key: [0; 32],
+            at: now_ms(),
+            signature: [0; 64],
+        }
+        .sign(key)
+        .unwrap()
+    };
+    let mut flipped = leave(&repo, &bob.member().signing);
+    flipped.signature[0] ^= 1;
+    let bad = vec![
+        flipped,
+        leave(&repo, &SigningKey::from_bytes(&random_bytes::<32>())),
+        leave(&repo, &id.keys.signing),
+        leave(&b64url_encode(&random_bytes::<16>()), &bob.member().signing),
+    ];
+    let injected = serde_json::to_value(&bad).unwrap();
+    proxy.on_pull(move |_, ans| ans["leaves"] = injected.clone());
+    let r = owner.pull().unwrap();
+    assert_eq!(r.leaves, 0);
+    assert!(owner.leaves().is_empty());
+    assert!(owner.process_leaves().unwrap().is_empty(), "nobody is removed");
+    assert_eq!(owner.tip().state.manifest_seq, seq);
+    assert_eq!(a.tip_seq(&repo), seq);
+
+    // The same path carries a valid request.
+    let good = serde_json::to_value(vec![leave(&repo, &bob.member().signing)]).unwrap();
+    proxy.on_pull(move |_, ans| ans["leaves"] = good.clone());
+    assert_eq!(owner.pull().unwrap().leaves, 1);
+}
+
+/// SPEC 8.3: the frontier also lists every verified commit by the removed member that the owner
+/// cannot show to be an ancestor of a merged head. Here the owner saw bob's `b1` as a head; the
+/// merged head is carol's `c`, whose parent `b2` the owner never saw, so `b1` is listed too.
+#[test]
+fn frontier_lists_seen_commits_not_known_as_ancestors() {
+    let a = node();
+    let (_id, mut owner) = owner_vault(&a.url());
+    let repo = owner.repo_id().to_string();
+    let mut bob = invite_member(&mut owner, &a.url());
+    let mut carol = invite_member(&mut owner, &a.url());
+    set(&mut bob, U1, &[("username", json!("b1"))], now_ms());
+    let b1 = bob.heads()[0];
+    owner.pull().unwrap();
+    assert_eq!(owner.heads(), &[b1]);
+    set(&mut bob, U1, &[("username", json!("b2"))], now_ms());
+    carol.pull().unwrap();
+    set(&mut carol, U2, &[("username", json!("c"))], now_ms());
+    let c = carol.heads()[0];
+    assert_eq!(a.heads(&repo), vec![c]);
+
+    owner.remove(bob.member().ed25519_public()).unwrap();
+    let removal = owner
+        .tip()
+        .state
+        .removal_of(&bob.member().ed25519_public())
+        .unwrap()
+        .clone();
+    assert_eq!(sorted(removal.frontier), sorted(vec![c, b1]));
+    assert_eq!(a.tip_seq(&repo), owner.tip().state.manifest_seq, "the host accepted it");
 }
 
 // ─── The worked flow ────────────────────────────────────────────────────────────────────
