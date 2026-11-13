@@ -97,6 +97,9 @@ test("acceptance.json scenarios are well formed", () => {
     }
     assert.ok(Array.isArray(s.finalHeads) && Array.isArray(s.finalHeld));
     assert.ok(s.finalTip === null || Buffer.from(s.finalTip, "base64").length === 32);
+    if (s.finalLeaves !== undefined) {
+      for (const l of s.finalLeaves) assert.ok(Buffer.from(l.memberKey, "base64").length === 32 && Number.isSafeInteger(l.at));
+    }
   }
 });
 
@@ -110,6 +113,7 @@ for (const s of acceptance.scenarios as any[]) {
     assert.deepEqual([...view.held()].sort(), [...s.finalHeld].sort(), "final held commits");
     const tip = view.tip();
     assert.equal(tip ? b64(manifestHash(tip)) : null, s.finalTip, "final manifest tip");
+    if (s.finalLeaves !== undefined) assert.deepEqual(view.pendingLeaves(), s.finalLeaves, "final pending leave requests");
   });
 }
 
@@ -118,7 +122,7 @@ test("an accepted leave request is pending for its member (SPEC 8.4)", () => {
   const view = new RepoView(Buffer.from(s.hostKey, "base64"), s.headBound);
   for (const step of s.steps as Step[]) apply(view, step);
   const leave = (s.steps as Step[]).find((x) => x.op === "leave");
-  assert.deepEqual(view.pendingLeaves(), [leave?.item.memberKey]);
+  assert.deepEqual(view.pendingLeaves(), [{ memberKey: leave?.item.memberKey, at: leave?.item.at }]);
 });
 
 // ─── Robustness: attacker-controlled input never throws past the API ──────────────

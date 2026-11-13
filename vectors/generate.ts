@@ -658,6 +658,17 @@ function buildMerge(ctx: Ctx): any {
       }),
       expectedDeleted: { [U1]: false, [U2]: false },
     },
+    {
+      name: "strip-then-deleted",
+      stripRefresh: true,
+      note: "alice deletes at T0+100; bob's refreshToken at T0+200 is the only stamp above the marker. Unstripped, the account is live; with the policy false the stripped result carries no refreshToken, every remaining stamp is below the marker, and the account is deleted.",
+      inputs: [
+        pl({ [U1]: { deleted: s(T0 + 100, 0, A), fields: { username: f("alt_one", T0, 0, A) }, bans: {} } }),
+        pl({ [U1]: { fields: { username: f("alt_one", T0, 0, A), refreshToken: f("rt-late", T0 + 200, 0, B) }, bans: {} } }),
+      ],
+      expected: pl({ [U1]: { deleted: s(T0 + 100, 0, A), fields: { username: f("alt_one", T0, 0, A) }, bans: {} } }),
+      expectedDeleted: { [U1]: true },
+    },
   ];
 
   const hlc = [
@@ -828,12 +839,14 @@ function buildAcceptance(ctx: Ctx): any {
   const EMPTY = Buffer.alloc(0);
   const PLAINTEXT = Buffer.from(JSON.stringify({ v: 2, accounts: {} }), "utf8");
   const labels = new Map<Commit, string>();
+  // The manifest.json data keys, plus an epoch 2 key used only by the epoch-jump scenario.
+  const KEYS: Record<number, Buffer> = { ...DATA_KEYS, 2: Buffer.alloc(32, 0x44) };
 
   // Member wraps as in manifest.json; a non-empty `tweak` varies the wrap ephemeral key and IV, which
   // is owner-chosen randomness, to order two diverged states by manifestHash deterministically.
   const entry = (p: Party, epoch: number, home: HostRef, tweak: string): MemberEntry => {
     const l = tweak === "" ? p.label : `${p.label}/${tweak}`;
-    const w = wrapSecret(p.xPub, wrapEphemeral(epoch, l), wrapIv(epoch, l), DATA_KEYS[epoch]);
+    const w = wrapSecret(p.xPub, wrapEphemeral(epoch, l), wrapIv(epoch, l), KEYS[epoch]);
     return { ed25519PublicKey: p.edPub, x25519PublicKey: p.xPub, wrappedDataKey: w, keyEpoch: epoch, homeHostKey: home.hostKey };
   };
 
@@ -879,7 +892,7 @@ function buildAcceptance(ctx: Ctx): any {
     const rid = o.repoId ?? at.state.repoId;
     const ids = parents.map((p) => p.commitId);
     const iv = sha256(Buffer.from(`avp/vectors/acceptance-iv/${label}`, "utf8")).subarray(0, 12);
-    const ciphertext = aesGcmEncrypt(DATA_KEYS[epoch], iv, buildAadV2(rid, epoch, author.edPub, ids), PLAINTEXT);
+    const ciphertext = aesGcmEncrypt(KEYS[epoch], iv, buildAadV2(rid, epoch, author.edPub, ids), PLAINTEXT);
     const c = signCommit(
       { repoId: rid, parents: ids, manifestSeq: o.seq ?? at.state.manifestSeq, manifestHash: manifestHash(at), keyEpoch: epoch, author: author.edPub, iv, ciphertext },
       author.edSeed,
@@ -906,7 +919,15 @@ function buildAcceptance(ctx: Ctx): any {
   });
   const L = (label: string, l: LeaveRequest, expect: Expect) => ({ op: "leave", via: "push", label, item: leaveToWire(l), expect });
   const ids = (cs: Commit[]) => cs.map((c) => b64(c.commitId)).sort();
-  const scenario = (name: string, description: string, steps: any[], finalHeads: Commit[], finalHeld: Commit[], finalTip: SignedManifest | null) => ({
+  const scenario = (
+    name: string,
+    description: string,
+    steps: any[],
+    finalHeads: Commit[],
+    finalHeld: Commit[],
+    finalTip: SignedManifest | null,
+    finalLeaves?: LeaveRequest[],
+  ) => ({
     name,
     description,
     hostKey: b64(hostA.hostKey),
@@ -915,7 +936,17 @@ function buildAcceptance(ctx: Ctx): any {
     finalHeads: ids(finalHeads),
     finalHeld: ids(finalHeld),
     finalTip: finalTip ? b64(manifestHash(finalTip)) : null,
+    ...(finalLeaves
+      ? { finalLeaves: finalLeaves.map((l) => ({ memberKey: b64(l.memberKey), at: l.at })).sort((x, y) => (x.memberKey < y.memberKey ? -1 : 1)) }
+      : {}),
   });
+  /** A manifest step from a wire object, for structurally malformed items that cannot be decoded and signed. */
+  const MW = (label: string, wire: unknown, expect: Expect) => ({ op: "manifest", via: "push", label, item: { manifest: wire }, expect });
+  /** A commit step from a wire object. */
+  const CW = (label: string, wire: unknown, expect: Expect) => ({ op: "commit", via: "push", label, item: wire, expect });
+  /** Re-signs a changed copy of a state, for content-rule violations the state builder cannot express. */
+  const resign = (m: SignedManifest, change: (s: ManifestState) => ManifestState, signer: Party = owner): SignedManifest =>
+    signManifest(wireOrder(change({ ...m.state })), signer.edSeed);
 
   // The common start: genesis (owner only, hosts a and b, owner home a) published with its first commit.
   const G = state(1, null, 0, [[owner, hostA]]);
@@ -1554,12 +1585,266 @@ function buildAcceptance(ctx: Ctx): any {
     null,
   );
 
+  // ── fix round 1: listed reject paths (SPEC 6.1 rules 1, 3, 5, 6; 6.5; 7.4; 8.4) ──
+  const hostC = hostRef(0xc0, "c.vault.example");
+  const otherRepo = deriveRepoId(owner.edPub, Buffer.alloc(16, 0x02));
+  const M2abc = state(2, G, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]]);
+  const onG = (name: string, rule: string, bad: SignedManifest) =>
+    add(name, `SPEC 6.1 rule 5: ${rule}. The seq 2 state is validly signed and links to the tip, so the content rule decides: bad_request.`, [genesis, M("M2-bad", bad, "bad_request")], [r], [], G);
+  const onM2ab = (name: string, rule: string, bad: SignedManifest) =>
+    add(name, `SPEC 6.1 rule 5: ${rule}. The seq 3 state is validly signed and links to the tip, so the content rule decides: bad_request.`, [genesis, M("M2", M2ab, "ok"), M("M3-bad", bad, "bad_request")], [r], [], M2ab);
+
+  onG("content-hosts-empty", "hosts is not empty; this state lists no host", resign(M2a, (s) => ({ ...s, hosts: [] })));
+  onG("content-owner-not-member", "members contains exactly one entry whose ed25519PublicKey equals ownerKey; this state lists only alice", state(2, G, 0, [[alice, hostA]]));
+  onG(
+    "content-member-epoch-mismatch",
+    "every member's keyEpoch equals the state's keyEpoch; alice's entry says 1 in an epoch 0 state",
+    resign(M2a, (s) => ({ ...s, members: s.members.map((x) => (x.ed25519PublicKey.equals(alice.edPub) ? { ...x, keyEpoch: 1 } : x)) })),
+  );
+  onG("content-home-host-not-listed", "every member's homeHostKey equals the hostKey of an entry in hosts; alice's home is c.vault.example, which is not listed", state(2, G, 0, [[owner, hostA], [alice, hostC]]));
+  onG("content-repo-id-changed", "repoId is unchanged from the previous state; this one names another repository", resign(M2a, (s) => ({ ...s, repoId: otherRepo })));
+  onG("content-owner-key-changed", "ownerKey is unchanged from the previous state; this one, signed by alice, names alice as ownerKey", resign(M2a, (s) => ({ ...s, ownerKey: alice.edPub }), alice));
+  onG("content-scheme-id-changed", "schemeId is unchanged from the previous state", resign(M2a, (s) => ({ ...s, schemeId: "X25519-HKDF-SHA256-AESGCM-v2" })));
+  onG(
+    "content-genesis-nonce-after-seq-1",
+    "genesisNonce is empty after seq 1 (also a rule 1 length); this seq 2 state repeats the 16-byte nonce",
+    resign(M2a, (s) => ({ ...s, genesisNonce: GENESIS_NONCE })),
+  );
+  onG("content-epoch-jump-2", "keyEpoch equals the previous keyEpoch or the previous keyEpoch + 1; this state jumps from 0 to 2", state(2, G, 2, [[owner, hostA], [alice, hostA]]));
+  onM2ab(
+    "content-removed-key-still-member",
+    "no member's ed25519PublicKey equals the memberKey of any removal; bob is removed and still listed",
+    state(3, M2ab, 1, [[owner, hostA], [alice, hostA], [bob, hostB]], { removals: [removal(bob, 3, [r])] }),
+  );
+  onM2ab(
+    "content-removed-at-seq-out-of-range",
+    "every removal's removedAtSeq is at most the state's manifestSeq, and a new removal's equals it; bob's says 4 in a seq 3 state",
+    state(3, M2ab, 1, [[owner, hostA], [alice, hostA]], { removals: [removal(bob, 4, [r])] }),
+  );
+  onM2ab(
+    "content-new-removal-of-non-member",
+    "every new removal names a key that was a member of the previous state; carol never was",
+    state(3, M2ab, 1, [[owner, hostA], [alice, hostA], [bob, hostB]], { removals: [removal(carol, 3, [r])] }),
+  );
+  onM2ab(
+    "content-owner-removed",
+    "ownerKey is never removed (and members contains the owner exactly once); this state removes the owner",
+    state(3, M2ab, 1, [[alice, hostA], [bob, hostB]], { removals: [removal(owner, 3, [r])] }),
+  );
+  {
+    const M3 = epoch1(M2ab, [r]);
+    const rot = cm("rot", owner, [r], M3);
+    const altered = state(4, M3, 1, [[owner, hostA], [alice, hostA]], { removals: [removal(bob, 3, [])] });
+    const omitted = state(4, M3, 1, [[owner, hostA], [alice, hostA]], { removals: [] });
+    add(
+      "content-earlier-removal-altered",
+      "SPEC 6.1 rule 5: every removal of the previous state appears unchanged (memberKey, removedAtSeq, and frontier); seq 4 repeats bob's removal with an empty frontier: bad_request.",
+      [genesis, M("M2", M2ab, "ok"), M("M3", M3, "ok", "push", rot), M("M4-altered-removal", altered, "bad_request")],
+      [rot],
+      [],
+      M3,
+    );
+    add(
+      "content-earlier-removal-omitted",
+      "SPEC 6.1 rule 5: removals are cumulative, every removal of the previous state appears unchanged; seq 4 drops bob's removal: bad_request.",
+      [genesis, M("M2", M2ab, "ok"), M("M3", M3, "ok", "push", rot), M("M4-omits-removal", omitted, "bad_request")],
+      [rot],
+      [],
+      M3,
+    );
+  }
+
+  // Genesis failures other than repoId (6.1 rule 3, 6.2).
+  const badGenesis = (name: string, rule: string, Gx: SignedManifest) =>
+    add(name, `SPEC 6.1 rule 3, 6.2: ${rule}: bad_request, nothing stored.`, [M("G-bad", Gx, "bad_request", "push", cm(`r-${name}`, owner, [], Gx))], [], [], null);
+  badGenesis("genesis-epoch-not-zero", "the genesis state MUST have keyEpoch 0; this one has 1", state(1, null, 1, [[owner, hostA]]));
+  badGenesis("genesis-extra-member", "the genesis state MUST have exactly one member, the owner; this one also lists alice", state(1, null, 0, [[owner, hostA], [alice, hostA]]));
+  badGenesis("genesis-with-removals", "the genesis state MUST have no removals; this one removes bob", state(1, null, 0, [[owner, hostA]], { removals: [removal(bob, 1, [])] }));
+
+  // Rule 6 on a later state (8.6).
+  add(
+    "manifest-drops-this-host",
+    "SPEC 6.1 rule 6, 8.6: a valid seq 2 state lists only b.vault.example (the owner's home moved to b); at a.vault.example it is not_hosted and the tip stays at genesis.",
+    [genesis, M("M2-hosts-b-only", state(2, G, 0, [[owner, hostB]], { hosts: [ref(hostB)] }), "not_hosted")],
+    [r],
+    [],
+    G,
+  );
+
+  // Rule 1 and 7.1 structure, in the wire form a host receives.
+  {
+    const w = signedManifestToWire(M2a);
+    const dupHost = { ...w, state: { ...w.state, hosts: [w.state.hosts[0], ...w.state.hosts] } };
+    const shortWrap = {
+      ...w,
+      state: {
+        ...w.state,
+        members: w.state.members.map((x, i) =>
+          i === 0 ? { ...x, wrappedDataKey: { ...x.wrappedDataKey, ciphertext: b64(fromB64(x.wrappedDataKey.ciphertext).subarray(0, 47)) } } : x,
+        ),
+      },
+    };
+    const shortSig = { ...w, ownerSignature: b64(fromB64(w.ownerSignature).subarray(0, 63)) };
+    const shortPrev = { ...w, state: { ...w.state, prevManifestHash: b64(fromB64(w.state.prevManifestHash).subarray(0, 31)) } };
+    add(
+      "manifest-malformed-structure",
+      "SPEC 6.1 rule 1, 4.2: a seq 2 state with a host listed twice, a wrappedDataKey ciphertext of 47 bytes (not 48), a 63-byte ownerSignature, or a 31-byte prevManifestHash is malformed: bad_request each; the intact state is then accepted.",
+      [
+        genesis,
+        MW("M2-duplicate-host", dupHost, "bad_request"),
+        MW("M2-wrap-47-bytes", shortWrap, "bad_request"),
+        MW("M2-signature-63-bytes", shortSig, "bad_request"),
+        MW("M2-prev-hash-31-bytes", shortPrev, "bad_request"),
+        M("M2", M2a, "ok"),
+      ],
+      [r],
+      [],
+      M2a,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2a);
+    const w = commitToWire(a1);
+    add(
+      "commit-malformed-structure",
+      "SPEC 7.1, 4.3: a commit listing the same parent twice, with an 11-byte iv, a 63-byte authorSignature, or a 15-byte ciphertext (shorter than the GCM tag) is malformed: bad_request each; the intact commit is then accepted.",
+      [
+        genesis,
+        M("M2", M2a, "ok"),
+        CW("a1-duplicate-parent", { ...w, parents: [w.parents[0], w.parents[0]] }, "bad_request"),
+        CW("a1-iv-11-bytes", { ...w, iv: b64(fromB64(w.iv).subarray(0, 11)) }, "bad_request"),
+        CW("a1-signature-63-bytes", { ...w, authorSignature: b64(fromB64(w.authorSignature).subarray(0, 63)) }, "bad_request"),
+        CW("a1-ciphertext-15-bytes", { ...w, ciphertext: b64(fromB64(w.ciphertext).subarray(0, 15)) }, "bad_request"),
+        C(a1, "ok"),
+      ],
+      [a1],
+      [],
+      M2a,
+    );
+  }
+
+  // 7.4: a commit whose parent is held is held.
+  {
+    const W3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]]);
+    const L3 = above((t) => epoch1(M2ab, [r], { tweak: t }), W3);
+    const rotL = cm("rotL", owner, [r], L3);
+    const a1 = cm("a1-cites-L3", alice, [rotL], L3);
+    const a3 = cm("a3-child-of-a1-cites-W3", alice, [a1], W3);
+    add(
+      "commit-with-held-parent-held",
+      "SPEC 7.4, 6.5: as in diverged-owner-commit-held, rotL and a1 are held once W3 wins. alice's a3 cites the winning W3 correctly (member, epoch 0) but its parent a1 is held, so a3 is held too: forbidden.",
+      [genesis, M("M2", M2ab, "ok"), M("L3", L3, "ok", "push", rotL), C(a1, "ok"), M("W3", W3, "ok", "offer"), C(a3, "forbidden")],
+      [r],
+      [rotL, a1, a3],
+      W3,
+    );
+  }
+
+  // 6.5: losing epoch-raising states, the cutoff on losing commits, switches, held descendants.
+  {
+    const W3 = state(3, M2abc, 1, [[owner, hostA], [alice, hostA], [carol, hostB]], { removals: [removal(bob, 3, [r])] });
+    const rotW = cm("rotW", owner, [r], W3);
+    const L3 = above((t) => state(3, M2abc, 1, [[owner, hostA], [alice, hostA], [bob, hostB]], { removals: [removal(carol, 3, [r])], tweak: t }), W3);
+    const rotL = cm("rotL-removes-carol", owner, [r], L3);
+    const b1 = cm("b1-cites-L3", bob, [r], L3);
+    const start = [genesis, M("M2", M2abc, "ok"), M("W3", W3, "ok", "push", rotW), M("L3", L3, "manifest_conflict", "offer", rotL)];
+    add(
+      "losing-rotation-commit-kept-held",
+      "SPEC 6.5, 8.3: holding W3 (removes bob, epoch 1), the host is offered the losing L3 (removes carol, epoch 1, higher hash) with its rotation commit: L3 loses (manifest_conflict) and is retained, and its rotation commit is kept with it as a held commit.",
+      start,
+      [rotW],
+      [rotL],
+      W3,
+    );
+    add(
+      "losing-commit-failing-cutoff-rejected",
+      "SPEC 6.5 (1), 7.3: bob's b1 cites the retained losing L3 at epoch 1. The removal cutoff takes precedence: bob is removed in the tip W3 with frontier {root} and b1 is neither in it nor an ancestor of it, so b1 is rejected (forbidden), never held.",
+      [...start, C(b1, "forbidden", "offer")],
+      [rotW],
+      [rotL],
+      W3,
+    );
+  }
+  {
+    const W3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]]);
+    const L3 = above((t) => epoch1(M2ab, [r], { tweak: t }), W3);
+    const rotL = cm("rotL", owner, [r], L3);
+    const a1 = cm("a1-cites-L3", alice, [rotL], L3);
+    const W4 = state(4, W3, 1, [[owner, hostA], [bob, hostB], [carol, hostB]], { removals: [removal(alice, 4, [r])] });
+    const rot4 = cm("rot4", owner, [r], W4);
+    add(
+      "held-commit-dropped-on-author-removal",
+      "SPEC 6.5 drop test, 7.3: rotL and alice's a1 are held once W3 wins. W4 removes alice (epoch 1) with frontier {root}: a1 is not covered, so it is dropped. rotL meets no drop test and W4 lists the owner at its epoch 1, so it is accepted beside W4's rotation commit.",
+      [genesis, M("M2", M2ab, "ok"), M("L3", L3, "ok", "push", rotL), C(a1, "ok"), M("W3", W3, "ok", "offer"), M("W4", W4, "ok", "push", rot4)],
+      [rotL, rot4],
+      [],
+      W4,
+    );
+  }
+  {
+    const W3 = epoch1(M2ab, [r]);
+    const rotW = cm("rotW", owner, [r], W3);
+    const H3 = above((t) => state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]], { tweak: t }), W3);
+    const b1 = cm("b1-cites-H3", bob, [r], H3);
+    add(
+      "chain-switch-drops-by-cutoff",
+      "SPEC 6.5, 7.3: the host holds H3 (adds carol) and accepts bob's b1 citing it. W3 (removes bob, epoch 1, frontier {root}, lower hash) then wins with its rotation commit. Re-checking b1 against the winning chain, the removal cutoff takes precedence and b1 fails it: dropped; the rotation commit is the only head.",
+      [genesis, M("M2", M2ab, "ok"), M("H3", H3, "ok"), C(b1, "ok"), M("W3", W3, "ok", "offer", rotW)],
+      [rotW],
+      [],
+      W3,
+    );
+  }
+  {
+    const W3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA]], { share: true });
+    const L3 = above((t) => state(3, M2a, 0, [[owner, hostA], [alice, hostA], [carol, hostB]], { tweak: t }), W3);
+    const c1 = cm("c1-cites-L3", carol, [r], L3);
+    const c2 = cm("c2-child-of-c1", carol, [c1], L3);
+    const W4 = state(4, W3, 0, [[owner, hostA], [alice, hostA], [carol, hostB]], { share: true });
+    add(
+      "held-descendants-accepted-in-turn",
+      "SPEC 6.5: carol's c1 and its child c2 cite the losing L3 and are held when W3 wins. W4 re-invites carol at epoch 0: c1 is accepted, and its held descendant c2 is re-checked in turn and accepted, leaving c2 the only head.",
+      [genesis, M("M2", M2a, "ok"), M("L3", L3, "ok", "offer"), C(c1, "ok"), C(c2, "ok"), M("W3", W3, "ok", "offer"), M("W4", W4, "ok")],
+      [c2],
+      [],
+      W4,
+    );
+  }
+
+  // 8.4: pending leave requests.
+  {
+    const at = ctx.t0 + 3_600_000;
+    const bobLeave = signLeave({ repoId, memberKey: bob.edPub, at }, bob.edSeed);
+    const aliceLeave = signLeave({ repoId, memberKey: alice.edPub, at }, alice.edSeed);
+    const M3 = epoch1(M2ab, [r]);
+    const rot = cm("rot", owner, [r], M3);
+    add(
+      "leave-dropped-on-removal",
+      "SPEC 8.4: the host keeps bob's and alice's leave requests and drops bob's once a state removes bob; alice's stays pending.",
+      [genesis, M("M2", M2ab, "ok"), L("bob-leave", bobLeave, "ok"), L("alice-leave", aliceLeave, "ok"), M("M3", M3, "ok", "push", rot)],
+      [rot],
+      [],
+      M3,
+      [aliceLeave],
+    );
+    const later = signLeave({ repoId, memberKey: alice.edPub, at: at + 1000 }, alice.edSeed);
+    add(
+      "leave-latest-per-member",
+      "SPEC 8.4: the host keeps the latest leave request per member; alice sends one and then a later one, and only the later one is pending.",
+      [genesis, M("M2", M2a, "ok"), L("alice-leave", aliceLeave, "ok"), L("alice-leave-later", later, "ok")],
+      [r],
+      [],
+      M2a,
+      [later],
+    );
+  }
+
   return {
     description:
       "Host acceptance scenarios (SPEC 6, 7, 8.3, 8.4, 9.1). Each scenario is one host's view of one repository: create a rules engine for `hostKey` (a.vault.example) " +
       "with head bound `headBound`, apply `steps` in order, and each step's verdict MUST equal `expect` (\"ok\" or the SPEC 10.4 code). Then the accepted commits with no " +
       "accepted child MUST be exactly `finalHeads`, the held commits (SPEC 6.5) exactly `finalHeld`, and the winning chain's tip manifestHash `finalTip` (null when no state " +
-      "was accepted). Steps: `op` is manifest, commit, or leave. A manifest step's `item` is `{ manifest: SignedManifest, commit?: Commit }`, the publishManifest body: the " +
+      "was accepted). When a scenario has `finalLeaves`, the pending leave requests (SPEC 8.4, one per member) MUST be exactly those `{ memberKey, at }`. A stored commit whose removal cutoff cannot yet be decided (SPEC 7.3) is neither a head nor held. Steps: `op` is manifest, commit, or leave. A manifest step's `item` is `{ manifest: SignedManifest, commit?: Commit }`, the publishManifest body: the " +
       "commit is the genesis commit (createRepo), the rotation commit of an epoch-raising state, or absent; the state and its commit are applied together or not at all " +
       "(SPEC 8.2, 8.3). A commit step's `item` is a Commit; a leave step's `item` is a LeaveRequest. `via` is the path: \"push\" is a client write (push, createRepo, " +
       "publishManifest, leave) whose authenticated caller is the commit author, the owner for a manifest, or memberKey for a leave, with the head bound applied; \"offer\" is " +

@@ -806,6 +806,80 @@
         "00000000-0000-4000-8000-000000000001": false,
         "00000000-0000-4000-8000-000000000002": false
       }
+    },
+    {
+      "name": "strip-then-deleted",
+      "stripRefresh": true,
+      "note": "alice deletes at T0+100; bob's refreshToken at T0+200 is the only stamp above the marker. Unstripped, the account is live; with the policy false the stripped result carries no refreshToken, every remaining stamp is below the marker, and the account is deleted.",
+      "inputs": [
+        {
+          "v": 2,
+          "accounts": {
+            "00000000-0000-4000-8000-000000000001": {
+              "deleted": {
+                "at": 1767225600100,
+                "n": 0,
+                "by": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+              },
+              "fields": {
+                "username": {
+                  "value": "alt_one",
+                  "at": 1767225600000,
+                  "n": 0,
+                  "by": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+                }
+              },
+              "bans": {}
+            }
+          }
+        },
+        {
+          "v": 2,
+          "accounts": {
+            "00000000-0000-4000-8000-000000000001": {
+              "fields": {
+                "username": {
+                  "value": "alt_one",
+                  "at": 1767225600000,
+                  "n": 0,
+                  "by": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+                },
+                "refreshToken": {
+                  "value": "rt-late",
+                  "at": 1767225600200,
+                  "n": 0,
+                  "by": "oJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA="
+                }
+              },
+              "bans": {}
+            }
+          }
+        }
+      ],
+      "expected": {
+        "v": 2,
+        "accounts": {
+          "00000000-0000-4000-8000-000000000001": {
+            "deleted": {
+              "at": 1767225600100,
+              "n": 0,
+              "by": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+            },
+            "fields": {
+              "username": {
+                "value": "alt_one",
+                "at": 1767225600000,
+                "n": 0,
+                "by": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+              }
+            },
+            "bans": {}
+          }
+        }
+      },
+      "expectedDeleted": {
+        "00000000-0000-4000-8000-000000000001": true
+      }
     }
   ],
   "hlc": [

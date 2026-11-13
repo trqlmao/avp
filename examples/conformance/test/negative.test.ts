@@ -139,8 +139,10 @@ test("negative.json carries every 0.5 MUST-reject case", () => {
 });
 
 test("each 0.5 negative differs from a valid base by its one mutation (the base is accepted)", () => {
+  const legacy = new Set(["key-unwrap", "ed25519-verify"]);
   for (const c of negative.cases as any[]) {
-    if (!c.base) continue;
+    if (legacy.has(c.op)) continue; // the 0.4-era cases predate `base`
+    assert.ok(c.base, `${c.name}: every 0.5 negative carries a base`);
     assert.equal(accepted({ ...c, ...c.base }), true, `${c.name}: the unmutated base must be accepted`);
   }
 });

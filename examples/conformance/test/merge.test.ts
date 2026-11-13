@@ -128,6 +128,15 @@ test("merge strip-after-policy-off: inputs carry refreshToken and expiresAt, the
   }
 });
 
+test("merge strip-then-deleted: the unstripped merge is live, the stripped one is deleted (SPEC 5, 5.1)", () => {
+  const c = (vectors.cases as MergeCase[]).find((x) => x.name === "strip-then-deleted");
+  assert.ok(c && c.stripRefresh === true);
+  const merged = mergePayloads(c.inputs);
+  const uuid = Object.keys(c.expectedDeleted)[0];
+  assert.equal(isDeleted(merged.accounts[uuid]), false);
+  assert.equal(isDeleted(stripRefresh(merged).accounts[uuid]), true);
+});
+
 test("isDeleted: a deletion stamp equal to a field stamp does not delete (strictly greater, SPEC 5)", () => {
   const s = { at: 10, n: 0, by: "x" };
   assert.equal(isDeleted({ deleted: s, fields: { username: { value: "u", ...s } }, bans: {} }), false);

@@ -286,9 +286,11 @@ export class RepoView {
     return this.tipRec()?.m;
   }
 
-  /** @returns The member keys (base64) with a pending leave request. */
-  pendingLeaves(): string[] {
-    return [...this.st.leaves.keys()].sort();
+  /** @returns The pending leave requests (SPEC 8.4), one per member: its key (base64) and `at`, sorted by key. */
+  pendingLeaves(): Array<{ memberKey: string; at: number }> {
+    return [...this.st.leaves]
+      .map(([k, l]) => ({ memberKey: k, at: l.at }))
+      .sort((x, y) => (x.memberKey < y.memberKey ? -1 : 1));
   }
 
   // ─── Store ──────────────────────────────────────────────────────────────────

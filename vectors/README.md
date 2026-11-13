@@ -70,7 +70,8 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
       steps: [ { op, via, label, item, expect } ],
       finalHeads: [commitId],         base64, sorted
       finalHeld: [commitId],          base64, sorted
-      finalTip: manifestHash | null   base64 manifestHash of the winning chain's tip
+      finalTip: manifestHash | null,  base64 manifestHash of the winning chain's tip
+      finalLeaves?: [{ memberKey, at }]  optional: the pending leave requests, sorted by memberKey
   } ] }
   ```
 
