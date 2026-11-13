@@ -55,6 +55,9 @@ pub struct Limits {
     pub max_members: usize,
     /// Most repositories one owner key may create on this host; more is `429 quota_exceeded`.
     pub max_repos_per_owner: usize,
+    /// Most repositories this host holds in all, by `createRepo` and by replication; more is
+    /// `429 quota_exceeded`.
+    pub max_repos: usize,
     /// Most outstanding challenges in all; at the cap the oldest is evicted, so one caller cannot
     /// lock everyone out.
     pub max_challenges: usize,
@@ -78,6 +81,7 @@ impl Default for Limits {
             max_body_bytes: 4 * 1024 * 1024,
             max_members: 500,
             max_repos_per_owner: 1000,
+            max_repos: 10_000,
             max_challenges: 10_000,
             max_challenges_per_key: 16,
             max_tokens: 100_000,

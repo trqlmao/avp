@@ -739,19 +739,20 @@ fn offer_revalidates() {
     forged.author_signature[0] ^= 1;
     let stranger = Device::new();
     let outsider = repo.commit(&stranger.sign, vec![repo.root.commit_id], b"outsider");
+    // A valid commit travels in the same offer, so its arrival at B shows the offer was received.
+    let marker = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"marker");
     a.state.lock().unwrap().store.outbox.push(Outgoing {
         repo_id: id.clone(),
         manifests: Vec::new(),
-        commits: vec![forged.clone(), outsider.clone()],
+        commits: vec![forged.clone(), outsider.clone(), marker.clone()],
         leaves: Vec::new(),
     });
 
-    // B validates each item with the engine and rejects both (SPEC 9: whatever the transport).
-    eventually("B rejected the outsider's commit", || {
-        b.view(&id, |v| v.status(&outsider.commit_id)) == Some(Some(CommitStatus::Rejected))
-    });
+    // B validates each item with the engine (SPEC 9: whatever the transport): it accepts the valid
+    // commit and rejects the other two, storing neither of them.
+    eventually("B received the offer", || b.heads(&id) == vec![marker.commit_id]);
     assert_eq!(b.view(&id, |v| v.status(&forged.commit_id)), Some(None));
-    assert_eq!(b.heads(&id), vec![repo.root.commit_id]);
+    assert_eq!(b.view(&id, |v| v.status(&outsider.commit_id)), Some(None));
 
     // The per-item codes are the ones the engine gives a client (SPEC 9.1).
     let orphan = repo.commit(&repo.owner.sign, vec![random_bytes::<32>()], b"orphan");
@@ -771,7 +772,7 @@ fn offer_revalidates() {
             pair(&orphan.commit_id, "missing_parents"),
         ])
     );
-    assert_eq!(b.heads(&id), vec![repo.root.commit_id]);
+    assert_eq!(b.heads(&id), vec![marker.commit_id]);
 }
 
 // ─── Host request authentication (SPEC 9.3) ─────────────────────────────────────────────
@@ -1748,4 +1749,101 @@ fn first_copy_with_a_gap_waits_for_the_catch_up() {
         r.json
     );
     assert!(!b.holds(&id));
+}
+
+/// Important 2a: a first copy is held to the per-owner and store-wide repository caps
+/// (`429 quota_exceeded`, nothing stored), like `createRepo`.
+#[test]
+fn first_copies_are_held_to_the_repository_quotas() {
+    let mut b = node_cfg(|st| {
+        st.limits.max_repos_per_owner = 1;
+        st.limits.max_repos = 2;
+    });
+    let p = FakePeer::new();
+    b.peer_with(&[p.entry()]);
+    let first_copy = |repo: &Repo| {
+        let id = repo.id();
+        b.host(&p.sign, &id, "offer", &offer(&id, &[&repo.genesis], &[&repo.root], &[]))
+    };
+    let count = || b.state.lock().unwrap().store.repos.len();
+    let r1 = genesis(&[p.key(), b.key()], p.key());
+    assert_eq!(first_copy(&r1).status, 200);
+    assert_eq!(count(), 1);
+
+    // Per owner: a second repository of the same owner key.
+    let mut r2 = genesis(&[p.key(), b.key()], p.key());
+    r2.owner = Device {
+        sign: r1.owner.sign.clone(),
+        x: x25519_random(),
+    };
+    let nonce = random_bytes::<16>();
+    let mut g = r1.genesis.state.clone();
+    g.genesis_nonce = nonce.to_vec();
+    g.repo_id = derive_repo_id(&r1.owner.key(), &nonce).unwrap();
+    r2.genesis = g.sign(&r1.owner.sign).unwrap();
+    r2.tip = r2.genesis.clone();
+    r2.root = commit_on(&r2.genesis, &r2.data_key, &r1.owner.sign, Vec::new(), EMPTY_PAYLOAD);
+    assert_error(&first_copy(&r2), 429, "quota_exceeded");
+    assert!(!b.holds(&r2.id()));
+    assert_eq!(count(), 1);
+
+    // Store-wide: a second owner fits, a third does not.
+    let r3 = genesis(&[p.key(), b.key()], p.key());
+    assert_eq!(first_copy(&r3).status, 200);
+    assert_eq!(count(), 2);
+    let r4 = genesis(&[p.key(), b.key()], p.key());
+    assert_error(&first_copy(&r4), 429, "quota_exceeded");
+    assert!(!b.holds(&r4.id()));
+    assert_eq!(count(), 2);
+    // createRepo is held to the store-wide cap too.
+    let r5 = genesis(&[b.key()], b.key());
+    let token = b.login(&r5.owner.sign);
+    let r = b.post(
+        "/v1/repos",
+        Some(&token),
+        &json!({ "manifest": to_json(&r5.tip), "commit": to_json(&r5.root) }),
+    );
+    assert_error(&r, 429, "quota_exceeded");
+    assert_eq!(count(), 2);
+}
+
+/// Important 2b: a listed peer cannot grow a held repository with items the engine rejects:
+/// strangers' validly signed commits (`forbidden`) and commits with unknown parents
+/// (`missing_parents`) leave the stored view unchanged.
+#[test]
+fn rejected_offers_do_not_grow_a_held_repository() {
+    let (b, p) = node_with_fake();
+    let repo = genesis(&[b.key(), p.key()], b.key());
+    create(&b, &repo);
+    let id = repo.id();
+    let before = b.view(&id, |v| format!("{v:?}")).unwrap();
+
+    let strangers: Vec<Commit> = (0..64)
+        .map(|i| {
+            let k = new_key();
+            repo.commit(&k, vec![repo.root.commit_id], format!("s{i}").as_bytes())
+        })
+        .collect();
+    let orphans: Vec<Commit> = (0..64)
+        .map(|i| repo.commit(&repo.owner.sign, vec![random_bytes::<32>()], format!("o{i}").as_bytes()))
+        .collect();
+    let all: Vec<&Commit> = strangers.iter().chain(orphans.iter()).collect();
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[], &all, &[]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json["accepted"], json!([]));
+    let mut expected: HashSet<(String, String)> = strangers.iter().map(|c| pair(&c.commit_id, "forbidden")).collect();
+    expected.extend(orphans.iter().map(|c| pair(&c.commit_id, "missing_parents")));
+    assert_eq!(rejected(&r), expected);
+    assert_eq!(b.view(&id, |v| format!("{v:?}")).unwrap(), before);
+
+    // A valid commit offered with them is kept, and only it.
+    let good = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"good");
+    let mut with_good = all.clone();
+    with_good.push(&good);
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[], &with_good, &[]));
+    assert_eq!(id_set(&r.json["accepted"]), b64_set(&[good.commit_id]));
+    assert_eq!(b.heads(&id), vec![good.commit_id]);
+    for c in &all {
+        assert_eq!(b.view(&id, |v| v.status(&c.commit_id)), Some(None));
+    }
 }

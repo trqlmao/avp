@@ -540,6 +540,9 @@ fn create_repo(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
     if st.store.repos_owned_by(&caller) >= st.limits.max_repos_per_owner {
         return Err(ApiError::quota("repository quota for this owner key exceeded"));
     }
+    if st.store.repos.len() >= st.limits.max_repos {
+        return Err(ApiError::quota("repository quota of this host exceeded"));
+    }
     st.store.repos.insert(tip.state.repo_id.clone(), view);
     replication::queue_offer(
         st,
@@ -855,6 +858,7 @@ fn host_offer(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> An
         Admitted::Hosted | Admitted::Incomplete => to_json(&applied.reply()),
         Admitted::NotHosted => Err(ApiError::reject(RejectCode::NotHosted)),
         Admitted::Forbidden => Err(ApiError::forbidden("the sending host is not in the repository's hosts")),
+        Admitted::Quota => Err(ApiError::quota("repository quota exceeded")),
     }
 }
 

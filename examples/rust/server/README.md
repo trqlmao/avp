@@ -109,9 +109,16 @@ Checks, in order:
      keeps the validated states (with their rotation commits, not the other items) and is then not
      hosted.
    - a first copy whose tip does not list the sender: `403 forbidden`, nothing stored.
+   - a first copy over the repository caps (per owner key, or for the whole host): `429
+     quota_exceeded`, nothing stored.
    - otherwise `200`, with each manifest hash and commit id in `accepted` or in `rejected` with the
      code a client would get (`missing_parents` included). Both items of a rejected pair carry the
      same code. A leave request that fails validation is dropped.
+
+   A peer cannot grow a repository with items the engine refuses: a commit that ends neither
+   accepted, held, nor pending (rejected, or still missing a parent) is not stored, nor is its
+   header. The host re-applies the states, the leave requests, and only the kept commits to a fresh
+   copy before it stores the result; held commits are stored as SPEC 6.5 requires.
 
    An offer with missing items, or for a repository the host does not hold yet, also makes the host
    catch up from the sender. A first copy whose received tip is not known yet (no genesis, or a gap
@@ -198,7 +205,8 @@ Every non-2xx body is `{ error, code?, detail? }` (SPEC 10.4).
 | Request body | 4 MiB | `413 too_large` |
 | Heads per repository (client writes) | 16 | `409 too_many_heads` |
 | Members in a manifest state | 500 | `429 quota_exceeded` |
-| Repositories per owner key | 1000 | `429 quota_exceeded` |
+| Repositories per owner key (`createRepo` and first copies by replication) | 1000 | `429 quota_exceeded` |
+| Repositories on this host (`createRepo` and first copies by replication) | 10000 | `429 quota_exceeded` |
 | Outstanding challenges per key | 16 | `429 quota_exceeded` with `Retry-After` |
 | Live tokens per key | 32 | `429 quota_exceeded` |
 | Recorded unexpired acceptances per member key | 64 | `429 quota_exceeded` |

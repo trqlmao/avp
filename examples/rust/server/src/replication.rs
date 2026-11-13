@@ -33,7 +33,7 @@ use avp::commit::Commit;
 use avp::crypto::{ed25519_verify, sha256};
 use avp::encoding::{Ce, b64_array, b64_decode_array, b64_encode, b64_ids};
 use avp::manifest::SignedManifest;
-use avp::rules::{RepoView, Via};
+use avp::rules::{CommitStatus, RepoView, Via};
 use avp::tokens::LeaveRequest;
 use avp::{AvpError, RejectCode};
 use ed25519_dalek::{Signer, SigningKey};
@@ -675,11 +675,44 @@ fn parents_first(commits: Vec<Commit>) -> Vec<Commit> {
         .collect()
 }
 
-/// Applies `items` to a copy of `base` and returns it with the per-item outcome.
-pub(crate) fn apply_copy(base: &RepoView, repo_id: &str, items: Items, states_only: bool) -> (RepoView, Applied) {
+/// Applies `items` to a copy of `base` and returns it with the per-item outcome, keeping only what
+/// the engine accepted or must store.
+///
+/// A listed peer must not be able to grow a repository with items the engine refuses: a commit the
+/// engine rejects is stored with that status, and the header of a commit that misses a parent is
+/// kept for ancestry (SPEC 7.3). So when an offered commit ends neither accepted, held, nor pending,
+/// the copy is rebuilt from `base` with the states, the leave requests, and only the commits that
+/// ended accepted, held, or pending. Held commits stay stored as SPEC 6.5 requires. Applying the
+/// same states and the commits that were kept gives them the same status again: a kept commit
+/// depends only on states and on kept parents. No engine change is involved.
+pub(crate) fn apply_kept(base: &RepoView, repo_id: &str, items: Items, states_only: bool) -> (RepoView, Applied) {
+    let manifests = items.manifests.clone();
+    let commits = items.commits.clone();
+    let leaves = items.leaves.clone();
     let mut trial = base.clone();
     let applied = apply_items(&mut trial, repo_id, items, states_only);
-    (trial, applied)
+    let kept = |c: &Commit| {
+        matches!(
+            trial.status(&c.commit_id),
+            Some(CommitStatus::Accepted | CommitStatus::Held | CommitStatus::Pending)
+        )
+    };
+    if commits.iter().all(kept) {
+        return (trial, applied);
+    }
+    let commits: Vec<Commit> = commits.into_iter().filter(|c| kept(c)).collect();
+    let mut clean = base.clone();
+    let _ = apply_items(
+        &mut clean,
+        repo_id,
+        Items {
+            manifests,
+            commits,
+            leaves,
+        },
+        states_only,
+    );
+    (clean, applied)
 }
 
 /// What happened to a trial view after the received-tip check (SPEC 9.2).
@@ -692,13 +725,15 @@ pub(crate) enum Admitted {
     NotHosted,
     /// A first copy whose received tip does not list the sender: nothing stored.
     Forbidden,
+    /// A first copy over the per-owner or store-wide repository cap: nothing stored.
+    Quota,
     /// A first copy whose received tip is not known yet (no tip, or a gap in the chain): nothing
     /// stored; the catch-up decides.
     Incomplete,
 }
 
 /// The decision on a validated first copy (SPEC 9.2): stored only if its received tip lists this
-/// host and the sender; otherwise nothing is stored.
+/// host and the sender and the repository caps allow it; otherwise nothing is stored.
 pub(crate) fn admit_first_copy(st: &mut State, repo_id: &str, sender: &Id, trial: RepoView) -> Admitted {
     let Some(tip) = trial.tip() else {
         return Admitted::Incomplete;
@@ -708,6 +743,10 @@ pub(crate) fn admit_first_copy(st: &mut State, repo_id: &str, sender: &Id, trial
     }
     if !tip.state.has_host(sender) {
         return Admitted::Forbidden;
+    }
+    let owner = tip.state.owner_key;
+    if st.store.repos.len() >= st.limits.max_repos || st.store.repos_owned_by(&owner) >= st.limits.max_repos_per_owner {
+        return Admitted::Quota;
     }
     st.store.repos.insert(repo_id.to_string(), trial);
     Admitted::Hosted
@@ -719,11 +758,11 @@ pub(crate) fn admit_first_copy(st: &mut State, repo_id: &str, sender: &Id, trial
 /// A first copy is all or nothing ([`admit_first_copy`]); one with a gap in its chain is
 /// [`Admitted::Incomplete`] and waits for the catch-up. A held repository always gets the result;
 /// when the received tip does not list this host, only the validated states with their rotation
-/// commits are kept, not the other items.
+/// commits are kept, not the other items. Rejected items are never kept ([`apply_kept`]).
 pub(crate) fn receive(st: &mut State, repo_id: &str, sender: &Id, items: Items) -> (Admitted, Applied) {
     let Some(base) = st.store.repos.get(repo_id).cloned() else {
         let fresh = RepoView::new(st.host_key(), st.limits.head_bound);
-        let (trial, applied) = apply_copy(&fresh, repo_id, items, false);
+        let (trial, applied) = apply_kept(&fresh, repo_id, items, false);
         if applied.has_gap() {
             return (Admitted::Incomplete, applied);
         }
@@ -734,14 +773,14 @@ pub(crate) fn receive(st: &mut State, repo_id: &str, sender: &Id, items: Items) 
         commits: items.commits.clone(),
         leaves: Vec::new(),
     };
-    let (trial, applied) = apply_copy(&base, repo_id, items, false);
+    let (trial, applied) = apply_kept(&base, repo_id, items, false);
     if trial.tip_lists_host() {
         st.store.repos.insert(repo_id.to_string(), trial);
         return (Admitted::Hosted, applied);
     }
     // Held, and the received tip drops this host: keep the validated states (each epoch-raising
     // one with its rotation commit), not the other items (SPEC 8.6, 9.2).
-    let (kept, _) = apply_copy(&base, repo_id, states, true);
+    let (kept, _) = apply_kept(&base, repo_id, states, true);
     st.store.repos.insert(repo_id.to_string(), kept);
     (Admitted::NotHosted, applied)
 }
@@ -1075,7 +1114,7 @@ impl Worker {
                 let base = first_copy
                     .take()
                     .unwrap_or_else(|| RepoView::new(st.host_key(), st.limits.head_bound));
-                let (trial, applied) = apply_copy(&base, repo_id, items, false);
+                let (trial, applied) = apply_kept(&base, repo_id, items, false);
                 first_copy = Some(trial);
                 applied
             };
