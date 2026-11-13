@@ -45,6 +45,23 @@ who may store and sync; only keys held by people decide who can read.
   RFC 2119.
 - **Raw keys.** "Ed25519 public key" and "X25519 public key" mean the raw 32-byte encodings (RFC 8032,
   RFC 7748). An Ed25519 signature is the raw 64-byte encoding.
+- **Strict Ed25519 verification.** Every Ed25519 signature AVP verifies (owner signatures on manifest
+  states, author signatures on commits, host acceptances, leave requests, link and host requests, and the
+  challenge signature of §3.3) MUST be verified strictly, so that every conformant implementation accepts
+  exactly the same signatures. A verifier MUST reject the signature, before any other check, if the public
+  key `A` or the signature's first half `R` (the encoding of a point) is the encoding of a point of small
+  order, if `A` or `R` is a non-canonical encoding (its 255-bit `y` field, the 32 bytes read little-endian
+  with the top bit cleared, is at least `p = 2^255 - 19`), or if the signature's second half `S`, read
+  little-endian, is at least the group order `L = 2^252 + 27742317777372353535851937790883648493`. A
+  32-byte encoding is of small order if, with the top bit of its last byte cleared, it equals one of the
+  seven encodings `0x00..00` (order 4), `0x01 00..00` (the identity), the two order-8 encodings
+  `26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05` and
+  `c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a`, `p - 1` (order 2), `p`, and `p + 1`
+  (the last two are the non-canonical encodings of `0` and `1`), written as little-endian hex. A signature
+  that passes these checks MUST then verify as RFC 8032 §5.1.7 specifies. The rule follows the strict
+  verification of libsodium (`crypto_sign_verify_detached`). Without it, a cofactorless verifier accepts
+  forgeries under a small-order key that has no private key, and implementations disagree on which
+  commits and states are valid. `negative.json` pins these rejections (§14).
 - **Wire encoding of binary.** In JSON (the HTTP/JSON profile and the token payloads of §11) every binary
   value is **base64** (RFC 4648 §4, standard alphabet, with padding) unless stated otherwise. In the
   canonical encoding (§4) every binary value is the **raw decoded bytes**, never its base64 text.
@@ -1172,8 +1189,10 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 - **Negative cases**: `negative.json`, valid constructions with one mutation each that a conformant
   implementation MUST reject, including a manifest with a bad signature or a wrong previous hash, a commit
   whose id does not recompute or whose author signed another id, a payload whose AAD v2 has a swapped parent,
-  a link grant unwrapped with the data key wrap label, and an acceptance verified with another host key.
-  Reproducing the positive vectors is necessary but not sufficient.
+  a link grant unwrapped with the data key wrap label, an acceptance verified with another host key, and
+  the Ed25519 signatures that strict verification (§2) rejects: a small-order public key or `R`, a
+  non-canonical public key, and a non-canonical `S`. Reproducing the positive vectors is necessary but not
+  sufficient.
 
 Every committed vector is reproducible from documented seeds by [`vectors/generate.ts`](vectors/generate.ts)
 (`--check` re-derives and asserts them; it also owns `negative.json`). See
