@@ -58,8 +58,12 @@ who may store and sync; only keys held by people decide who can read.
   `26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05` and
   `c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a`, `p - 1` (order 2), `p`, and `p + 1`
   (the last two are the non-canonical encodings of `0` and `1`), written as little-endian hex. A signature
-  that passes these checks MUST then verify as RFC 8032 §5.1.7 specifies. The rule follows the strict
-  verification of libsodium (`crypto_sign_verify_detached`). Without it, a cofactorless verifier accepts
+  that passes these checks MUST then verify by the **cofactorless** equation of RFC 8032 §5.1.7: with
+  `k = SHA-512(R || A || M)` read little-endian and reduced modulo `L`, and `B` the base point, the verifier
+  computes the point `[S]B - [k]A` and accepts only if its 32-byte encoding equals `R` byte for byte, that
+  is, `[S]B = R + [k]A` with `R` compared by its encoding. A verifier MUST NOT use the cofactored check
+  `[8][S]B = [8]R + [8][k]A` that RFC 8032 also permits, because the two checks accept different
+  signatures. The rule follows the strict verification of libsodium (`crypto_sign_verify_detached`). Without it, a cofactorless verifier accepts
   forgeries under a small-order key that has no private key, and implementations disagree on which
   commits and states are valid. `negative.json` pins these rejections (§14).
 - **Wire encoding of binary.** In JSON (the HTTP/JSON profile and the token payloads of §11) every binary
