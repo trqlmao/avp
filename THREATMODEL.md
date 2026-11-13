@@ -207,7 +207,9 @@ keeps divergence to the offline case.
 *Defended:* it receives ciphertext, manifest states, commits, and leave requests by replication. That is
 equivalent to A3 for that host and adds no read capability: every host validates every replicated item by
 the same rules as a client write (SPEC §9), so a compromised peer cannot inject a forged state or commit,
-and a host not listed in `hosts` is refused by the others (SPEC §9.2).
+and a host not listed in `hosts` is refused by the others (SPEC §9.2). The reference hosts also send their
+host requests for a repository only to its listed hosts (SPEC §9.3), so a peer that is not listed does not
+learn which repository ids they hold.
 
 *Residual:* listing more hosts exposes the same ciphertext and metadata to more operators, and each listed
 host can withhold (A4) from its own members. A listed host can relay valid commits it receives from members

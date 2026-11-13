@@ -922,6 +922,10 @@ rules of §9.2 then apply.
 
 **Cadence.** A reference host replicates on startup, after every accepted write (an `offer` to each peer
 whose key is in the repository's `hosts`), and every 5 seconds (`heads`, then `fetch` for what it lacks).
+It sends `heads`, `fetch`, and `offer` for a repository only to peers whose key is in that repository's
+`hosts` in its winning tip, or, for a first copy it does not yet hold, to the peer that offered it (§9.2).
+A peer that is not listed therefore never learns which repository ids the host holds; a newly listed host
+gets its first copy from a listed host that offers it.
 
 **Test control.** When `AVP_TEST_CONTROL=1`, a reference host serves `POST /v1/test/replication
 { paused: bool }`. While paused it sends no host traffic and answers every inbound host route with `503`. A
