@@ -1867,6 +1867,26 @@ function buildAcceptance(ctx: Ctx): any {
     M2a,
   );
 
+  // ── fix round 3: a pending cutoff decided by a header learned with a losing rotation commit ──
+  {
+    // W3's frontier names rotL, which cites L3; so L3 is fixed first and W3's wraps are varied
+    // (label "<member>/g<i>") until W3 hashes below L3.
+    const b1 = cm("b1", bob, [r], M2ab);
+    const L3 = state(3, M2ab, 1, [[owner, hostA], [bob, hostB]], { removals: [removal(alice, 3, [r])] });
+    const rotL = cm("rotL-child-of-b1", owner, [b1], L3);
+    let W3 = epoch1(M2ab, [rotL]);
+    for (let i = 0; Buffer.compare(manifestHash(W3), manifestHash(L3)) >= 0; i++) W3 = epoch1(M2ab, [rotL], { tweak: `g${i}` });
+    const rotW = cm("rotW", owner, [r], W3);
+    add(
+      "pending-commit-resolved-by-losing-rotation-header",
+      "SPEC 7.3, 6.5, 8.3: bob's b1 (citing seq 2) is accepted. W3 removes bob at epoch 1 with frontier {rotL}; rotL is unknown here, so b1's cutoff cannot be decided and b1 MUST NOT stay accepted. L3 (removes alice, epoch 1, higher hash) then arrives with its rotation commit rotL, whose parent is b1: L3 loses the tie rule (manifest_conflict) and rotL is kept held with it (SPEC 8.3). Ancestry for the cutoff follows every verified header whether or not accepted (SPEC 7.3), so b1 is an ancestor of frontier commit rotL; covered, and citing the winning seq 2 where bob is a member at epoch 0, b1 is accepted again.",
+      [genesis, M("M2", M2ab, "ok"), C(b1, "ok"), M("W3", W3, "ok", "offer", rotW), M("L3", L3, "manifest_conflict", "offer", rotL)],
+      [rotW, b1],
+      [rotL],
+      W3,
+    );
+  }
+
   return {
     description:
       "Host acceptance scenarios (SPEC 6, 7, 8.3, 8.4, 9.1). Each scenario is one host's view of one repository: create a rules engine for `hostKey` (a.vault.example) " +
