@@ -105,12 +105,19 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
 
   `not_hosted` is an engine verdict only for `via: "push"`: a client write of a state whose `hosts` does
   not list this host (SPEC §6.1 rule 6). For `via: "offer"` it is host level, like the two answers above:
-  the host checks that the tip of the chain it is receiving lists it, and otherwise rejects the offer with
-  `403 not_hosted` and stores nothing, before it applies any item of the offer or catch-up to its engine
-  (SPEC §9.2). The engine therefore does not reject an offered state because it does not list this host,
-  so a newly listed host can take the earlier states of the chain (SPEC §8.1); the offered steps of a
-  scenario are items that passed that check. The engine reports whether its current tip lists this host,
-  so that the host can refuse to serve a repository whose tip does not (SPEC §8.6, §10.1).
+  the host validates the offer (and any catch-up) on a trial copy, checks that the validated received tip
+  (the tip of the winning chain it would hold afterwards, SPEC §9.2) lists it, and otherwise rejects the
+  offer with `403 not_hosted` and stores nothing. The engine therefore does not reject an offered state
+  because it does not list this host, so a newly listed host can take the earlier states of the chain
+  (SPEC §8.1); the offered steps of a scenario are items whose received tip passed that check. The engine
+  reports whether its current tip lists this host, which the host uses for that check and to refuse to
+  serve a repository whose tip does not list it (SPEC §8.6, §10.1).
+
+  Whether a repository is **not hosted** (SPEC §8.6) is also host state, not an engine verdict, and no
+  scenario pins it: a host that holds a repository and is offered or published a validated state that
+  would become its winning tip and does not list it answers `403 not_hosted`, does not adopt the state,
+  and stops serving the repository until it adopts by replication a validated winning tip that lists it
+  and supersedes that state. The engine keeps no such marker.
 
 ## Cryptographic primitive vectors (RFC-anchored)
 

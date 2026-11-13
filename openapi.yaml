@@ -342,11 +342,13 @@ paths:
         Host-signed (SPEC §9.3). An offer that carries an epoch-raising state MUST carry its rotation
         commit in the same call. The receiver applies the items in dependency order and reports each
         manifest hash and commit id as accepted or rejected with the error code it would have returned
-        to a client; both items of a rejected pair are rejected with the same code. An offer whose tip
-        does not list the receiver is `403 not_hosted`, checked on the tip of the chain being received
-        before anything is stored; an earlier state of that chain is not rejected for not listing the
-        receiver. An offer from a host not in the repository's
-        `hosts` is `403 forbidden`.
+        to a client; both items of a rejected pair are rejected with the same code. An offer whose
+        received tip (the validated tip of the winning chain the receiver would hold after the offer and
+        any catch-up, SPEC §9.2) does not list the receiver is `403 not_hosted` and stores nothing; an
+        earlier state of that chain is not rejected for not listing the receiver. A receiver that holds
+        the repository then treats it as not hosted (SPEC §8.6) and answers `403 not_hosted` to every
+        offer until a validated received tip lists it and supersedes the dropping state. An offer from a host not in the
+        repository's `hosts` is `403 forbidden`.
       security: []
       parameters:
         - { $ref: "#/components/parameters/RepoId" }
@@ -452,7 +454,8 @@ components:
       description: |
         Not a member, a commit after the removal cutoff, an epoch mismatch, a held commit, the caller is
         not the required key, or an operation disallowed by policy (`code: forbidden`, or `policy_denied`);
-        or this host is not in the manifest's `hosts` (`code: not_hosted`).
+        or this host is not in the manifest's `hosts` or treats the repository as not hosted (SPEC §8.6)
+        (`code: not_hosted`).
       content:
         application/json:
           schema: { $ref: "./schema/avp.schema.json#/$defs/Error" }

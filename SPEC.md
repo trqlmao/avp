@@ -490,10 +490,12 @@ checks and discards a state that fails.
 
    Otherwise `400 bad_request`.
 6. **Hosted.** A host MUST reject a state whose `hosts` does not contain its own host key, with
-   `403 not_hosted`. A host MUST NOT accept a repository whose signed manifest does not list it. For a
-   state received by replication, this rule applies to the tip of the chain being received (§9.2), not to
-   each state before that tip, so that a newly listed host can receive the earlier states of the chain,
-   which do not list it (§8.1).
+   `403 not_hosted`. A host MUST NOT accept a repository whose signed manifest does not list it. For
+   states received by replication, this rule applies to the received tip (§9.2), the validated tip of the
+   winning chain the receiver would hold after the offer, not to each state before it, so that a newly
+   listed host can receive the earlier states of the chain, which do not list it (§8.1). A host that holds
+   a repository and rejects by this rule a validated state that would become its winning tip treats the
+   repository as not hosted (§8.6).
 
 ### 6.2 Genesis
 
@@ -716,7 +718,7 @@ acceptance, and MUST reject the invite unless all of these hold:
 The owner's client MUST NOT add a host to `hosts` without a valid acceptance from that host. A host SHOULD
 record the acceptances it issues and SHOULD refuse (`403 forbidden`) to store, by replication, a repository
 it does not hold unless it issued an acceptance for that `repoId` to a member whose `homeHostKey` is its own
-key in the offered tip.
+key in the validated received tip (§9.2).
 
 **Initial host.** At creation, `createRepo` on the owner's home host acts as the owner's own `prepareJoin`
 plus genesis, so the same access control applies. The authenticated caller MUST equal the genesis
@@ -781,9 +783,17 @@ new value from the first state that carries it (§5.1).
 A change of `hosts` is a new state. Inviting a member whose home host is not yet listed adds it in the same
 state (§8.1), with a valid acceptance (§8.2). A host MAY be dropped from `hosts` only when no member has it as
 `homeHostKey` (§6.1). The owner client SHOULD publish a state that drops a host through a host that stays
-listed, because the dropped host rejects it with `403 not_hosted` (§6.1, §9.2). A host that is not listed in a
-repository's tip MUST stop serving that repository to clients (`403 not_hosted`) and to peers, and MAY delete
-its copy.
+listed, because the dropped host rejects it with `403 not_hosted` (§6.1, §9.2).
+
+A host that holds a repository and receives, by a client publish or by replication, an owner-signed state
+that passes §6 except rule 6, would become its winning tip (§6.5), and does not list it, answers
+`403 not_hosted` and does not adopt the state. From then on it MUST treat the repository as **not hosted**
+and MUST keep that state's `manifestSeq` and `manifestHash` with the repository. A host that is not listed in
+a repository's tip, or that treats the repository as not hosted, MUST stop serving that repository to
+clients (`403 not_hosted`, §10.1) and to peers, and MAY delete its copy. It treats the repository as hosted
+again only when it adopts by replication (§9.2) a validated winning tip that lists it and supersedes the
+kept state: a greater `manifestSeq`, or the same `manifestSeq` and a lower `manifestHash` (§6.5). Whether a
+repository is not hosted is host state, not a verdict of the rules of §6 and §7.
 
 ## 9. Replication between hosts
 
@@ -791,7 +801,8 @@ Hosts listed in a repository's signed `hosts` set replicate it with each other, 
 This section defines the messages and how a host validates and serves them. How hosts reach and
 authenticate each other comes from a **deployment profile** (for example mutual TLS, or signed calls over an
 existing node-to-node link). Whatever the transport, a host MUST validate every item it receives by the same
-rules as a client write; the transport only decides who may talk to it.
+rules as a client write, except that §6.1 rule 6 applies to the received tip (§9.2) rather than to each
+state; the transport only decides who may talk to it.
 
 ### 9.1 Messages
 
@@ -810,9 +821,9 @@ rules as a client write; the transport only decides who may talk to it.
   order: a commit after the state it cites and after its parents, each epoch-raising state it adopts onto its
   winning chain together with its rotation commit as one atomic pair (§8.3, the same rules as
   `publishManifest`), a losing epoch-raising state with its rotation commit kept held, and leave requests
-  last. States are validated by
-  §6 (including §6.5), commits by §7 without the head bound and without the caller check, and leave requests
-  by §8.4 without the caller check. It reports each manifest hash and commit id as accepted or rejected with
+  last. States are validated by §6 (including §6.5, with rule 6 applied to the received tip, §9.2), commits
+  by §7 without the head bound and without the caller check, and leave requests by §8.4 without the caller
+  check. It reports each manifest hash and commit id as accepted or rejected with
   the error code it would have returned to a client (`missing_parents` included); both items of a rejected
   pair are rejected with the same code. An epoch-raising state that the receiver would adopt but that is
   offered without its rotation commit is rejected with `400 bad_request`. A leave request that fails
@@ -823,11 +834,20 @@ rules as a client write; the transport only decides who may talk to it.
 - A host MUST NOT serve `heads` or `fetch` for a repository to a host whose host key is not in that
   repository's `hosts` (in the serving host's tip), and MUST reject an `offer` from such a host, with
   `403 forbidden`.
-- A host MUST NOT accept a repository whose signed manifest does not list it (§6.1): an `offer` whose tip
-  does not list the receiver is rejected with `403 not_hosted`. The receiver evaluates this on the tip of
-  the chain being received (from the offer, and from the catch-up below when the offer leaves items out)
-  before it stores anything from the offer or the catch-up; a rejected offer stores nothing. A state before
-  that tip is not rejected because it does not list the receiver (§6.1 rule 6).
+- A host MUST NOT accept a repository whose signed manifest does not list it (§6.1): an `offer` whose
+  received tip does not list the receiver is rejected with `403 not_hosted`. The **received tip** of an
+  offer is the tip of the winning chain the receiver would hold after validating the offer's items, with
+  the catch-up below when it needs one, by §6 (including §6.5) with rule 6 left out. Losing states do not
+  count, and for an offer that carries no states it is the receiver's current tip. The receiver MUST
+  validate first and then check the validated received tip, before it stores anything from the offer or
+  the catch-up. If that tip does not list the receiver, it stores nothing from the offer or the catch-up,
+  and if it holds the repository it treats the repository as not hosted (§8.6). A state before the
+  received tip is not rejected because it does not list the receiver (§6.1 rule 6). For a repository the
+  receiver does not hold, the first copy is all or nothing: it ends either holding a validated chain whose
+  tip lists it, or holding nothing.
+- While a host treats a repository as not hosted (§8.6), it accepts an `offer` for it only if the validated
+  received tip lists the receiver and supersedes the kept state (§8.6); it rejects any other offer with
+  `403 not_hosted` and stores nothing from it.
 - A host that receives an offer for a repository it does not hold, or one with missing items, gets the rest
   from the sender: `heads`; then `fetch` for the tip manifest hash, which returns the chain with the rotation
   commit of each epoch-raising state; then `fetch` for the head commits and, walking `parents` (and the
@@ -897,7 +917,8 @@ production host MUST NOT enable this route.
 | `prepareJoin` | Joiner asks its home host to carry a repository; returns an acceptance (§8.2) | caller is `memberKey` |
 
 Every repository operation except `prepareJoin` and `createRepo` answers `404 not_found` for a repository the
-host does not hold, and `403 not_hosted` for one whose tip does not list the host.
+host does not hold, and `403 not_hosted` for one whose tip does not list the host or that the host treats
+as not hosted (§8.6).
 
 **pull** `{ sinceManifestSeq, knownHeads: [id] }` → `{ manifests, heads, leaves }`: `manifests` is every
 state with `manifestSeq` greater than `sinceManifestSeq`, in ascending order; `heads` is every head commit
@@ -1133,8 +1154,8 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 - **Acceptance rules**: fixed manifest chains and commit graphs with the expected accept or reject code of
   each step and the final heads (`acceptance.json`, §6, §7, §8.4), covering at least: genesis `repoId`
   recomputation, a genesis that does not list the host (`not_hosted` on a client write, accepted by
-  replication as the start of a chain whose tip lists the host), a seq skip and a rollback
-  (`manifest_conflict`), a bad owner signature, a non-member and an epoch mismatch (`forbidden`), an unknown
+  replication as the start of a chain whose validated received tip lists the host, §9.2), a seq skip and a
+  rollback (`manifest_conflict`), a bad owner signature, a non-member and an epoch mismatch (`forbidden`), an unknown
   parent (`missing_parents`), concurrent commits giving two heads, a merge collapsing heads, a merge accepted
   at the head bound, the push past the bound (`too_many_heads`), a removed member within the frontier, after
   the cutoff, and backdated as a child of a frontier commit (`forbidden`), diverged owner states (lower hash

@@ -187,6 +187,14 @@ function contentOk(s: ManifestState, prev: ManifestState | undefined): boolean {
  *
  * Construct it with the host's own Ed25519 key; apply items in arrival order; read `heads()`,
  * `held()`, and `tip()`.
+ *
+ * Host implementers: on the `"offer"` path this engine applies no per-state hosted check, so it will
+ * adopt a whole repository whose states never list this host. The host MUST therefore apply an offer
+ * (with its catch-up) to a trial copy of the view, check the validated resulting tip with
+ * `tipListsHost()` (the received tip of SPEC 9.2), and then either commit the trial copy atomically or
+ * discard it and answer `403 not_hosted`; a first copy is all or nothing. The not-hosted marker of
+ * SPEC 8.6 (set when a validated state that would become the winning tip drops this host, on publish
+ * or on offer) is host state; this engine does not keep it.
  */
 export class RepoView {
   private readonly hostKey: Buffer;

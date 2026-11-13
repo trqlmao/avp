@@ -270,6 +270,15 @@ fn content_ok(s: &ManifestState, prev: Option<&ManifestState>) -> bool {
 /// atomic: an item that is rejected changes nothing, except that a state that loses the tie rule
 /// but verifies is retained as a verified losing state (SPEC 6.5) and a commit header that verifies
 /// stays known for ancestry (SPEC 7.3).
+///
+/// Host implementers: on the [`Via::Offer`] path this engine applies no per-state hosted check, so
+/// it will adopt a whole repository whose states never list this host. The host must therefore
+/// apply an offer (with its catch-up) to a trial copy of the view (it is [`Clone`]), check the
+/// validated resulting tip with [`RepoView::tip_lists_host`] (the received tip of SPEC 9.2), and
+/// then either keep the trial copy atomically or discard it and answer `403 not_hosted`; a first
+/// copy is all or nothing. The not-hosted marker of SPEC 8.6 (set when a validated state that
+/// would become the winning tip drops this host, on publish or on offer) is host state; this
+/// engine does not keep it.
 #[derive(Debug, Clone)]
 pub struct RepoView {
     host_key: Id,
