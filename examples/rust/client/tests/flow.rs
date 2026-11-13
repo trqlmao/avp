@@ -18,9 +18,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use avp::commit::{Commit, CommitHeader};
-use avp::crypto::{WRAP_INFO, random_bytes, unwrap};
+use avp::crypto::{WRAP_INFO, random_bytes, unwrap, wrap};
 use avp::encoding::{b64_encode, b64url_encode};
-use avp::manifest::{HostRef, ManifestState, Removal, SignedManifest, derive_repo_id};
+use avp::manifest::{HostRef, ManifestState, MemberEntry, Removal, SignedManifest, derive_repo_id};
 use avp::owner::mnemonic_to_seed;
 use avp::payload::{PayloadV2, Stamp};
 use avp::rules::RepoView;
@@ -92,6 +92,23 @@ impl Node {
         st.store.repos.get(repo).map(f)
     }
 
+    fn tip_hash(&self, repo: &str) -> Option<Id> {
+        self.view(repo, |v| v.tip().map(|t| t.hash().unwrap())).flatten()
+    }
+
+    /// Pauses or resumes all host-to-host traffic through the test control (SPEC 9.3).
+    fn pause(&self, paused: bool) {
+        self.state.lock().unwrap().replication.test_control = true;
+        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let body = json!({ "paused": paused }).to_string();
+        let r = agent
+            .post(&format!("{}/v1/test/replication", self.url()))
+            .content_type("application/json")
+            .send(body.as_bytes())
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200, "test control");
+    }
+
     fn tip_seq(&self, repo: &str) -> i64 {
         self.view(repo, |v| v.tip().map(|t| t.state.manifest_seq))
             .flatten()
@@ -113,6 +130,15 @@ impl Node {
 
 type Tamper = Box<dyn Fn(&str, &Value, &mut Value) + Send + Sync>;
 
+/// Answers the next `budget` requests whose path ends with `suffix` with a SPEC 10.4 error, without
+/// forwarding them; later ones are forwarded again.
+struct Deny {
+    suffix: &'static str,
+    status: u16,
+    code: &'static str,
+    budget: usize,
+}
+
 struct Logged {
     path: String,
     body: Vec<u8>,
@@ -126,6 +152,7 @@ struct Proxy {
     thread: Option<JoinHandle<()>>,
     log: Arc<Mutex<Vec<Logged>>>,
     tamper: Arc<Mutex<Option<Tamper>>>,
+    deny: Arc<Mutex<Option<Deny>>>,
 }
 
 impl Proxy {
@@ -136,7 +163,13 @@ impl Proxy {
         let stop = Arc::new(AtomicBool::new(false));
         let log = Arc::new(Mutex::new(Vec::new()));
         let tamper: Arc<Mutex<Option<Tamper>>> = Arc::new(Mutex::new(None));
-        let (s, l, t) = (Arc::clone(&stop), Arc::clone(&log), Arc::clone(&tamper));
+        let deny: Arc<Mutex<Option<Deny>>> = Arc::new(Mutex::new(None));
+        let (s, l, t, d) = (
+            Arc::clone(&stop),
+            Arc::clone(&log),
+            Arc::clone(&tamper),
+            Arc::clone(&deny),
+        );
         let thread = thread::spawn(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
             while !s.load(Ordering::SeqCst) {
@@ -155,6 +188,21 @@ impl Proxy {
                     path: path.clone(),
                     body: body.clone(),
                 });
+                let denied = match d.lock().unwrap().as_mut() {
+                    Some(rule) if rule.budget > 0 && path.ends_with(rule.suffix) => {
+                        rule.budget -= 1;
+                        Some((
+                            rule.status,
+                            json!({ "error": "denied by the test proxy", "code": rule.code }),
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((status, err)) = denied {
+                    let bytes = serde_json::to_vec(&err).unwrap();
+                    let _ = req.respond(tiny_http::Response::from_data(bytes).with_status_code(status));
+                    continue;
+                }
                 let url = format!("{upstream}{path}");
                 let mut resp = if *req.method() == tiny_http::Method::Get {
                     agent.get(&url).call().unwrap()
@@ -184,6 +232,7 @@ impl Proxy {
             thread: Some(thread),
             log,
             tamper,
+            deny,
         }
     }
 
@@ -198,6 +247,31 @@ impl Proxy {
                 f(req, ans);
             }
         }));
+    }
+
+    /// Answers the next `budget` requests to a path ending with `suffix` with `status` and `code`.
+    fn deny(&self, suffix: &'static str, status: u16, code: &'static str, budget: usize) {
+        *self.deny.lock().unwrap() = Some(Deny {
+            suffix,
+            status,
+            code,
+            budget,
+        });
+    }
+
+    /// The requests since `mark` whose path ends with `suffix`.
+    fn count_since(&self, mark: usize, suffix: &str) -> usize {
+        self.paths()[mark..].iter().filter(|p| p.ends_with(suffix)).count()
+    }
+
+    /// The `pull` requests since `mark` that asked for the whole chain (`sinceManifestSeq = 0`).
+    fn full_pulls_since(&self, mark: usize) -> usize {
+        let log = self.log.lock().unwrap();
+        log[mark..]
+            .iter()
+            .filter(|l| l.path.ends_with("/pull"))
+            .filter(|l| serde_json::from_slice::<Value>(&l.body).unwrap()["sinceManifestSeq"] == json!(0))
+            .count()
     }
 
     fn honest(&self) {
@@ -1646,4 +1720,205 @@ fn worked_flow_two_peered_hosts() {
     flow::run(&a.url(), Some(&b.url()), &mut out).unwrap();
     let repo_on_b: HashSet<String> = b.state.lock().unwrap().store.repos.keys().cloned().collect();
     assert_eq!(repo_on_b.len(), 1, "bob's home host B carries the repository");
+}
+
+// ─── Stale pin on a same-seq state that lost the tie rule (SPEC 6.3, 6.4, 6.5) ───────────
+
+/// Two peered hosts that converged on Y, a seq 4 that beat the seq 4 X that owner device 1 and the
+/// member bob are pinned on. Y removes carol, so it raises the epoch to 1.
+struct Diverged {
+    proxy: Proxy,
+    a: Node,
+    b: Node,
+    repo: String,
+    dev1: Vault,
+    bob: Vault,
+    x: Id,
+    y: Id,
+    y_key: [u8; 32],
+}
+
+fn diverged_on_y() -> Diverged {
+    let (a, b) = peered_pair();
+    // Owner device 1 and bob sync with host A through a proxy that counts their requests.
+    let proxy = Proxy::new(&a);
+    let (id, mut dev1) = owner_vault(&proxy.url());
+    let repo = dev1.repo_id().to_string();
+    let mut bob = invite_member(&mut dev1, &proxy.url());
+    let carol = invite_member(&mut dev1, &b.url());
+    assert_eq!(
+        dev1.tip().state.manifest_seq,
+        3,
+        "seq 2 adds bob, seq 3 adds carol and host B"
+    );
+    let s3 = dev1.tip().clone();
+    let s3h = s3.hash().unwrap();
+    eventually("B holds seq 3", || b.tip_hash(&repo) == Some(s3h));
+
+    // The hosts cannot reach each other while the owner's two devices each publish a seq 4.
+    a.pause(true);
+    b.pause(true);
+    // 1. Device 1 publishes X at seq 4 on A (policy on, no epoch change); bob pins it.
+    dev1.set_share_refresh_tokens(true).unwrap();
+    let x = dev1.tip_hash();
+    assert_eq!(dev1.tip().state.manifest_seq, 4);
+    bob.pull().unwrap();
+    assert_eq!(bob.tip_hash(), x, "bob pins X");
+
+    // 2. Device 2, offline from device 1, publishes Y at seq 4 on B: it removes carol, so it raises
+    // the epoch and carries its rotation commit (SPEC 8.3). The new data key is fresh randomness, so
+    // re-drawing it picks which hash is lower; Y must have the lower manifestHash.
+    let heads = sorted(b.heads(&repo));
+    let carol_key = carol.member().ed25519_public();
+    let (y, y_key, rotation) = loop {
+        let key = random_bytes::<32>();
+        let mut s = s3.state.clone();
+        s.manifest_seq = 4;
+        s.prev_manifest_hash = s3h.to_vec();
+        s.key_epoch = 1;
+        s.members = s
+            .members
+            .iter()
+            .filter(|m| m.ed25519_public_key != carol_key)
+            .map(|m| MemberEntry {
+                wrapped_data_key: wrap(&m.x25519_public_key, &key, WRAP_INFO).unwrap(),
+                key_epoch: 1,
+                ..m.clone()
+            })
+            .collect();
+        s.removals.push(Removal {
+            member_key: carol_key,
+            removed_at_seq: 4,
+            frontier: heads.clone(),
+        });
+        let y = s.sign(&id.keys.signing).unwrap();
+        if y.hash().unwrap() < x {
+            let header = CommitHeader {
+                repo_id: repo.clone(),
+                parents: heads.clone(),
+                manifest_seq: 4,
+                manifest_hash: y.hash().unwrap(),
+                key_epoch: 1,
+            };
+            let payload = PayloadV2::default().to_json().unwrap();
+            let rotation = Commit::seal(&key, header, &payload, &id.keys.signing).unwrap();
+            break (y, key, rotation);
+        }
+    };
+    let mut hb = host(&b.url());
+    let _: Value = hb
+        .post(
+            &id.keys.signing,
+            &format!("/v1/repos/{repo}/manifest"),
+            &json!({ "manifest": y, "commit": rotation }),
+        )
+        .unwrap();
+
+    // 3. The hosts converge on Y, the lower manifestHash (SPEC 6.5).
+    a.pause(false);
+    b.pause(false);
+    let yh = y.hash().unwrap();
+    eventually("both hosts hold Y as their tip", || {
+        a.tip_hash(&repo) == Some(yh) && b.tip_hash(&repo) == Some(yh)
+    });
+    eventually("both hosts hold Y's rotation commit as the head", || {
+        a.heads(&repo) == vec![rotation.commit_id] && b.heads(&repo) == vec![rotation.commit_id]
+    });
+    Diverged {
+        proxy,
+        a,
+        b,
+        repo,
+        dev1,
+        bob,
+        x,
+        y: yh,
+        y_key,
+    }
+}
+
+/// SPEC 6.3, 6.4, 6.5: an owner device pinned on X, a same-seq state that lost the tie rule, gets an
+/// empty pull (nothing is above its pin). Its next owner operation meets `409 manifest_conflict`,
+/// re-pulls from seq 0, adopts the winning chain through Y, and succeeds on Y. A member pinned on X
+/// meets `403 forbidden` on its push (it cites X under epoch 0, and Y raised the epoch), re-pulls from
+/// seq 0, recovers the epoch 1 key from Y, and pushes under epoch 1.
+#[test]
+fn owner_and_member_pinned_on_a_losing_same_seq_state_recover() {
+    let mut d = diverged_on_y();
+    let (x, y, repo) = (d.x, d.y, d.repo.clone());
+
+    // Nothing has a seq above the pin, so a plain pull cannot show the loss.
+    let r = d.dev1.pull().unwrap();
+    assert_eq!((r.new_states, r.rejected_chain), (0, false));
+    assert_eq!(d.dev1.tip_hash(), x, "still pinned on X");
+
+    // 4. Device 1's next owner operation succeeds on Y.
+    let mark = d.proxy.request_count();
+    d.dev1.set_share_refresh_tokens(true).unwrap();
+    assert_eq!(
+        d.proxy.count_since(mark, "/manifest"),
+        2,
+        "one 409, then one rebuilt publication"
+    );
+    assert_eq!(d.proxy.full_pulls_since(mark), 1, "one re-pull from seq 0");
+    let tip = d.dev1.tip().clone();
+    assert_eq!(tip.state.manifest_seq, 5);
+    assert_eq!(tip.state.prev_manifest_hash, y.to_vec(), "seq 5 links to Y");
+    assert_eq!(
+        d.dev1.chain().states()[3].hash().unwrap(),
+        y,
+        "Y replaced X on the device's chain"
+    );
+    assert!(tip.state.share_refresh_tokens);
+    assert_eq!(tip.state.key_epoch, 1);
+    assert_eq!(d.dev1.retained_epoch_keys[&1], d.y_key, "the owner holds Y's epoch key");
+    let s5 = d.dev1.tip_hash();
+    assert_eq!(d.a.tip_hash(&repo), Some(s5));
+    eventually("B reaches seq 5", || d.b.tip_hash(&repo) == Some(s5));
+
+    // 5. The member pinned on X recovers Y's epoch and can push.
+    assert_eq!(d.bob.tip_hash(), x, "bob is still pinned on X");
+    let mark = d.proxy.request_count();
+    set(&mut d.bob, U1, &[("username", json!("bob-after"))], now_ms());
+    assert_eq!(d.proxy.count_since(mark, "/push"), 2, "one 403, then one rebuilt push");
+    assert_eq!(d.proxy.full_pulls_since(mark), 1, "one re-pull from seq 0");
+    assert_eq!(d.bob.tip_hash(), s5, "bob re-pinned to the winning tip");
+    assert_eq!(d.bob.retained_epoch_keys[&1], d.y_key, "bob recovered the epoch 1 key");
+    let head = d.bob.heads()[0];
+    assert_eq!(d.a.heads(&repo), vec![head]);
+    let c = d.a.commit(&repo, &head);
+    assert_eq!((c.manifest_seq, c.manifest_hash, c.key_epoch), (5, s5, 1));
+    assert_eq!(field(&decrypt(&c, &d.y_key), U1, "username"), Some(&json!("bob-after")));
+}
+
+/// SPEC 6.3, 6.4: the stale pin recovery is bounded. When the host keeps answering
+/// `409 manifest_conflict` (or `403 forbidden`), the operation fails after one re-pull from seq 0 and
+/// one retry, with no loop, although the host would accept a later try.
+#[test]
+fn stale_pin_recovery_is_bounded() {
+    let mut d = diverged_on_y();
+
+    d.proxy.deny("/manifest", 409, "manifest_conflict", 3);
+    let mark = d.proxy.request_count();
+    assert_eq!(host_code(d.dev1.set_share_refresh_tokens(true)), "manifest_conflict");
+    assert_eq!(
+        d.proxy.count_since(mark, "/manifest"),
+        2,
+        "one publication and one retry"
+    );
+    assert_eq!(d.proxy.full_pulls_since(mark), 1, "one re-pull from seq 0");
+    assert_eq!(d.a.tip_hash(&d.repo), Some(d.y), "nothing was published");
+
+    d.proxy.deny("/push", 403, "forbidden", 3);
+    let mark = d.proxy.request_count();
+    let by = d.bob.member().id();
+    let r = d.bob.write(|p, hlc| {
+        let s = hlc.tick(now_ms(), &by);
+        set_field(p, U1, "username", json!("bob-after"), &s);
+    });
+    assert_eq!(host_code(r), "forbidden");
+    assert_eq!(d.proxy.count_since(mark, "/push"), 2, "one push and one retry");
+    assert_eq!(d.proxy.full_pulls_since(mark), 1, "one re-pull from seq 0");
+    assert_eq!(d.bob.tip_hash(), d.y, "the re-pull moved bob's pin to Y");
+    assert_ne!(d.bob.tip_hash(), d.x);
 }

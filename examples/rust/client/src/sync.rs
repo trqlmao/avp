@@ -44,9 +44,6 @@ const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const MISSING_PARENTS_RETRIES: u32 = 40;
 const RETRY_PAUSE: Duration = Duration::from_millis(100);
 
-/// How often an owner rebuilds a publication on `409 manifest_conflict` (SPEC 6.3).
-const CONFLICT_RETRIES: u32 = 3;
-
 /// A token is renewed this long before it expires.
 const TOKEN_SLACK_MS: i64 = 30_000;
 
@@ -1085,17 +1082,24 @@ impl Vault {
 
     /// The pull without the merge push.
     fn fetch(&mut self) -> Result<PullReport> {
+        self.fetch_with(false)
+    }
+
+    /// The pull without the merge push, from the pinned seq, or from seq 0 when `full`.
+    fn fetch_with(&mut self, full: bool) -> Result<PullReport> {
         self.require_syncing()?;
         let repo_id = self.repo_id().to_string();
-        let mut answer = pull_raw(&mut self.host, &self.me, &repo_id, self.chain.tip().state.manifest_seq)?;
+        let since = if full { 0 } else { self.chain.tip().state.manifest_seq };
+        let mut answer = pull_raw(&mut self.host, &self.me, &repo_id, since)?;
         let mut report = PullReport {
             malformed_items: answer.malformed,
             ..PullReport::default()
         };
-        let linked = match answer.manifests.first() {
-            None => true,
-            Some(first) => first.links_to(self.chain.tip()).unwrap_or(false),
-        };
+        let linked = !full
+            && match answer.manifests.first() {
+                None => true,
+                Some(first) => first.links_to(self.chain.tip()).unwrap_or(false),
+            };
         if linked {
             let before = self.chain.states().len();
             let total = answer.manifests.len();
@@ -1108,9 +1112,12 @@ impl Vault {
             report.new_states = self.chain.states().len().saturating_sub(before);
             self.adopt_keys(before);
         } else {
-            // SPEC 6.4: the first state does not link to the pin; pull the whole chain and decide.
-            answer = pull_raw(&mut self.host, &self.me, &repo_id, 0)?;
-            report.malformed_items = report.malformed_items.saturating_add(answer.malformed);
+            // SPEC 6.4: the first state does not link to the pin (or the pin may be stale); pull the
+            // whole chain and decide.
+            if !full {
+                answer = pull_raw(&mut self.host, &self.me, &repo_id, 0)?;
+                report.malformed_items = report.malformed_items.saturating_add(answer.malformed);
+            }
             let (candidate, discarded) = Chain::prefix(&answer.manifests);
             report.discarded_states = discarded;
             match candidate {
@@ -1129,6 +1136,16 @@ impl Vault {
         self.take_heads(answer.heads, &mut report);
         self.take_leaves(answer.leaves, &mut report);
         Ok(report)
+    }
+
+    /// The stale pin recovery of SPEC 6.3 and 6.4: pulls the whole chain from seq 0, checks it like
+    /// any pull (the same state and commit checks, the same SPEC 6.4 adoption rule, so a competing
+    /// genesis is never adopted), and merges what it read. Returns whether the pin moved.
+    fn resync(&mut self) -> Result<bool> {
+        let before = self.chain.tip_hash();
+        self.fetch_with(true)?;
+        self.absorb();
+        Ok(!ct_eq(&before, &self.chain.tip_hash()))
     }
 
     /// Unwraps this member's data key from every chain state from index `from` on.
@@ -1247,7 +1264,7 @@ impl Vault {
             return Ok(None);
         }
         let payload = self.local.clone();
-        self.commit_payload(self.heads.clone(), &payload).map(Some)
+        self.push_payload(payload).map(Some)
     }
 
     // ── Write ──
@@ -1272,9 +1289,34 @@ impl Vault {
         if !self.share_refresh() {
             next.strip_refresh();
         }
-        let id = self.commit_payload(self.heads.clone(), &next)?;
-        self.local = next;
-        Ok(id)
+        self.push_payload(next)
+    }
+
+    /// Pushes `payload` on the readable heads and makes it the local payload. A `403 forbidden` may
+    /// come from a stale pin (a commit citing a state that lost the tie rule, whose epoch the winning
+    /// chain raised), so the client re-pulls from seq 0 (SPEC 6.4) and, only if that moved the pin,
+    /// rebuilds the payload on the new tip and pushes once more. One re-pull and one retry, never a
+    /// loop; an unchanged pin leaves the `403` terminal (SPEC 10.4).
+    fn push_payload(&mut self, payload: PayloadV2) -> Result<Id> {
+        match self.commit_payload(self.heads.clone(), &payload) {
+            Err(e) if e.code() == Some("forbidden") => {
+                if !matches!(self.resync(), Ok(true)) {
+                    return Err(e);
+                }
+                let mut rebuilt = merge(&[self.local.clone(), payload]);
+                if !self.share_refresh() {
+                    rebuilt.strip_refresh();
+                }
+                let id = self.commit_payload(self.heads.clone(), &rebuilt)?;
+                self.local = rebuilt;
+                Ok(id)
+            }
+            Err(e) => Err(e),
+            Ok(id) => {
+                self.local = payload;
+                Ok(id)
+            }
+        }
     }
 
     /// Seals `payload` under the tip's epoch, citing the tip, and pushes it.
@@ -1348,14 +1390,17 @@ impl Vault {
         Ok(())
     }
 
-    /// Runs `attempt` again after a pull when the host answers `409 manifest_conflict` (SPEC 6.3).
+    /// Runs `attempt` once more when the host answers `409 manifest_conflict` (SPEC 6.3, 6.4): first
+    /// it re-pulls the whole chain from seq 0, so a pin on a state that lost the tie rule at its own
+    /// seq moves to the winning chain, and `attempt` rebuilds on the verified tip. One re-pull and one
+    /// retry per operation, never a loop: a second conflict is returned.
     fn retry_conflict<T>(&mut self, mut attempt: impl FnMut(&mut Vault) -> Result<T>) -> Result<T> {
-        let mut tries = 0;
-        loop {
-            match attempt(self) {
-                Err(e) if e.code() == Some("manifest_conflict") && tries < CONFLICT_RETRIES => tries += 1,
-                other => return other,
+        match attempt(self) {
+            Err(e) if e.code() == Some("manifest_conflict") => {
+                self.resync()?;
+                attempt(self)
             }
+            other => other,
         }
     }
 
