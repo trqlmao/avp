@@ -678,15 +678,26 @@ fn host_not_in_hosts_is_refused() {
     thread::sleep(SWEEP * 6);
     assert!(!c.holds(&id));
 
-    // SPEC 9.2 and 9.3: A offers each accepted write only to the peers in the repository's hosts.
-    // D is reachable (A's sweep calls it), yet it never gets an offer, so it never sees the
-    // manifest, the ciphertext, or the commits.
+    // Positive control: a second repository that does list D. A offers it to D and sweeps it, so
+    // the recorder is reachable and records A's requests.
+    let listed = genesis(&[a.key(), pk(&d)], a.key());
+    create(&a, &listed);
+    let listed_id = listed.id();
+    eventually("D gets requests for the repository that lists it", || {
+        let got = seen.lock().unwrap();
+        got.contains(&host_path(&listed_id, "offer")) && got.contains(&host_path(&listed_id, "heads"))
+    });
+    thread::sleep(SWEEP * 3);
+
+    // SPEC 9.2 and 9.3: A sends heads, fetch, and offer for a repository only to the peers in its
+    // hosts. D is in A's AVP_PEERS but not in the first repository's hosts, so it gets no request
+    // for it at all, sweep included, and never learns its repoId.
     let got = seen.lock().unwrap().clone();
-    assert!(!got.is_empty(), "A never called D, so the recorder proves nothing");
-    for p in &got {
-        assert_ne!(p, &host_path(&id, "offer"), "A offered the repository to D: {got:?}");
-        assert_eq!(p, &host_path(&id, "heads"), "A sent D more than a heads call: {got:?}");
-    }
+    let prefix = format!("/v1/host/repos/{id}/");
+    assert!(
+        got.iter().all(|p| !p.starts_with(&prefix)),
+        "A sent D a request for a repository that does not list it: {got:?}"
+    );
     stop.store(true, Ordering::SeqCst);
     drop(a);
     let _ = d_thread.join();

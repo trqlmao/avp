@@ -9,8 +9,9 @@
 //! - [`run`] starts one worker thread per peer, so a dead or slow peer delays only its own worker.
 //!   A worker offers each accepted client write in the [`Outbox`] to its peer when the repository's
 //!   tip lists both hosts, catches up from the peer when an offer from it was incomplete, and sweeps
-//!   every held repository against the peer at startup and every [`Config::sweep_interval`]
-//!   (`heads`, then `fetch` for what this host lacks, SPEC 9.2).
+//!   every held repository whose winning tip lists the peer at startup and every
+//!   [`Config::sweep_interval`] (`heads`, then `fetch` for what this host lacks, SPEC 9.2). A peer
+//!   that is not listed gets no request for the repository at all (SPEC 9.3).
 //! - Every item a peer sends, by `offer` or in a `fetch` answer, goes through the engine with
 //!   [`Via::Offer`] on a trial copy of the repository's view (SPEC 9: validated whatever the
 //!   transport). The validated received tip then decides what is kept (SPEC 6.1 rule 6, 8.6, 9.2):
@@ -1325,7 +1326,15 @@ impl Worker {
                     }
                 });
                 if now >= *next_sweep {
-                    let mut held: Vec<String> = st.store.repos.keys().cloned().collect();
+                    // SPEC 9.3: only the repositories whose winning tip lists this peer, so a peer
+                    // that is not listed never learns which repoIds this host holds.
+                    let mut held: Vec<String> = st
+                        .store
+                        .repos
+                        .iter()
+                        .filter(|(_, v)| v.tip().is_some_and(|t| t.state.has_host(&key)))
+                        .map(|(r, _)| r.clone())
+                        .collect();
                     held.sort_unstable();
                     repos.extend(held);
                     *next_sweep = now + self.config.sweep_interval;
