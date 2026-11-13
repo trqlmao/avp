@@ -117,6 +117,10 @@ final class ClientTest {
                         "host_errors_without_a_json_body_are_reported_by_status",
                         ClientTest::hostErrorsWithoutAJsonBodyAreReportedByStatus),
                 new Case("connect_expecting_matches_the_host_key", ClientTest::connectExpectingMatchesTheHostKey),
+                new Case(
+                        "owner_and_member_pinned_on_a_losing_same_seq_state_recover",
+                        ClientTest::ownerAndMemberPinnedOnALosingSameSeqStateRecover),
+                new Case("stale_pin_recovery_is_bounded", ClientTest::stalePinRecoveryIsBounded),
                 new Case("worked_flow_one_host", ClientTest::workedFlowOneHost),
                 new Case("worked_flow_two_peered_hosts", ClientTest::workedFlowTwoPeeredHosts));
         List<String> wanted = List.of(args);
@@ -152,6 +156,11 @@ final class ClientTest {
         final Server.Host st;
 
         Node() throws IOException {
+            this(false);
+        }
+
+        /** A host whose test control ({@code POST /v1/test/replication}) is on when {@code testControl}. */
+        Node(boolean testControl) throws IOException {
             this.http = Server.start(
                     0,
                     new Server.ServerConfig(
@@ -159,7 +168,7 @@ final class ClientTest {
                             seed,
                             Replication.Peers.none(),
                             new Server.Limits(),
-                            new Replication.Config(100, 2000, 16L * 1024 * 1024, false)));
+                            new Replication.Config(100, 2000, 16L * 1024 * 1024, testControl)));
             this.st = Server.host(http);
         }
 
@@ -240,6 +249,32 @@ final class ClientTest {
     private record Logged(String path, byte[] body) {}
 
     /**
+     * Answers the next {@code budget} requests whose path ends with {@code suffix} with a SPEC 10.4 error,
+     * without forwarding them; later ones are forwarded again.
+     */
+    private static final class Deny {
+        final String suffix;
+        final int status;
+        final String code;
+        int budget;
+
+        Deny(String suffix, int status, String code, int budget) {
+            this.suffix = suffix;
+            this.status = status;
+            this.code = code;
+            this.budget = budget;
+        }
+
+        synchronized boolean take(String path) {
+            if (budget > 0 && path.endsWith(suffix)) {
+                budget--;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    /**
      * Forwards every request to an honest host unchanged, records {@code (path, body)} of each, and lets
      * the test rewrite the JSON answer of a {@code 200} reply.
      */
@@ -252,6 +287,7 @@ final class ClientTest {
                 .build();
         final List<Logged> log = new ArrayList<>();
         final AtomicReference<Tamper> tamper = new AtomicReference<>();
+        final AtomicReference<Deny> deny = new AtomicReference<>();
 
         Proxy(Node upstream) throws IOException {
             this.upstream = upstream.url();
@@ -275,6 +311,15 @@ final class ClientTest {
                 String auth = ex.getRequestHeaders().getFirst("Authorization");
                 synchronized (log) {
                     log.add(new Logged(path, body));
+                }
+                Deny d = deny.get();
+                if (d != null && d.take(path)) {
+                    byte[] err = AvpJson.writeUtf8(Map.of("error", "denied by the test proxy", "code", d.code));
+                    ex.sendResponseHeaders(d.status, err.length);
+                    try (OutputStream out = ex.getResponseBody()) {
+                        out.write(err);
+                    }
+                    return;
                 }
                 HttpRequest.Builder b =
                         HttpRequest.newBuilder(URI.create(upstream + path)).timeout(Duration.ofSeconds(30));
@@ -335,6 +380,11 @@ final class ClientTest {
             tamper.set(null);
         }
 
+        /** Answers the next {@code budget} requests to a path ending with {@code suffix} with an error. */
+        void deny(String suffix, int status, String code, int budget) {
+            deny.set(new Deny(suffix, status, code, budget));
+        }
+
         List<String> paths() {
             synchronized (log) {
                 return log.stream().map(Logged::path).toList();
@@ -366,15 +416,24 @@ final class ClientTest {
         private final List<AutoCloseable> clients = new ArrayList<>();
 
         Node node() throws IOException {
-            Node n = new Node();
+            return node(false);
+        }
+
+        Node node(boolean testControl) throws IOException {
+            Node n = new Node(testControl);
             nodes.add(n);
             return n;
         }
 
         /** Two hosts peered with each other ({@code AVP_PEERS} built from their keys and addresses). */
         Node[] peeredPair() throws Exception {
-            Node a = node();
-            Node b = node();
+            return peeredPair(false);
+        }
+
+        /** Two peered hosts, with the test control on when {@code testControl}. */
+        Node[] peeredPair(boolean testControl) throws Exception {
+            Node a = node(testControl);
+            Node b = node(testControl);
             Server.peerWith(a.http, Replication.Peers.fromEnv(b.entry()));
             Server.peerWith(b.http, Replication.Peers.fromEnv(a.entry()));
             return new Node[] {a, b};
@@ -2095,6 +2154,235 @@ final class ClientTest {
         } finally {
             h.close();
         }
+    }
+
+    // ─── Stale pin on a same-seq state that lost the tie rule (SPEC 6.3, 6.4, 6.5) ───────────
+
+    /**
+     * Two peered hosts that converged on Y, a seq 4 that beat the seq 4 X that owner device 1 and the member
+     * bob are pinned on. Y removes carol, so it raises the epoch to 1.
+     */
+    private record Diverged(
+            Node a, Node b, Proxy proxy, String repo, Vault dev1, Vault bob, byte[] x, byte[] y, byte[] yKey) {}
+
+    /** Pauses or resumes all host-to-host traffic through the test control (SPEC 9.3). */
+    private static void pause(Node n, boolean paused) throws Exception {
+        try (HttpClient http = HttpClient.newHttpClient()) {
+            HttpRequest req = HttpRequest.newBuilder(URI.create(n.url() + "/v1/test/replication"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(AvpJson.writeUtf8(Map.of("paused", paused))))
+                    .build();
+            HttpResponse<byte[]> r = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            eq(r.statusCode(), 200, "test control");
+        }
+    }
+
+    private static Optional<String> tipHash(Node n, String repo) {
+        return n.view(
+                repo,
+                v -> v.tip()
+                        .map(m -> {
+                            try {
+                                return b64(AvpManifest.hash(m));
+                            } catch (AvpException e) {
+                                throw new AssertionError(e);
+                            }
+                        })
+                        .orElse(null));
+    }
+
+    private static Diverged divergedOnY(T t) throws Exception {
+        Node[] pair = t.peeredPair(true);
+        Node a = pair[0];
+        Node b = pair[1];
+        // Owner device 1 and bob sync with host A through a proxy that counts their requests.
+        Proxy proxy = t.proxy(a);
+        Owned o = t.ownerVault(proxy.url());
+        Vault dev1 = o.vault();
+        String repo = dev1.repoId();
+        Vault bob = t.inviteMember(dev1, proxy.url());
+        Vault carol = t.inviteMember(dev1, b.url());
+        eq(dev1.tip().state().manifestSeq(), 3L, "seq 2 adds bob, seq 3 adds carol and host B");
+        AvpManifest.SignedManifest s3 = dev1.tip();
+        byte[] s3h = AvpManifest.hash(s3);
+        eventually("B holds seq 3", () -> tipHash(b, repo).equals(Optional.of(b64(s3h))));
+
+        // The hosts cannot reach each other while the owner's two devices each publish a seq 4.
+        pause(a, true);
+        pause(b, true);
+        // 1. Device 1 publishes X at seq 4 on A (policy on, no epoch change); bob pins it.
+        await(dev1.setShareRefreshTokens(true));
+        byte[] x = dev1.tipHash();
+        eq(dev1.tip().state().manifestSeq(), 4L, "X is seq 4");
+        await(bob.pull());
+        eq(bob.tipHash(), x, "bob pins X");
+
+        // 2. Device 2, offline from device 1, publishes Y at seq 4 on B: it removes carol, so it raises the
+        // epoch and carries its rotation commit (SPEC 8.3). The new data key is fresh randomness, so
+        // re-drawing it picks which hash is lower; Y must have the lower manifestHash.
+        List<byte[]> heads = new ArrayList<>(b.heads(repo));
+        heads.sort(AvpEncoding::compare);
+        byte[] carolKey = carol.member().ed25519Public();
+        byte[] seed = o.id().keys().ed25519Seed();
+        AvpManifest.SignedManifest y;
+        byte[] yKey;
+        while (true) {
+            byte[] key = AvpCrypto.randomBytes(32);
+            Draft d = new Draft(s3.state());
+            d.seq = 4;
+            d.prev = s3h;
+            d.nonce = new byte[0];
+            d.epoch = 1;
+            List<AvpManifest.MemberEntry> members = new ArrayList<>();
+            for (AvpManifest.MemberEntry m : d.members) {
+                if (Arrays.equals(m.ed25519PublicKey(), carolKey)) {
+                    continue;
+                }
+                members.add(new AvpManifest.MemberEntry(
+                        m.ed25519PublicKey(),
+                        m.x25519PublicKey(),
+                        AvpCrypto.wrap(m.x25519PublicKey(), key, AvpCrypto.WRAP_INFO),
+                        1,
+                        m.homeHostKey()));
+            }
+            d.members = members;
+            d.removals.add(new AvpManifest.Removal(carolKey, 4, heads));
+            AvpManifest.SignedManifest m = d.sign(seed);
+            if (AvpEncoding.compare(AvpManifest.hash(m), x) < 0) {
+                y = m;
+                yKey = key;
+                break;
+            }
+        }
+        byte[] yh = AvpManifest.hash(y);
+        Map<String, Object> empty = new LinkedHashMap<>();
+        empty.put("v", 2L);
+        empty.put("accounts", new TreeMap<String, Object>());
+        AvpCommit.Commit rotation =
+                AvpCommit.seal(yKey, new AvpCommit.Header(repo, heads, 4, yh, 1), AvpPayload.encode(empty), seed);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("manifest", AvpManifest.toJson(y));
+        body.put("commit", AvpCommit.toJson(rotation));
+        t.host(b.url()).post(Vault.Member.fromOwner(o.id().keys()), "/v1/repos/" + repo + "/manifest", body);
+
+        // 3. The hosts converge on Y, the lower manifestHash (SPEC 6.5).
+        pause(a, false);
+        pause(b, false);
+        Optional<String> want = Optional.of(b64(yh));
+        eventually(
+                "both hosts hold Y as their tip",
+                () -> tipHash(a, repo).equals(want) && tipHash(b, repo).equals(want));
+        List<String> rot = ids(rotation.commitId());
+        eventually(
+                "both hosts hold Y's rotation commit as the head",
+                () -> ids(a.heads(repo)).equals(rot) && ids(b.heads(repo)).equals(rot));
+        return new Diverged(a, b, proxy, repo, dev1, bob, x, yh, yKey);
+    }
+
+    /** The requests since {@code mark} whose path ends with {@code suffix}. */
+    private static long countSince(Proxy p, int mark, String suffix) {
+        List<String> paths = p.paths();
+        return paths.subList(mark, paths.size()).stream()
+                .filter(s -> s.endsWith(suffix))
+                .count();
+    }
+
+    /** The {@code pull} requests since {@code mark} that asked for the whole chain ({@code sinceManifestSeq = 0}). */
+    private static long fullPullsSince(Proxy p, int mark) throws AvpException {
+        List<String> paths = p.paths();
+        List<byte[]> bodies = p.bodies();
+        long n = 0;
+        for (int i = mark; i < paths.size(); i++) {
+            if (paths.get(i).endsWith("/pull")
+                    && AvpJson.object(AvpJson.parse(bodies.get(i)), "pull")
+                            .get("sinceManifestSeq")
+                            .equals(0L)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * SPEC 6.3, 6.4, 6.5: an owner device pinned on X, a same-seq state that lost the tie rule, gets an empty
+     * pull (nothing is above its pin). Its next owner operation meets {@code 409 manifest_conflict}, re-pulls
+     * from seq 0, adopts the winning chain through Y, and succeeds on Y. A member pinned on X meets {@code 403
+     * forbidden} on its push (it cites X under epoch 0, and Y raised the epoch), re-pulls from seq 0, recovers
+     * the epoch 1 key from Y, and pushes under epoch 1.
+     */
+    private static void ownerAndMemberPinnedOnALosingSameSeqStateRecover(T t) throws Exception {
+        Diverged d = divergedOnY(t);
+        Proxy proxy = d.proxy();
+        String repo = d.repo();
+
+        // Nothing has a seq above the pin, so a plain pull cannot show the loss.
+        Vault.PullReport r = await(d.dev1().pull());
+        eq(r.newStates(), 0, "no new state");
+        isTrue(!r.rejectedChain(), "no rejected chain");
+        eq(d.dev1().tipHash(), d.x(), "still pinned on X");
+
+        // 4. Device 1's next owner operation succeeds on Y.
+        int mark = proxy.requestCount();
+        await(d.dev1().setShareRefreshTokens(true));
+        eq(countSince(proxy, mark, "/manifest"), 2L, "one 409, then one rebuilt publication");
+        eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
+        AvpManifest.SignedManifest tip = d.dev1().tip();
+        eq(tip.state().manifestSeq(), 5L, "seq 5");
+        eq(tip.state().prevManifestHash(), d.y(), "seq 5 links to Y");
+        eq(AvpManifest.hash(d.dev1().chain().states().get(3)), d.y(), "Y replaced X on the device's chain");
+        isTrue(tip.state().shareRefreshTokens(), "policy on");
+        eq(tip.state().keyEpoch(), 1L, "epoch 1");
+        eq(d.dev1().retainedEpochKeys().get(1L), d.yKey(), "the owner holds Y's epoch key");
+        byte[] s5 = d.dev1().tipHash();
+        eq(tipHash(d.a(), repo), Optional.of(b64(s5)), "A's tip is seq 5");
+        eventually("B reaches seq 5", () -> tipHash(d.b(), repo).equals(Optional.of(b64(s5))));
+
+        // 5. The member pinned on X recovers Y's epoch and can push.
+        eq(d.bob().tipHash(), d.x(), "bob is still pinned on X");
+        mark = proxy.requestCount();
+        set(d.bob(), U1, Vault.nowMs(), "username", "bob-after");
+        eq(countSince(proxy, mark, "/push"), 2L, "one 403, then one rebuilt push");
+        eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
+        eq(d.bob().tipHash(), s5, "bob re-pinned to the winning tip");
+        eq(d.bob().retainedEpochKeys().get(1L), d.yKey(), "bob recovered the epoch 1 key");
+        byte[] head = d.bob().heads().get(0);
+        eq(ids(d.a().heads(repo)), ids(head), "bob's commit is the head");
+        AvpCommit.Commit c = d.a().commit(repo, head);
+        eq(c.manifestSeq(), 5L, "cites seq 5");
+        eq(c.manifestHash(), s5, "cites the winning tip");
+        eq(c.keyEpoch(), 1L, "under epoch 1");
+        eq(value(decrypt(c, d.yKey()), U1, "username"), "bob-after", "bob's write");
+    }
+
+    /**
+     * SPEC 6.3, 6.4: the stale pin recovery is bounded. When the host keeps answering {@code 409
+     * manifest_conflict} (or {@code 403 forbidden}), the operation fails after one re-pull from seq 0 and one
+     * retry, with no loop, although the host would accept a later try.
+     */
+    private static void stalePinRecoveryIsBounded(T t) throws Exception {
+        Diverged d = divergedOnY(t);
+        Proxy proxy = d.proxy();
+
+        proxy.deny("/manifest", 409, "manifest_conflict", 3);
+        int mark = proxy.requestCount();
+        eq(hostCode(() -> await(d.dev1().setShareRefreshTokens(true))), "manifest_conflict", "409");
+        eq(countSince(proxy, mark, "/manifest"), 2L, "one publication and one retry");
+        eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
+        eq(tipHash(d.a(), d.repo()), Optional.of(b64(d.y())), "nothing was published");
+
+        proxy.deny("/push", 403, "forbidden", 3);
+        mark = proxy.requestCount();
+        String by = d.bob().member().id();
+        eq(
+                hostCode(() -> await(d.bob().write((p, hlc) -> {
+                    Map<String, Object> s = hlc.tick(Vault.nowMs(), by);
+                    Vault.setField(p, U1, "username", "bob-after", s);
+                }))),
+                "forbidden",
+                "403");
+        eq(countSince(proxy, mark, "/push"), 2L, "one push and one retry");
+        eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
+        eq(d.bob().tipHash(), d.y(), "the re-pull moved bob's pin to Y");
     }
 
     // ─── The worked flow ────────────────────────────────────────────────────────────────────

@@ -65,9 +65,6 @@ public final class Vault implements AutoCloseable {
     /** The pause between tries while a host fetches missing parents from its peers. */
     static final long RETRY_PAUSE_MS = 100;
 
-    /** How often an owner rebuilds a publication on {@code 409 manifest_conflict} (SPEC 6.3). */
-    static final int CONFLICT_RETRIES = 3;
-
     /** A token is renewed this long before it expires. */
     static final long TOKEN_SLACK_MS = 30_000;
 
@@ -1865,13 +1862,20 @@ public final class Vault implements AutoCloseable {
 
     /** The pull without the merge push. */
     private Report fetch() throws ClientException {
+        return fetch(false);
+    }
+
+    /** The pull without the merge push, from the pinned seq, or from seq 0 when {@code full}. */
+    private Report fetch(boolean full) throws ClientException {
         requireSyncing();
         String repoId = chain.repoId();
-        PullAnswer answer = pullRaw(host, me, repoId, chain.tip().state().manifestSeq());
+        long since = full ? 0 : chain.tip().state().manifestSeq();
+        PullAnswer answer = pullRaw(host, me, repoId, since);
         Report report = new Report();
         report.malformed = answer.malformed();
-        boolean linked = answer.manifests().isEmpty()
-                || AvpManifest.linksTo(answer.manifests().get(0), chain.tip());
+        boolean linked = !full
+                && (answer.manifests().isEmpty()
+                        || AvpManifest.linksTo(answer.manifests().get(0), chain.tip()));
         if (linked) {
             int before = chain.size();
             List<AvpManifest.SignedManifest> ms = answer.manifests();
@@ -1886,9 +1890,12 @@ public final class Vault implements AutoCloseable {
             report.newStates = chain.size() - before;
             adoptKeys(before);
         } else {
-            // SPEC 6.4: the first state does not link to the pin; pull the whole chain and decide.
-            answer = pullRaw(host, me, repoId, 0);
-            report.malformed += answer.malformed();
+            // SPEC 6.4: the first state does not link to the pin (or the pin may be stale); pull the whole
+            // chain and decide.
+            if (!full) {
+                answer = pullRaw(host, me, repoId, 0);
+                report.malformed += answer.malformed();
+            }
             Chain.Prefix p = Chain.prefix(answer.manifests());
             report.discardedStates = p.discarded();
             Chain candidate = p.chain();
@@ -1908,6 +1915,20 @@ public final class Vault implements AutoCloseable {
         takeHeads(answer.heads(), report);
         takeLeaves(answer.leaves(), report);
         return report;
+    }
+
+    /**
+     * The stale pin recovery of SPEC 6.3 and 6.4: pulls the whole chain from seq 0, checks it like any pull
+     * (the same state and commit checks, the same SPEC 6.4 adoption rule, so a competing genesis is never
+     * adopted), and merges what it read.
+     *
+     * @return whether the pin moved
+     */
+    private boolean resync() throws ClientException {
+        byte[] before = chain.tipHash();
+        fetch(true);
+        absorb();
+        return !ctEq(before, chain.tipHash());
     }
 
     /** Unwraps this member's data key from every chain state from index {@code from} on. */
@@ -2034,7 +2055,7 @@ public final class Vault implements AutoCloseable {
         if (heads.size() < 2) {
             return Optional.empty();
         }
-        return Optional.of(commitPayload(copyIds(heads), local));
+        return Optional.of(pushPayload(local));
     }
 
     // ─── Write ──────────────────────────────────────────────────────────────────────────────
@@ -2068,8 +2089,47 @@ public final class Vault implements AutoCloseable {
         if (!shareRefresh()) {
             next = strip(next);
         }
-        byte[] id = commitPayload(copyIds(heads), next);
-        local = next;
+        return pushPayload(next);
+    }
+
+    /**
+     * Pushes {@code payload} on the readable heads and makes it the local payload. A {@code 403 forbidden}
+     * may come from a stale pin (a commit citing a state that lost the tie rule, whose epoch the winning chain
+     * raised), so the client re-pulls from seq 0 (SPEC 6.4) and, only if that moved the pin, rebuilds the
+     * payload on the new tip and pushes once more. One re-pull and one retry, never a loop; an unchanged pin
+     * leaves the {@code 403} terminal (SPEC 10.4).
+     */
+    private byte[] pushPayload(Map<String, Object> payload) throws ClientException {
+        byte[] id;
+        try {
+            id = commitPayload(copyIds(heads), payload);
+        } catch (ClientException e) {
+            if (!e.code().equals(Optional.of("forbidden"))) {
+                throw e;
+            }
+            boolean moved;
+            try {
+                moved = resync();
+            } catch (ClientException again) {
+                moved = false;
+            }
+            if (!moved) {
+                throw e;
+            }
+            Map<String, Object> rebuilt;
+            try {
+                rebuilt = AvpPayload.merge(List.of(local, payload));
+            } catch (AvpException ex) {
+                throw ClientException.avp(ex);
+            }
+            if (!shareRefresh()) {
+                rebuilt = strip(rebuilt);
+            }
+            id = commitPayload(copyIds(heads), rebuilt);
+            local = rebuilt;
+            return id;
+        }
+        local = payload;
         return id;
     }
 
@@ -2178,19 +2238,22 @@ public final class Vault implements AutoCloseable {
         }
     }
 
-    /** Runs {@code attempt} again after a pull when the host answers {@code 409 manifest_conflict}. */
+    /**
+     * Runs {@code attempt} once more when the host answers {@code 409 manifest_conflict} (SPEC 6.3, 6.4):
+     * first it re-pulls the whole chain from seq 0, so a pin on a state that lost the tie rule at its own seq
+     * moves to the winning chain, and {@code attempt} rebuilds on the verified tip. One re-pull and one retry
+     * per operation, never a loop: a second conflict is thrown.
+     */
     private <T> T retryConflict(Op<T> attempt) throws ClientException {
-        int tries = 0;
-        while (true) {
-            try {
-                return attempt.run();
-            } catch (ClientException e) {
-                if (!e.code().equals(Optional.of("manifest_conflict")) || tries >= CONFLICT_RETRIES) {
-                    throw e;
-                }
-                tries++;
+        try {
+            return attempt.run();
+        } catch (ClientException e) {
+            if (!e.code().equals(Optional.of("manifest_conflict"))) {
+                throw e;
             }
         }
+        resync();
+        return attempt.run();
     }
 
     /**
