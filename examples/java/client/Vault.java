@@ -782,11 +782,12 @@ public final class Vault implements AutoCloseable {
                 Map<String, Object> tb = new LinkedHashMap<>();
                 try {
                     String nonce = AvpJson.string(answer, "nonce");
-                    // The client signs the raw nonce bytes.
+                    // The client signs the challenge transcript for this host's key (SPEC 3.3), never
+                    // the raw nonce bytes.
                     byte[] raw = AvpEncoding.fromBase64(nonce);
                     tb.put("ed25519PublicKey", b64(subject));
                     tb.put("nonce", nonce);
-                    tb.put("signature", b64(AvpCrypto.ed25519Sign(me.signingSeed, raw)));
+                    tb.put("signature", b64(AvpAuth.signChallenge(key, me.signingSeed, raw)));
                 } catch (AvpException e) {
                     throw badResponse("challenge: " + e.getMessage(), e);
                 }

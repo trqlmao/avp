@@ -381,15 +381,18 @@ public final class Server {
         }
 
         /**
-         * Redeems a signed challenge for a token whose subject is {@code key}. The nonce is consumed
-         * whatever the outcome.
+         * Redeems a signed challenge for a token whose subject is {@code key}. The signature is verified
+         * over the challenge transcript built with {@code hostKey}, this host's own key (SPEC 3.3), so a
+         * signature over the raw nonce or for another host key is refused. The nonce is consumed whatever
+         * the outcome.
          */
-        Map<String, Object> token(byte[] key, byte[] nonce, byte[] signature, long now, Limits l) throws ApiError {
+        Map<String, Object> token(byte[] hostKey, byte[] key, byte[] nonce, byte[] signature, long now, Limits l)
+                throws ApiError {
             Entry challenge = challenges.remove(digest(nonce));
             if (challenge == null
                     || challenge.expiresAt() <= now
                     || !AvpCrypto.constantTimeEquals(challenge.key(), key)
-                    || !AvpCrypto.ed25519Verify(key, nonce, signature)) {
+                    || !AvpAuth.verifyChallenge(hostKey, key, nonce, signature)) {
                 throw ApiError.unauthorized(
                         "challenge nonce unknown, used, expired, or not issued for this key, or bad signature");
             }
@@ -1059,7 +1062,7 @@ public final class Server {
         byte[] key = decode(() -> key32(o, "ed25519PublicKey"));
         byte[] nonce = decode(() -> AvpEncoding.fromBase64(AvpJson.string(o, "nonce")));
         byte[] signature = decode(() -> AvpEncoding.fromBase64(AvpJson.string(o, "signature"), 64));
-        return host.auth.token(key, nonce, signature, host.nowMs(), host.limits);
+        return host.auth.token(host.hostKey, key, nonce, signature, host.nowMs(), host.limits);
     }
 
     // ─── createRepo and prepareJoin (SPEC 8.2) ──────────────────────────────────────────

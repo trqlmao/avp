@@ -92,6 +92,11 @@ public final class SmokeTest {
         checks.put("reused_challenge_is_unauthorized", SmokeTest::reusedChallengeIsUnauthorized);
         checks.put("bad_challenge_signature_is_unauthorized", SmokeTest::badChallengeSignatureIsUnauthorized);
         checks.put("challenge_for_another_key_is_unauthorized", SmokeTest::challengeForAnotherKeyIsUnauthorized);
+        checks.put("raw_nonce_signature_is_unauthorized", SmokeTest::rawNonceSignatureIsUnauthorized);
+        checks.put(
+                "transcript_for_another_host_key_is_unauthorized",
+                SmokeTest::transcriptForAnotherHostKeyIsUnauthorized);
+        checks.put("challenge_signature_is_not_a_commit_signature", SmokeTest::challengeSignatureIsNotACommitSignature);
         checks.put("token_of_another_host_is_unauthorized", SmokeTest::tokenOfAnotherHostIsUnauthorized);
         checks.put("expired_token_is_unauthorized", SmokeTest::expiredTokenIsUnauthorized);
         checks.put("malformed_auth_bodies_are_bad_request", SmokeTest::malformedAuthBodiesAreBadRequest);
@@ -757,10 +762,15 @@ public final class SmokeTest {
                     obj("ed25519PublicKey", b64(pk(key)), "nonce", nonce, "signature", b64(signature)));
         }
 
+        /** {@code seed}'s signature over the SPEC 3.3 transcript for this host's key and {@code nonce}. */
+        byte[] signChallenge(byte[] seed, String nonce) throws AvpException {
+            return AvpAuth.signChallenge(key(), seed, unb64(nonce));
+        }
+
         /** The challenge and token flow of SPEC 3.3; returns the bearer token. */
         String login(byte[] key) throws Exception {
             String nonce = challenge(key);
-            Reply r = redeem(key, nonce, sign(key, unb64(nonce)));
+            Reply r = redeem(key, nonce, signChallenge(key, nonce));
             eq(r.status, 200, "token: " + r.body);
             return (String) r.at("token");
         }
@@ -1541,7 +1551,7 @@ public final class SmokeTest {
         Node host = start();
         byte[] key = seed();
         String nonce = host.challenge(key);
-        Reply r = host.redeem(key, nonce, sign(key, unb64(nonce)));
+        Reply r = host.redeem(key, nonce, host.signChallenge(key, nonce));
         eq(r.status, 200, "status");
         eq(((Map<?, ?>) r.json).keySet(), Set.of("token", "expiresAt"), "keys");
         isTrue((Long) r.at("expiresAt") > nowMs(), "expiry in the future");
@@ -1553,14 +1563,14 @@ public final class SmokeTest {
         String nonce = host.challenge(key);
         // The challenge TTL is 2 minutes (SPEC 3.3 RECOMMENDED at most 2 minutes).
         host.advanceClock(2 * 60 * 1000 + 1);
-        assertError(host.redeem(key, nonce, sign(key, unb64(nonce))), 401, "unauthorized");
+        assertError(host.redeem(key, nonce, host.signChallenge(key, nonce)), 401, "unauthorized");
     }
 
     private static void reusedChallengeIsUnauthorized() throws Exception {
         Node host = start();
         byte[] key = seed();
         String nonce = host.challenge(key);
-        byte[] sig = sign(key, unb64(nonce));
+        byte[] sig = host.signChallenge(key, nonce);
         eq(host.redeem(key, nonce, sig).status, 200, "first use");
         assertError(host.redeem(key, nonce, sig), 401, "unauthorized");
     }
@@ -1572,13 +1582,13 @@ public final class SmokeTest {
         // Signing the base64 text instead of the raw nonce bytes.
         assertError(host.redeem(key, nonce, sign(key, bytes(nonce))), 401, "unauthorized");
         // A failed attempt consumes the nonce: it is single-use.
-        assertError(host.redeem(key, nonce, sign(key, unb64(nonce))), 401, "unauthorized");
+        assertError(host.redeem(key, nonce, host.signChallenge(key, nonce)), 401, "unauthorized");
         // A signature by another key.
         String nonce2 = host.challenge(key);
-        assertError(host.redeem(key, nonce2, sign(seed(), unb64(nonce2))), 401, "unauthorized");
+        assertError(host.redeem(key, nonce2, host.signChallenge(seed(), nonce2)), 401, "unauthorized");
         // A nonce the host never issued.
         String fake = b64(AvpCrypto.randomBytes(32));
-        assertError(host.redeem(key, fake, sign(key, unb64(fake))), 401, "unauthorized");
+        assertError(host.redeem(key, fake, host.signChallenge(key, fake)), 401, "unauthorized");
     }
 
     private static void challengeForAnotherKeyIsUnauthorized() throws Exception {
@@ -1587,7 +1597,39 @@ public final class SmokeTest {
         byte[] mallory = seed();
         String nonce = host.challenge(alice);
         // Mallory signs alice's nonce correctly with her own key: not issued for that key.
-        assertError(host.redeem(mallory, nonce, sign(mallory, unb64(nonce))), 401, "unauthorized");
+        assertError(host.redeem(mallory, nonce, host.signChallenge(mallory, nonce)), 401, "unauthorized");
+    }
+
+    private static void rawNonceSignatureIsUnauthorized() throws Exception {
+        // SPEC 3.3: the old construction, a signature over the raw nonce bytes, is no longer accepted.
+        Node host = start();
+        byte[] key = seed();
+        String nonce = host.challenge(key);
+        assertError(host.redeem(key, nonce, sign(key, unb64(nonce))), 401, "unauthorized");
+    }
+
+    private static void transcriptForAnotherHostKeyIsUnauthorized() throws Exception {
+        // SPEC 3.3: the transcript binds the host key, so a signature a client made for host b (which
+        // relayed a's nonce) is rejected at host a.
+        Node a = start();
+        Node b = start();
+        byte[] key = seed();
+        String nonce = a.challenge(key);
+        assertError(a.redeem(key, nonce, b.signChallenge(key, nonce)), 401, "unauthorized");
+        // The failed attempt consumed the nonce, so even the right transcript is refused now.
+        assertError(a.redeem(key, nonce, a.signChallenge(key, nonce)), 401, "unauthorized");
+    }
+
+    private static void challengeSignatureIsNotACommitSignature() throws Exception {
+        // SPEC 4.1: a host that picks a commit id as its "nonce" gets a challenge-domain signature, and
+        // a commit carrying it as the author signature is refused.
+        Node host = start();
+        Created cr = created(host);
+        Repo repo = cr.repo();
+        AvpCommit.Commit child = repo.commit(repo.owner.seed, List.of(repo.root.commitId()), EMPTY_PAYLOAD);
+        byte[] asChallenge = AvpAuth.signChallenge(host.key(), repo.owner.seed, child.commitId());
+        assertError(push(host, repo, cr.token(), withSignature(child, asChallenge)), 400, "bad_request");
+        eq(push(host, repo, cr.token(), child).status, 200, "the honestly signed commit is accepted");
     }
 
     private static void tokenOfAnotherHostIsUnauthorized() throws Exception {
@@ -1908,9 +1950,9 @@ public final class SmokeTest {
         String nb = host.challenge(b);
         host.advanceClock(1);
         String nc = host.challenge(c);
-        assertError(host.redeem(a, na, sign(a, unb64(na))), 401, "unauthorized");
-        eq(host.redeem(b, nb, sign(b, unb64(nb))).status, 200, "b");
-        eq(host.redeem(c, nc, sign(c, unb64(nc))).status, 200, "c");
+        assertError(host.redeem(a, na, host.signChallenge(a, na)), 401, "unauthorized");
+        eq(host.redeem(b, nb, host.signChallenge(b, nb)).status, 200, "b");
+        eq(host.redeem(c, nc, host.signChallenge(c, nc)).status, 200, "c");
     }
 
     private static void tokenCapPerKeyIsQuotaExceeded() throws Exception {
@@ -1919,7 +1961,7 @@ public final class SmokeTest {
         host.login(key);
         host.login(key);
         String nonce = host.challenge(key);
-        assertError(host.redeem(key, nonce, sign(key, unb64(nonce))), 429, "quota_exceeded");
+        assertError(host.redeem(key, nonce, host.signChallenge(key, nonce)), 429, "quota_exceeded");
         // Another key still logs in.
         host.login(seed());
     }

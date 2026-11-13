@@ -14,8 +14,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +78,7 @@ public final class AvpVectors {
         section("manifest-wraps", AvpVectors::manifestWraps);
         section("commit", AvpVectors::commit);
         section("federation", AvpVectors::federation);
+        section("challenges", AvpVectors::challenges);
         section("negative", AvpVectors::negative);
         section("merge", AvpVectors::merge);
         section("hlc", AvpVectors::hlc);
@@ -712,6 +715,62 @@ public final class AvpVectors {
         }
     }
 
+    // ─── federation.json challenges: the challenge transcript (SPEC 3.3) ──────────────
+
+    private static void challenges() throws Exception {
+        Map<String, Object> file = m(load("federation.json"));
+        Map<String, Object> mseeds = m(m(load("manifest.json")).get("seeds"));
+        List<byte[]> hostKeys = new ArrayList<>();
+        for (Object h : l(mseeds.get("hosts"))) {
+            hostKeys.add(b64(s(m(h), "hostKey")));
+        }
+        List<Object> cases = l(file.get("challenges"));
+        eq(2, cases.size(), "challenge count");
+        for (Object o : cases) {
+            Map<String, Object> c = m(o);
+            String name = s(c, "name");
+            byte[] hostKey = b64(s(c, "hostKey"));
+            byte[] key = b64(s(c, "ed25519PublicKey"));
+            byte[] nonce = b64(s(c, "nonce"));
+            byte[] sig = b64(s(c, "signature"));
+            check(nonce.length >= 32, name + ": nonce of at least 32 bytes");
+            eq(s(c, "messageHex"), AvpEncoding.hex(AvpAuth.challengeMessage(hostKey, key, nonce)), name + " message");
+            // The SPEC 3.3 layout written out by hand: tag, then three length-prefixed fields.
+            ByteArrayOutputStream byHand = new ByteArrayOutputStream();
+            byHand.writeBytes("avp/challenge/v1".getBytes(StandardCharsets.UTF_8));
+            byHand.write(0);
+            for (byte[] field : List.of(hostKey, key, nonce)) {
+                byHand.writeBytes(ByteBuffer.allocate(4).putInt(field.length).array());
+                byHand.writeBytes(field);
+            }
+            eq(s(c, "messageHex"), AvpEncoding.hex(byHand.toByteArray()), name + " hand-built message");
+            check(AvpAuth.verifyChallenge(hostKey, key, nonce, sig), name + " verifies");
+            byte[] seed = seedOf(mseeds, s(c, "ed25519PublicKey"));
+            eq(
+                    s(c, "signature"),
+                    AvpEncoding.base64(AvpAuth.signChallenge(hostKey, seed, nonce)),
+                    name + " reproduces");
+            for (byte[] other : hostKeys) {
+                if (!Arrays.equals(other, hostKey)) {
+                    check(!AvpAuth.verifyChallenge(other, key, nonce, sig), name + ": bound to its host key");
+                }
+            }
+            check(!AvpCrypto.ed25519Verify(key, nonce, sig), name + ": not a signature over the raw nonce");
+        }
+        rejects(() -> AvpAuth.challengeMessage(new byte[31], new byte[32], new byte[32]), "a 31-byte host key");
+        rejects(() -> AvpAuth.challengeMessage(new byte[32], new byte[33], new byte[32]), "a 33-byte key");
+        check(!AvpAuth.verifyChallenge(new byte[31], new byte[32], new byte[32], new byte[64]), "verify never throws");
+    }
+
+    /** The Ed25519 seed of a manifest.json party (the owner or a member) by its public key. */
+    private static byte[] seedOf(Map<String, Object> mseeds, String publicKey) throws AvpException {
+        Map<String, Object> owner = m(mseeds.get("owner"));
+        if (s(owner, "ownerKey").equals(publicKey)) {
+            return hx(s(owner, "ed25519SeedHex"));
+        }
+        return hx(s(find(l(mseeds.get("members")), "ed25519PublicKey", publicKey), "ed25519SeedHex"));
+    }
+
     // ─── negative.json (MUST reject, and each base MUST be accepted) ──────────────────
 
     /** Applies the case's operation; a decode failure throws, a failed verification answers false. */
@@ -767,6 +826,13 @@ public final class AvpVectors {
             case "leave-verify" -> {
                 return AvpTokens.verifyLeave(AvpTokens.leaveFromJson(c.get("leave")));
             }
+            case "challenge-verify" -> {
+                return AvpAuth.verifyChallenge(
+                        b64(s(c, "hostKey")),
+                        b64(s(c, "ed25519PublicKey")),
+                        b64(s(c, "nonce")),
+                        b64(s(c, "signature")));
+            }
             default -> throw new IllegalStateException("unknown negative op " + s(c, "op"));
         }
     }
@@ -786,8 +852,21 @@ public final class AvpVectors {
 
     private static void negative() throws Exception {
         List<Object> cases = l(m(load("negative.json")).get("cases"));
-        // 23 cases plus the six strict Ed25519 rejects of SPEC 2.
-        eq(29, cases.size(), "negative case count");
+        // 23 cases, the six strict Ed25519 rejects of SPEC 2, then the five challenge cases (SPEC 3.3, 4.1).
+        eq(34, cases.size(), "negative case count");
+        List<String> tail = new ArrayList<>();
+        for (Object o : cases.subList(29, cases.size())) {
+            tail.add(s(m(o), "name"));
+        }
+        eq(
+                List.of(
+                        "challenge/signature-presented-as-commit-signature",
+                        "challenge/commit-sig-message-as-nonce",
+                        "challenge/commit-signature-presented-as-challenge",
+                        "challenge/made-for-other-host-key",
+                        "challenge/signature-over-raw-nonce"),
+                tail,
+                "the challenge cases come last");
         int withBase = 0;
         for (Object o : cases) {
             Map<String, Object> c = m(o);
@@ -809,7 +888,7 @@ public final class AvpVectors {
                 check(false, name + ": unexpected " + e);
             }
         }
-        eq(15, withBase, "negative cases with a base");
+        eq(20, withBase, "negative cases with a base");
     }
 
     // ─── merge.json (SPEC 5, 5.1) ─────────────────────────────────────────────────────

@@ -244,9 +244,11 @@ and says nothing about the secret; the key a challenge was issued for is compare
 
 ## Try it
 
-The auth flow (SPEC 3.3): `challenge` returns a base64 nonce, the client signs the **raw nonce
-bytes** (base64-decode it first) with its Ed25519 key, and `token` returns a bearer token valid only
-at this host. Real request bodies (owner-signed manifests, signed commits) come from a client; the
+The auth flow (SPEC 3.3): `challenge` returns a base64 nonce, the client signs the transcript
+`CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))` over the raw nonce
+bytes (base64-decode it first) and this host's key with its Ed25519 key (`AvpAuth`), and `token`
+returns a bearer token valid only at this host. A signature over the raw nonce alone is
+`401 unauthorized`. Real request bodies (owner-signed manifests, signed commits) come from a client; the
 checks in [`SmokeTest.java`](SmokeTest.java) build every one of them with the shared sources.
 
 ```sh
