@@ -297,12 +297,22 @@ pub(crate) struct HostHeaders {
     pub(crate) signature: Option<String>,
 }
 
+/// `AVP-Host-Time` as SPEC 9.3 states it: decimal digits with an optional leading `-`, nothing
+/// else (no `+`, no spaces, no other base).
+fn decimal(text: &str) -> Option<i64> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// The sender's key if the request is from a configured peer, is signed over exactly this method,
 /// path, and body, and is within the skew window; `None` (answered `401`) otherwise.
 pub(crate) fn authenticate(st: &State, method: &str, path: &str, body: &[u8], h: &HostHeaders) -> Option<Id> {
-    let key = b64_decode_array::<32>(h.key.as_deref()?.trim()).ok()?;
-    let time: i64 = h.time.as_deref()?.trim().parse().ok()?;
-    let signature = b64_decode_array::<64>(h.signature.as_deref()?.trim()).ok()?;
+    let key = b64_decode_array::<32>(h.key.as_deref()?).ok()?;
+    let time = decimal(h.time.as_deref()?)?;
+    let signature = b64_decode_array::<64>(h.signature.as_deref()?).ok()?;
     if !st.repl.peers.contains(&key) {
         return None;
     }
@@ -326,7 +336,6 @@ pub(crate) struct HeadsBody {
 
 /// `ManifestTip`.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ManifestTip {
     #[serde(rename = "manifestSeq")]
     pub(crate) seq: i64,
@@ -334,9 +343,9 @@ pub(crate) struct ManifestTip {
     pub(crate) hash: Id,
 }
 
-/// `HeadsResponse`.
+/// `HeadsResponse`. Peer answers are decoded tolerantly: a field this host does not know is ignored,
+/// while every item still goes through the engine. Requests this host receives stay strict.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct HeadsReply {
     #[serde(rename = "manifestTip")]
     pub(crate) tip: ManifestTip,
@@ -354,9 +363,9 @@ pub(crate) struct FetchBody {
     pub(crate) ids: Vec<Id>,
 }
 
-/// `FetchResponse`, and the item lists of `OfferRequest`.
+/// `FetchResponse` (decoded tolerantly, like every peer answer), and the item lists of
+/// `OfferRequest` (whose strict body type is [`OfferBody`]).
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Items {
     pub(crate) manifests: Vec<SignedManifest>,
     pub(crate) commits: Vec<Commit>,
@@ -383,7 +392,6 @@ pub(crate) struct OfferBody {
 
 /// `RejectedItem`.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RejectedItem {
     #[serde(with = "b64_array")]
     pub(crate) id: Id,
@@ -392,7 +400,6 @@ pub(crate) struct RejectedItem {
 
 /// `OfferResponse`.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct OfferReply {
     #[serde(with = "b64_ids")]
     pub(crate) accepted: Vec<Id>,

@@ -134,7 +134,8 @@ and pending commits are not heads and are not served.
 
 ### Request signature
 
-Each request carries `AVP-Host-Key` (base64), `AVP-Host-Time` (epoch milliseconds, decimal), and
+Each request carries `AVP-Host-Key` (base64), `AVP-Host-Time` (epoch milliseconds, decimal digits
+with an optional leading `-` and nothing else: no `+`, no spaces, no other base), and
 `AVP-Host-Signature`, base64 of Ed25519 over
 `CE(tag "avp/host-req/v1", str("POST"), str(path), bytes(SHA-256(body)), i64(time))`, where `path` is
 the request path as sent, without the query, and `body` the exact body bytes. The receiver verifies
@@ -165,6 +166,10 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
 
 The state lock is never held across an outbound call. Outbound calls time out after 10 seconds and
 read at most 16 MiB of response; a peer answer that is too large, malformed, or not `200` is dropped.
+Peer answers are decoded tolerantly (a field this host does not know is ignored, so another
+implementation may add fields), while every item in them still goes through the engine; the
+requests this host receives are decoded strictly, as the schema's `additionalProperties: false`
+says.
 
 A newly listed host gets its first copy by replication (SPEC 8.1): the received tip must list it and
 the sender, and the earlier states of the chain need not list it. The host does not apply the SPEC

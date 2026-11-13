@@ -1507,7 +1507,27 @@ fn first_copy_with_forged_listing_state_stores_nothing() {
 
 /// A peer that answers every request badly, in turn: not JSON, oversized, the wrong shape, a
 /// server error, too slow (beyond the request timeout), or a closed connection. It counts requests.
-fn bad_peer(stop: Arc<AtomicBool>, hits: Arc<AtomicUsize>) -> (SocketAddr, JoinHandle<()>) {
+fn http_ok(body: &str) -> Vec<u8> {
+    let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    r.extend_from_slice(body.as_bytes());
+    r
+}
+
+/// The bad peer's answers. `heads` cycles through the bad answers of [`bad_peer`] and one valid
+/// answer (with a field the schema does not have, which a tolerant decoder ignores) advertising
+/// heads this host lacks; `fetch` always answers those heads as commits that would be stored if
+/// the answer were trusted.
+struct BadAnswers {
+    heads: String,
+    fetch: String,
+}
+
+fn bad_peer(
+    stop: Arc<AtomicBool>,
+    hits: Arc<AtomicUsize>,
+    fetches: Arc<AtomicUsize>,
+    answers: BadAnswers,
+) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1520,9 +1540,15 @@ fn bad_peer(stop: Arc<AtomicBool>, hits: Arc<AtomicUsize>) -> (SocketAddr, JoinH
             let _ = s.set_nonblocking(false);
             let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
             let mut buf = [0u8; 8192];
-            let _ = s.read(&mut buf);
+            let got = s.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(buf.get(..got).unwrap_or_default()).to_string();
+            if head.starts_with("POST /v1/host/repos/") && head.contains("/fetch ") {
+                fetches.fetch_add(1, Ordering::SeqCst);
+                let _ = s.write_all(&http_ok(&answers.fetch));
+                continue;
+            }
             let n = hits.fetch_add(1, Ordering::SeqCst);
-            let reply: Vec<u8> = match n % 6 {
+            let reply: Vec<u8> = match n % 7 {
                 0 => b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot json".to_vec(),
                 1 => {
                     let body = vec![b'['; 300 * 1024];
@@ -1541,7 +1567,8 @@ fn bad_peer(stop: Arc<AtomicBool>, hits: Arc<AtomicUsize>) -> (SocketAddr, JoinH
                     thread::sleep(Duration::from_millis(1500));
                     b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()
                 }
-                _ => Vec::new(),
+                5 => Vec::new(),
+                _ => http_ok(&answers.heads),
             };
             let _ = s.write_all(&reply);
         }
@@ -1553,20 +1580,39 @@ fn bad_peer(stop: Arc<AtomicBool>, hits: Arc<AtomicUsize>) -> (SocketAddr, JoinH
 fn bad_peer_responses_do_not_stop_replication() {
     let stop = Arc::new(AtomicBool::new(false));
     let hits = Arc::new(AtomicUsize::new(0));
-    let (addr, server) = bad_peer(Arc::clone(&stop), Arc::clone(&hits));
+    let fetches = Arc::new(AtomicUsize::new(0));
     let bad_key = new_key();
     let mut a = node();
     let mut b = node();
+    let repo = genesis(&[b.key(), a.key(), pk(&bad_key)], b.key());
+    let id = repo.id();
+    // Items that would be stored if the bad peer's answers were trusted: a commit with a forged
+    // owner signature and a stranger's validly signed commit, both advertised as heads.
+    let mut forged = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"forged");
+    forged.author_signature[0] ^= 1;
+    let stranger = Device::new();
+    let outsider = repo.commit(&stranger.sign, vec![repo.root.commit_id], b"outsider");
+    let answers = BadAnswers {
+        heads: json!({
+            "manifestTip": { "manifestSeq": 1, "manifestHash": b64_encode(&hash(&repo.genesis)) },
+            "heads": ids(&[forged.commit_id, outsider.commit_id]),
+            "extra": "a field this host ignores in a peer answer",
+        })
+        .to_string(),
+        fetch: json!({
+            "manifests": [], "commits": [to_json(&forged), to_json(&outsider)], "leaves": [], "extra": 1,
+        })
+        .to_string(),
+    };
+    let (addr, server) = bad_peer(Arc::clone(&stop), Arc::clone(&hits), Arc::clone(&fetches), answers);
     a.peer_with(&[b.entry()]);
     b.peer_with(&[a.entry(), format!("{}@http://{addr}", b64_encode(&pk(&bad_key)))]);
-    let repo = genesis(&[b.key(), a.key(), pk(&bad_key)], b.key());
     let token = create(&b, &repo);
-    let id = repo.id();
 
     // B keeps sweeping the bad peer through two full rounds of bad answers, and client requests on
     // B stay fast while a call to the bad peer hangs: the state lock is never held across a call.
     let deadline = Instant::now() + CONVERGE;
-    while hits.load(Ordering::SeqCst) < 12 {
+    while hits.load(Ordering::SeqCst) < 14 {
         assert!(Instant::now() < deadline, "B stopped calling the bad peer");
         let t = Instant::now();
         assert_eq!(pull(&b, &repo, &token).status, 200);
@@ -1576,8 +1622,16 @@ fn bad_peer_responses_do_not_stop_replication() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // Nothing from the bad peer was stored, and replication to a good peer still works.
+    // B decoded the valid heads answer despite its extra field and fetched the advertised heads,
+    // but the engine stored neither commit: nothing from the bad peer was stored.
+    eventually("B fetched from the bad peer", || fetches.load(Ordering::SeqCst) >= 1);
+    let before = b.view(&id, |v| format!("{v:?}"));
+    thread::sleep(SWEEP * 4);
+    assert_eq!(b.view(&id, |v| v.status(&forged.commit_id)), Some(None));
+    assert_eq!(b.view(&id, |v| v.status(&outsider.commit_id)), Some(None));
+    assert_eq!(b.view(&id, |v| format!("{v:?}")), before);
     assert_eq!(b.tip_hash(&id), Some(hash(&repo.genesis)));
+    assert_eq!(b.heads(&id), vec![repo.root.commit_id]);
     let c = repo.commit(&repo.owner.sign, vec![repo.root.commit_id], b"after");
     assert_eq!(push(&b, &repo, &token, &c).status, 200);
     eventually("A has the commit written on B", || a.heads(&id) == vec![c.commit_id]);
@@ -1846,4 +1900,111 @@ fn rejected_offers_do_not_grow_a_held_repository() {
     for c in &all {
         assert_eq!(b.view(&id, |v| v.status(&c.commit_id)), Some(None));
     }
+}
+
+/// Minor b: `AVP-Host-Time` is strictly decimal digits (with an optional minus sign).
+#[test]
+fn host_time_must_be_plain_decimal() {
+    let (b, p) = node_with_fake();
+    let repo = genesis(&[b.key(), p.key()], b.key());
+    create(&b, &repo);
+    let id = repo.id();
+    let path = host_path(&id, "heads");
+    let body = json!({}).to_string().into_bytes();
+    let now = now_ms();
+    for text in [
+        format!("+{now}"),
+        format!("{now}.0"),
+        format!("{now}x"),
+        format!("0x{now:x}"),
+    ] {
+        let mut h = host_headers(&p.sign, "POST", &path, &body, now);
+        h[1].1 = text.clone();
+        assert_error(&b.raw("POST", &path, &h, &body), 401, "unauthorized");
+    }
+}
+
+/// Minor c: reject paths of the host routes.
+#[test]
+fn host_route_reject_paths() {
+    let (b, p) = node_with_fake();
+    let mut repo = genesis(&[b.key(), p.key()], b.key());
+    let token = create(&b, &repo);
+    let id = repo.id();
+
+    // A body repoId that differs from the path.
+    let other = genesis(&[b.key()], b.key()).id();
+    let mut body = offer(&id, &[], &[], &[]);
+    body["repoId"] = json!(other);
+    assert_error(&b.host(&p.sign, &id, "offer", &body), 400, "bad_request");
+
+    // Over the item bound: 4097 ids in a fetch, 4097 leave requests in an offer.
+    let many: Vec<Id> = (0..4097).map(|_| random_bytes::<32>()).collect();
+    assert_error(
+        &b.host(&p.sign, &id, "fetch", &fetch_body(&id, &many)),
+        400,
+        "bad_request",
+    );
+    let bob = Device::new();
+    let leave = to_json(&leave_request(&repo, &bob.sign));
+    let body = json!({ "repoId": id, "manifests": [], "commits": [], "leaves": vec![leave; 4097] });
+    assert_error(&b.host(&p.sign, &id, "offer", &body), 400, "bad_request");
+
+    // An invalid leave request (bad signature) is dropped: not stored and not reported.
+    let entry = bob.entry(&repo.data_key, 0, b.key());
+    let s2 = repo.next(|s| s.members.push(entry));
+    assert_eq!(publish(&b, &repo, &token, &s2, None).status, 200);
+    repo.tip = s2;
+    let mut bad = leave_request(&repo, &bob.sign);
+    bad.signature[0] ^= 1;
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[], &[], &[&bad]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json, json!({ "accepted": [], "rejected": [] }));
+    assert_eq!(b.view(&id, |v| v.leaves().len()), Some(0));
+}
+
+/// Minor c: SPEC 8.3, a verified losing epoch-raising state offered without its rotation commit
+/// (the sender never had it) is kept for manifest binding, off the chain, and served by hash with no
+/// rotation commit.
+#[test]
+fn losing_raising_state_without_its_rotation_commit_is_retained() {
+    let (b, p) = node_with_fake();
+    let mut repo = genesis(&[b.key(), p.key()], b.key());
+    let token = create(&b, &repo);
+    let id = repo.id();
+    let b_key = b.key();
+    let (lose, _rot) = upper_half(
+        |n| {
+            let new_key = random_bytes::<32>();
+            let entry = repo.owner.entry(&new_key, 1, b_key);
+            let state = repo.next(|s| {
+                s.key_epoch = 1;
+                s.members = vec![entry];
+                if let Some(h) = s.hosts.last_mut() {
+                    h.locator = format!("l{n}.vault.example");
+                }
+            });
+            let commit = commit_on(
+                &state,
+                &new_key,
+                &repo.owner.sign,
+                vec![repo.root.commit_id],
+                b"rotation",
+            );
+            (state, commit)
+        },
+        |(m, _)| m,
+    );
+    let win = winner_against(&repo, &lose);
+    assert_eq!(publish(&b, &repo, &token, &win, None).status, 200);
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&lose], &[], &[]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(rejected(&r), HashSet::from([pair(&hash(&lose), "manifest_conflict")]));
+    assert_eq!(b.view(&id, |v| v.manifest(&hash(&lose)).is_some()), Some(true));
+    assert_eq!(b.view(&id, |v| v.is_winning(&hash(&lose))), Some(false));
+    repo.tip = win.clone();
+    assert_eq!(b.tip_hash(&id), Some(hash(&win)));
+    let r = b.host(&p.sign, &id, "fetch", &fetch_body(&id, &[hash(&lose)]));
+    assert_eq!(r.json["manifests"], json!([to_json(&repo.genesis), to_json(&lose)]));
+    assert_eq!(r.json["commits"], json!([]));
 }
