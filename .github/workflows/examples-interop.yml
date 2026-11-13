@@ -63,7 +63,7 @@ jobs:
           PAIR: ${{ matrix.pair }}
         run: |
           RUST_CLIENT="cargo run --quiet --manifest-path examples/rust/client/Cargo.toml"
-          JAVA_CLIENT="java -cp examples/java/client/build Client"
+          JAVA_CLIENT="java -Davp.wordlist=vectors/bip39-english.txt -cp examples/java/client/build Client"
           case "$PAIR" in
             rust-client-java-host) bash harness/run-hosts.sh java -- $RUST_CLIENT ;;
             java-client-rust-host) bash harness/run-hosts.sh rust -- $JAVA_CLIENT ;;

@@ -80,6 +80,6 @@ tasks:
       - cargo build --manifest-path examples/rust/client/Cargo.toml
       - cd examples/java/client && javac -d build ../avp/*.java Vault.java Client.java
       - bash harness/run-hosts.sh java -- cargo run --quiet --manifest-path examples/rust/client/Cargo.toml
-      - bash harness/run-hosts.sh rust -- java -cp examples/java/client/build Client
+      - bash harness/run-hosts.sh rust -- java -Davp.wordlist=vectors/bip39-english.txt -cp examples/java/client/build Client
       - bash harness/run-hosts.sh rust java -- cargo run --quiet --manifest-path examples/rust/client/Cargo.toml
-      - bash harness/run-hosts.sh java rust -- java -cp examples/java/client/build Client
+      - bash harness/run-hosts.sh java rust -- java -Davp.wordlist=vectors/bip39-english.txt -cp examples/java/client/build Client
