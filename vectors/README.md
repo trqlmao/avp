@@ -106,18 +106,22 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
   `not_hosted` is an engine verdict only for `via: "push"`: a client write of a state whose `hosts` does
   not list this host (SPEC §6.1 rule 6). For `via: "offer"` it is host level, like the two answers above:
   the host validates the offer (and any catch-up) on a trial copy, checks that the validated received tip
-  (the tip of the winning chain it would hold afterwards, SPEC §9.2) lists it, and otherwise rejects the
-  offer with `403 not_hosted` and stores nothing. The engine therefore does not reject an offered state
+  (the tip of the winning chain it would hold afterwards, SPEC §9.2) lists it, and otherwise answers the
+  offer with `403 not_hosted`: for a repository it did not hold it discards the trial copy and stores
+  nothing, and for one it holds it keeps the trial copy (SPEC §8.6). The engine therefore does not reject an offered state
   because it does not list this host, so a newly listed host can take the earlier states of the chain
   (SPEC §8.1); the offered steps of a scenario are items whose received tip passed that check. The engine
   reports whether its current tip lists this host, which the host uses for that check and to refuse to
   serve a repository whose tip does not list it (SPEC §8.6, §10.1).
 
-  Whether a repository is **not hosted** (SPEC §8.6) is also host state, not an engine verdict, and no
-  scenario pins it: a host that holds a repository and is offered or published a validated state that
-  would become its winning tip and does not list it answers `403 not_hosted`, does not adopt the state,
-  and stops serving the repository until it adopts by replication a validated winning tip that lists it
-  and supersedes that state. The engine keeps no such marker.
+  Whether a held repository is **not hosted** (SPEC §8.6) is a function of the engine's winning tip, not a
+  separate marker: the host does not serve the repository, and refuses client writes for it, exactly while
+  the tip does not list it. A host that holds a repository adopts a validated state that drops it, from a
+  client publish (whose answer is still the engine's `not_hosted`, which the shared scenarios pin) or from
+  an offer, so its tip can stop listing it; it is hosted again when the tie rule and later states give it
+  a winning tip that lists it (SPEC §6.5). No scenario pins this host-level keeping: the engine itself does
+  not adopt a pushed state it answers `not_hosted` (so `manifest-drops-this-host` ends at genesis), and the
+  host keeps such a state by applying the same item to its engine again with `via: "offer"`.
 
 ## Cryptographic primitive vectors (RFC-anchored)
 

@@ -190,11 +190,14 @@ function contentOk(s: ManifestState, prev: ManifestState | undefined): boolean {
  *
  * Host implementers: on the `"offer"` path this engine applies no per-state hosted check, so it will
  * adopt a whole repository whose states never list this host. The host MUST therefore apply an offer
- * (with its catch-up) to a trial copy of the view, check the validated resulting tip with
- * `tipListsHost()` (the received tip of SPEC 9.2), and then either commit the trial copy atomically or
- * discard it and answer `403 not_hosted`; a first copy is all or nothing. The not-hosted marker of
- * SPEC 8.6 (set when a validated state that would become the winning tip drops this host, on publish
- * or on offer) is host state; this engine does not keep it.
+ * (with its catch-up) to a trial copy of the view and check the validated resulting tip with
+ * `tipListsHost()` (the received tip of SPEC 9.2). If the host did not hold the repository and that tip
+ * does not list it, it MUST discard the trial copy and answer `403 not_hosted` (a first copy is all or
+ * nothing). If it held the repository, it MUST commit the trial copy atomically and answer
+ * `403 not_hosted` when that tip does not list it (SPEC 8.6). A client publish this engine answers
+ * `not_hosted` passed every other rule; the host MUST keep it by applying the same item again with
+ * `"offer"`. Serving and client writes are gated on `tipListsHost()` (SPEC 8.6, 10.1); there is no
+ * separate not-hosted marker.
  */
 export class RepoView {
   private readonly hostKey: Buffer;
