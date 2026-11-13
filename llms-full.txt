@@ -1334,7 +1334,8 @@ state; the transport only decides who may talk to it.
   before the received tip is not rejected because it does not list the receiver (§6.1 rule 6).
 - For a repository the receiver does not hold, the first copy is all or nothing: if the validated received
   tip does not list the receiver, it stores nothing from the offer or the catch-up; otherwise it ends
-  holding a validated chain whose tip lists it.
+  holding a validated chain whose tip lists it. A first copy that would exceed the receiver's repository
+  limits is rejected as §12.1 states (the reference hosts answer `429 quota_exceeded`) and stores nothing.
 - A receiver that holds the repository MUST adopt the validated states it received (each epoch-raising
   state with its rotation commit, §8.3) even when the received tip does not list it, and MAY keep the
   other validated items; it then treats the repository as not hosted while its winning tip does not list
