@@ -605,7 +605,9 @@ pub(crate) fn apply_items(view: &mut RepoView, repo_id: &str, items: Items, stat
     for (ci, c) in commits.iter().enumerate() {
         if let Some(&si) = state_at.get(&c.manifest_hash) {
             if let (Some(p), Some(list)) = (states.get(si), candidates.get_mut(si)) {
-                if is_rotation_for(c, &p.m, &p.hash) && c.verify().is_ok() {
+                // Only a state after the genesis with a raised epoch can have a rotation commit.
+                let may_raise = p.m.state.manifest_seq > 1 && p.m.state.key_epoch > 0;
+                if may_raise && is_rotation_for(c, &p.m, &p.hash) && c.verify().is_ok() {
                     list.push(ci);
                 }
             }
