@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-//! In-memory AVP 0.5 reference host, HTTP/JSON profile, client-facing API.
+//! In-memory AVP 0.5 reference host, HTTP/JSON profile: the client-facing API and host-to-host
+//! replication.
 //!
 //! The host is a thin layer over the shared `avp` crate: [`api`] authenticates the caller, decodes
 //! the body, checks the caller identity each operation requires (SPEC 10.1), and hands the item to
@@ -14,7 +15,8 @@
 //!
 //! - [`auth`]: the host-issued challenge and token flow (SPEC 3.3).
 //! - [`store`]: the repositories and the acceptances this host issued.
-//! - [`api`]: routing and the per-operation rules of SPEC 10.
+//! - [`api`]: routing and the per-operation rules of SPEC 10, and the host routes of SPEC 9.3.
+//! - [`replication`]: the peer list, host request signatures, and the replication workers (SPEC 9).
 //!
 //! Illustrative reference code, not production: state lives in memory and there is no TLS.
 
@@ -22,6 +24,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod replication;
 pub mod store;
 
 use std::io;
@@ -88,8 +91,8 @@ impl Default for Limits {
 
 /// Everything one host process holds.
 ///
-/// The replication task (host-to-host routes, peers) adds its own fields here; the client routes
-/// only read [`State::store`], [`State::auth`], and the host key.
+/// The request handlers and the replication workers share it behind one mutex; no one holds that
+/// mutex across an outbound host call.
 pub struct State {
     /// This host's Ed25519 host key (SPEC 3.3). It signs acceptances and identifies the host.
     host: SigningKey,
@@ -101,6 +104,11 @@ pub struct State {
     pub limits: Limits,
     /// Added to the system clock. Zero in the binary; tests move it to expire challenges and tokens.
     pub clock_offset_ms: i64,
+    /// The replication settings (SPEC 9.3).
+    pub replication: replication::Config,
+    /// The peer list, the pause flag, and the queues the request handlers share with the
+    /// replication workers.
+    pub(crate) repl: replication::Runtime,
 }
 
 impl State {
@@ -113,6 +121,8 @@ impl State {
             auth: Auth::default(),
             limits: Limits::default(),
             clock_offset_ms: 0,
+            replication: replication::Config::default(),
+            repl: replication::Runtime::default(),
         }
     }
 
@@ -122,7 +132,7 @@ impl State {
         self.host.verifying_key().to_bytes()
     }
 
-    /// The host signing key, for acceptances (SPEC 8.2) and, later, host request signatures.
+    /// The host signing key, for acceptances (SPEC 8.2) and host request signatures (SPEC 9.3).
     #[must_use]
     pub fn host_signing_key(&self) -> &SigningKey {
         &self.host

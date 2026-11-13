@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: MIT
 
-//! Routing and the client-facing operations of SPEC 10 over HTTP/JSON (SPEC 10.2).
+//! Routing, the client-facing operations of SPEC 10 over HTTP/JSON (SPEC 10.2), and the host routes
+//! of the reference host-to-host profile (SPEC 9.3).
 //!
 //! Each request goes through the same steps: the body is read up to the size limit (`413`), the
 //! route is matched (`404`), the bearer token is checked (`401`, every route but discovery and the
 //! two auth routes), the body is decoded (`400`), the repository is looked up (`404 not_found`,
 //! `403 not_hosted`), the caller is matched against the key SPEC 10.1 requires (`403 forbidden`),
 //! and the item goes to the [`RepoView`] engine, whose [`RejectCode`] maps to the SPEC 10.4 status.
+//! An accepted client write is queued for the repository's other hosts (SPEC 9.2).
+//!
+//! A host route answers `503` while replication is paused by the test control, then checks the host
+//! request signature (`401`), decodes the body (`400`), and checks the repository: `404 not_found`
+//! if not held, `403 not_hosted` if this host's winning tip does not list it, `403 forbidden` if
+//! that tip does not list the calling peer (SPEC 9.2). `offer` instead checks the received tip
+//! after validating the items ([`replication::receive`]).
 //!
 //! No path panics on input. Request bodies are never logged.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::sync::Mutex;
 
@@ -26,6 +35,10 @@ use tiny_http::{Header, Method, Request, Response};
 
 use crate::State;
 use crate::auth::{AuthError, CHALLENGE_TTL_MS, Caps};
+use crate::replication::{
+    self, Admitted, FetchBody, HEADER_KEY, HEADER_SIGNATURE, HEADER_TIME, HeadsBody, HeadsReply, HostHeaders, Items,
+    MAX_ITEMS, ManifestTip, OfferBody, Outgoing,
+};
 
 /// How long an acceptance from `prepareJoin` stays valid (SPEC 8.2: the reference hosts use 15
 /// minutes).
@@ -79,6 +92,17 @@ impl ApiError {
 
     fn too_large() -> ApiError {
         ApiError::new(413, "too_large", "request body too large")
+    }
+
+    /// `503` while replication is paused by the test control (SPEC 9.3); SPEC 10.4 has no code.
+    fn paused() -> ApiError {
+        ApiError {
+            status: 503,
+            code: None,
+            message: "replication is paused".to_string(),
+            detail: None,
+            retry_after_s: None,
+        }
     }
 
     /// A failure that is not the caller's fault (a poisoned lock, a failed serialization).
@@ -207,6 +231,12 @@ struct ManifestBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TestControlBody {
+    paused: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrepareJoinBody {
     #[serde(rename = "repoId")]
     repo_id: String,
@@ -225,8 +255,15 @@ enum RepoOp {
     Leave,
 }
 
-/// A matched route. The replication routes (`/v1/host/...`) and the test control route join this
-/// enum with their own handlers.
+/// A host route of SPEC 9.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostOp {
+    Heads,
+    Fetch,
+    Offer,
+}
+
+/// A matched route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Route {
     Discovery,
@@ -235,14 +272,17 @@ enum Route {
     CreateRepo,
     PrepareJoin,
     Repo(String, RepoOp),
+    Host(String, HostOp),
+    TestControl,
 }
 
-/// A request read off the wire: method, path without the query, the `Authorization` value, and the
-/// body read up to the size limit.
+/// A request read off the wire: method, path without the query, the `Authorization` value, the
+/// three host request headers, and the body read up to the size limit.
 struct Incoming {
     method: Method,
     path: String,
     authorization: Option<String>,
+    host: HostHeaders,
     body: Vec<u8>,
 }
 
@@ -290,15 +330,21 @@ fn read(req: &mut Request, state: &Mutex<State>) -> Result<Incoming, ApiError> {
     }
     let url = req.url();
     let path = url.split_once('?').map_or(url, |(p, _)| p).to_string();
-    let authorization = req
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Authorization"))
-        .map(|h| h.value.as_str().to_string());
+    let header = |name: &'static str| {
+        req.headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str().to_string())
+    };
     Ok(Incoming {
         method: req.method().clone(),
         path,
-        authorization,
+        authorization: header("Authorization"),
+        host: HostHeaders {
+            key: header(HEADER_KEY),
+            time: header(HEADER_TIME),
+            signature: header(HEADER_SIGNATURE),
+        },
         body,
     })
 }
@@ -312,10 +358,21 @@ fn parse_route(method: &Method, path: &str) -> Result<Route, ApiError> {
         (Method::Post, "/api/auth/keypair/token") => return Ok(Route::Token),
         (Method::Post, "/v1/repos") => return Ok(Route::CreateRepo),
         (Method::Post, "/v1/prepare-join") => return Ok(Route::PrepareJoin),
+        (Method::Post, "/v1/test/replication") => return Ok(Route::TestControl),
         _ => {}
     }
     if *method != Method::Post {
         return Err(no_route());
+    }
+    if let Some(rest) = path.strip_prefix("/v1/host/repos/") {
+        let (segment, op) = rest.split_once('/').ok_or_else(no_route)?;
+        let op = match op {
+            "heads" => HostOp::Heads,
+            "fetch" => HostOp::Fetch,
+            "offer" => HostOp::Offer,
+            _ => return Err(no_route()),
+        };
+        return Ok(Route::Host(percent_decode(segment)?, op));
     }
     let rest = path.strip_prefix("/v1/repos/").ok_or_else(no_route)?;
     let (segment, op) = rest.split_once('/').ok_or_else(no_route)?;
@@ -380,6 +437,20 @@ fn handle(req: &Incoming, state: &Mutex<State>) -> Answer {
                 RepoOp::Leave => leave(st, caller, &repo_id, body),
             }
         }
+        Route::Host(repo_id, op) => {
+            if st.repl.paused {
+                return Err(ApiError::paused());
+            }
+            // SPEC 9.3: signed over the method, the path as sent, and the exact body bytes.
+            let peer = replication::authenticate(st, req.method.as_str(), &req.path, body, &req.host)
+                .ok_or_else(|| ApiError::unauthorized("bad host request signature"))?;
+            match op {
+                HostOp::Heads => host_heads(st, &peer, &repo_id, body),
+                HostOp::Fetch => host_fetch(st, &peer, &repo_id, body),
+                HostOp::Offer => host_offer(st, &peer, &repo_id, body),
+            }
+        }
+        Route::TestControl => test_control(st, body),
     }
 }
 
@@ -458,6 +529,7 @@ fn create_repo(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
     // and first-commit rules, and the hosted check (SPEC 6, 8.2). Only a valid genesis can collide
     // with a held repoId, so a forged one never learns whether that id exists here.
     let mut view = RepoView::new(st.host_key(), st.limits.head_bound);
+    let first = commit.clone();
     // The genesis state and its first commit are accepted together or not at all (SPEC 8.2).
     view.apply_manifest_with(manifest, Some(commit), Via::Push)
         .map_err(ApiError::reject)?;
@@ -469,6 +541,15 @@ fn create_repo(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
         return Err(ApiError::quota("repository quota for this owner key exceeded"));
     }
     st.store.repos.insert(tip.state.repo_id.clone(), view);
+    replication::queue_offer(
+        st,
+        Outgoing {
+            repo_id: tip.state.repo_id.clone(),
+            manifests: vec![tip.clone()],
+            commits: vec![first],
+            leaves: Vec::new(),
+        },
+    );
     to_json(&tip)
 }
 
@@ -511,16 +592,15 @@ fn prepare_join(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
 // ─── Repository operations (SPEC 10.1) ──────────────────────────────────────────────────
 
 /// The repository's view: `404 not_found` if this host does not hold it, `403 not_hosted` if its
-/// tip does not list this host (SPEC 10.1).
+/// winning tip does not list this host (SPEC 8.6, 10.1). A repository dropped from this host's
+/// `hosts` is not served and takes no client writes until a replicated tip lists the host again.
 fn hosted<'a>(st: &'a mut State, repo_id: &str) -> Result<&'a mut RepoView, ApiError> {
-    let host_key = st.host_key();
     let view = st
         .store
         .repos
         .get_mut(repo_id)
         .ok_or_else(|| ApiError::not_found("repository not found"))?;
-    let listed = view.tip().is_some_and(|t| t.state.has_host(&host_key));
-    if !listed {
+    if !view.tip_lists_host() {
         return Err(ApiError::reject(RejectCode::NotHosted));
     }
     Ok(view)
@@ -558,14 +638,26 @@ fn push(st: &mut State, caller: [u8; 32], repo_id: &str, body: &[u8]) -> Answer 
         return Err(ApiError::forbidden("caller is not the commit's author"));
     }
     let probe = commit.clone();
-    match view.apply_commit_via(commit, Via::Push) {
+    let answer = match view.apply_commit_via(commit, Via::Push) {
         Ok(()) => to_json(&PushReply {
             accepted: true,
             heads: view.heads(),
         }),
         Err(RejectCode::MissingParents) => Err(ApiError::missing(&view.missing_for(&probe))),
         Err(code) => Err(ApiError::reject(code)),
+    };
+    if answer.is_ok() {
+        replication::queue_offer(
+            st,
+            Outgoing {
+                repo_id: repo_id.to_string(),
+                manifests: Vec::new(),
+                commits: vec![probe],
+                leaves: Vec::new(),
+            },
+        );
     }
+    answer
 }
 
 fn publish_manifest(st: &mut State, caller: [u8; 32], repo_id: &str, body: &[u8]) -> Answer {
@@ -581,8 +673,32 @@ fn publish_manifest(st: &mut State, caller: [u8; 32], repo_id: &str, body: &[u8]
     }
     let probe = commit.clone();
     let submitted = manifest.hash().ok();
+    let kept = manifest.clone();
+    let tip_epoch = tip(view)?.state.key_epoch;
     match view.apply_manifest_with(manifest, commit, Via::Push) {
-        Ok(()) => to_json(tip(view)?),
+        Ok(()) => {
+            let answer = to_json(tip(view)?);
+            replication::queue_offer(
+                st,
+                Outgoing {
+                    repo_id: repo_id.to_string(),
+                    manifests: vec![kept],
+                    commits: probe.into_iter().collect(),
+                    leaves: Vec::new(),
+                },
+            );
+            answer
+        }
+        Err(RejectCode::NotHosted) => {
+            // SPEC 6.1 rule 6, 8.6: the state passed every other rule. The host keeps it (its
+            // winning tip then no longer lists this host), with only its rotation commit when it
+            // raises the epoch: a carried non-rotation commit is not kept, since the offer path
+            // skips the caller check and the head bound. It is not offered to peers.
+            let raising = tip_epoch.checked_add(1) == Some(kept.state.key_epoch);
+            let rotation = if raising { probe } else { None };
+            let _ = view.apply_manifest_with(kept, rotation, Via::Offer);
+            Err(ApiError::reject(RejectCode::NotHosted))
+        }
         Err(RejectCode::MissingParents) => {
             // The engine has rolled the state back, so `missing_for` also names the state this
             // request carries; it is not missing (the commit was checked against it), so only the
@@ -610,6 +726,149 @@ fn leave(st: &mut State, caller: [u8; 32], repo_id: &str, body: &[u8]) -> Answer
     if request.member_key != caller {
         return Err(ApiError::forbidden("caller is not the leaving member"));
     }
+    let queued = request.clone();
     view.apply_leave_via(request, Via::Push).map_err(ApiError::reject)?;
+    replication::queue_offer(
+        st,
+        Outgoing {
+            repo_id: repo_id.to_string(),
+            manifests: Vec::new(),
+            commits: Vec::new(),
+            leaves: vec![queued],
+        },
+    );
     Ok(json!({}))
+}
+
+// ─── Host routes (SPEC 9.1 to 9.3) and the test control ─────────────────────────────────
+
+/// A body `repoId` must name the path's repository; the path is authoritative and the field may be
+/// left out (SPEC 9.3 gives the heads body as `{}`).
+fn same_repo(body: Option<&str>, repo_id: &str) -> Result<(), ApiError> {
+    match body {
+        Some(id) if id != repo_id => Err(ApiError::bad_request("body repoId does not match the path")),
+        _ => Ok(()),
+    }
+}
+
+/// The view a peer may read: `404 not_found` if not held, `403 not_hosted` if this host's winning
+/// tip does not list it (SPEC 8.6), `403 forbidden` if that tip does not list the peer (SPEC 9.2).
+fn served<'a>(st: &'a State, repo_id: &str, peer: &[u8; 32]) -> Result<&'a RepoView, ApiError> {
+    let view = st
+        .store
+        .repos
+        .get(repo_id)
+        .ok_or_else(|| ApiError::not_found("repository not found"))?;
+    if !view.tip_lists_host() {
+        return Err(ApiError::reject(RejectCode::NotHosted));
+    }
+    if !view.tip().is_some_and(|t| t.state.has_host(peer)) {
+        return Err(ApiError::forbidden("the calling host is not in the repository's hosts"));
+    }
+    Ok(view)
+}
+
+/// `heads` (SPEC 9.1): the verified tip and the head ids; held and pending commits are not heads.
+fn host_heads(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> Answer {
+    let request: HeadsBody = decode(body)?;
+    same_repo(request.repo_id.as_deref(), repo_id)?;
+    let view = served(st, repo_id, peer)?;
+    let t = tip(view)?;
+    to_json(&HeadsReply {
+        tip: ManifestTip {
+            seq: t.state.manifest_seq,
+            hash: t.hash().map_err(|_| ApiError::internal())?,
+        },
+        heads: view.heads(),
+    })
+}
+
+/// `fetch` (SPEC 9.1): for a manifest hash (winning or verified losing), that state and every state
+/// before it, ascending, with the rotation commit of each epoch-raising state among them even while
+/// held; for a commit id, that commit if accepted or a rotation commit; every pending leave request.
+/// Unknown ids, other held commits, and pending commits are left out.
+fn host_fetch(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> Answer {
+    let request: FetchBody = decode(body)?;
+    same_repo(request.repo_id.as_deref(), repo_id)?;
+    if request.ids.len() > MAX_ITEMS {
+        return Err(ApiError::bad_request("too many ids"));
+    }
+    let view = served(st, repo_id, peer)?;
+    let mut manifests: Vec<SignedManifest> = Vec::new();
+    let mut commits: Vec<Commit> = Vec::new();
+    let mut seen_states: HashSet<[u8; 32]> = HashSet::new();
+    let mut seen_commits: HashSet<[u8; 32]> = HashSet::new();
+    for id in &request.ids {
+        if let Some(chain) = view.chain_to(id) {
+            for m in chain {
+                let h = m.hash().map_err(|_| ApiError::internal())?;
+                if !seen_states.insert(h) {
+                    continue;
+                }
+                if let Some(rc) = view.rotation_commit(&h) {
+                    if seen_commits.insert(rc.commit_id) {
+                        commits.push(rc.clone());
+                    }
+                }
+                manifests.push(m);
+            }
+        } else if let Some(c) = view.fetch_commit(id) {
+            if seen_commits.insert(c.commit_id) {
+                commits.push(c.clone());
+            }
+        }
+    }
+    manifests.sort_by_key(|m| m.state.manifest_seq);
+    to_json(&Items {
+        manifests,
+        commits,
+        leaves: view.leaves().to_vec(),
+    })
+}
+
+/// `offer` (SPEC 9.1, 9.2). A held repository refuses a peer its tip does not list (`403
+/// forbidden`). The items are then validated on a trial copy and the received tip decides:
+/// `403 not_hosted` if it does not list this host (a held repository keeps the validated states),
+/// `403 forbidden` for a first copy whose tip does not list the sender, and otherwise the
+/// per-item answer. An incomplete offer also queues a catch-up from the sender.
+fn host_offer(st: &mut State, peer: &[u8; 32], repo_id: &str, body: &[u8]) -> Answer {
+    let request: OfferBody = decode(body)?;
+    same_repo(request.repo_id.as_deref(), repo_id)?;
+    let items = Items {
+        manifests: request.manifests,
+        commits: request.commits,
+        leaves: request.leaves,
+    };
+    if !items.bounded() {
+        return Err(ApiError::bad_request("too many items"));
+    }
+    if let Some(view) = st.store.repos.get(repo_id) {
+        if !view.tip().is_some_and(|t| t.state.has_host(peer)) {
+            return Err(ApiError::forbidden("the calling host is not in the repository's hosts"));
+        }
+    }
+    let (admitted, applied) = replication::receive(st, repo_id, peer, items);
+    if applied.incomplete || admitted == Admitted::Incomplete {
+        replication::queue_catchup(st, *peer, repo_id);
+    }
+    match admitted {
+        Admitted::Hosted | Admitted::Incomplete => to_json(&applied.reply()),
+        Admitted::NotHosted => Err(ApiError::reject(RejectCode::NotHosted)),
+        Admitted::Forbidden => Err(ApiError::forbidden("the sending host is not in the repository's hosts")),
+    }
+}
+
+/// `POST /v1/test/replication { paused }` (SPEC 9.3), only with `AVP_TEST_CONTROL=1`; otherwise the
+/// route does not exist.
+fn test_control(st: &mut State, body: &[u8]) -> Answer {
+    if !st.replication.test_control {
+        return Err(ApiError::not_found("no such route"));
+    }
+    let TestControlBody { paused } = decode(body)?;
+    st.repl.paused = paused;
+    if !paused {
+        st.repl.kick = st.repl.kick.wrapping_add(1);
+    }
+    st.repl.wake.notify_all();
+    Ok(json!({ "paused": paused }))
 }
