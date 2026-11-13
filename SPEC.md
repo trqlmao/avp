@@ -998,6 +998,11 @@ stable machine token from the table below that a client MAY switch on; when it i
 back to the HTTP status. `detail` is OPTIONAL extra context. The schema is
 [`schema/avp.schema.json`](schema/avp.schema.json) `#/$defs/Error`.
 
+One exception: a request whose target cannot be parsed as a path (for example `/v1/repos/%zz/pull`, a `%`
+not followed by two hex digits) MAY be answered with a bare `400` without the error object, since an HTTP
+server can refuse such a request line before any route runs. Clients and conformance harnesses then check
+only the status.
+
 | Status | `code` | Meaning |
 |---|---|---|
 | `400` | `bad_request` | Malformed body or parameters, a bad signature, an id or `repoId` that does not recompute, or an epoch-raising state without its rotation commit (§8.3) |
