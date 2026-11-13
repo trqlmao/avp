@@ -139,8 +139,10 @@ pub fn run(url_a: &str, url_b: Option<&str>, out: &mut dyn Write) -> Result<()> 
             owner.tip().state.manifest_seq
         ),
     )?;
+    // One connection for every try: its token, minted by prepare_join, is reused, so waiting for
+    // replication does not mint a token per try (a host may cap the live tokens per key, SPEC 12.1, 12.2).
     let mut bob_vault = poll("bob's home host carries the repository", || {
-        let v = Vault::join(HostClient::connect(bob_url)?, bob.clone(), &locator)?;
+        let v = Vault::join(bob_home.clone(), bob.clone(), &locator)?;
         Ok(field(v.payload(), "username").is_some().then_some(v))
     })?;
     say(

@@ -191,6 +191,7 @@ struct PrepareJoinBody<'a> {
 }
 
 /// A bearer token minted by one host for one key (SPEC 3.3).
+#[derive(Clone)]
 struct Token {
     subject: [u8; 32],
     value: String,
@@ -201,6 +202,11 @@ struct Token {
 ///
 /// It caches the bearer token that host minted and presents it only to that host. Every answer is
 /// read up to 16 MiB (a larger one is a transport error) and decoded as untrusted input.
+///
+/// A clone shares the HTTP agent and starts with a copy of the cached token, so retrying an operation
+/// that takes the connection by value (such as [`Vault::join`]) on clones does not mint a new token
+/// per try.
+#[derive(Clone)]
 pub struct HostClient {
     base: String,
     locator: String,
