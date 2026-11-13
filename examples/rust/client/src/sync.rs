@@ -200,7 +200,7 @@ struct Token {
 /// A connection to one host, matched by its host key (SPEC 3.3, 11.7).
 ///
 /// It caches the bearer token that host minted and presents it only to that host. Every answer is
-/// read up to a size limit and decoded as untrusted input.
+/// read up to 16 MiB (a larger one is a transport error) and decoded as untrusted input.
 pub struct HostClient {
     base: String,
     locator: String,
@@ -645,8 +645,8 @@ impl Chain {
 
     /// The client checks of SPEC 7.5 for one pulled commit, against this chain.
     ///
-    /// 1. The commit decodes for this repository, `commitId` recomputes, and `authorSignature`
-    ///    verifies.
+    /// 1. The commit decodes for this repository, lists no parent twice, `commitId` recomputes,
+    ///    and `authorSignature` verifies.
     /// 2. Removal cutoff: a head by a removed member passes only if its id is in the removal's
     ///    frontier (removals are cumulative, so the tip holds them all).
     /// 3. Membership: if `(manifestSeq, manifestHash)` is the state on this chain at that seq, the
@@ -657,7 +657,9 @@ impl Chain {
     ///
     /// [`ClientError::CommitRejected`] naming the check that fails.
     pub fn verify_commit(&self, c: &Commit) -> Result<()> {
-        if c.repo_id != self.repo_id() || c.ciphertext.len() < 16 || c.manifest_seq < 1 || c.key_epoch < 0 {
+        let shape =
+            c.ciphertext.len() >= 16 && c.manifest_seq >= 1 && c.key_epoch >= 0 && distinct(c.parents.iter().copied());
+        if c.repo_id != self.repo_id() || !shape {
             return Err(ClientError::CommitRejected("malformed or another repository"));
         }
         if c.verify().is_err() {
@@ -1060,6 +1062,10 @@ impl Vault {
     /// pins the highest, checks every head, reads the heads it can, and pushes a merge commit when
     /// more than one head is readable.
     ///
+    /// The request always sends `knownHeads: []`, so the host answers with every current head:
+    /// that is how the client learns which heads it merged are still heads, at the cost of
+    /// downloading every head body on each pull. Answers are read up to 16 MiB.
+    ///
     /// # Errors
     ///
     /// [`ClientError::Left`] after [`Vault::leave`]; [`ClientError::Host`] or
@@ -1152,11 +1158,13 @@ impl Vault {
         self.incoming.clear();
         let mut once = HashSet::new();
         for c in heads {
-            if !once.insert(c.commit_id) {
-                continue;
-            }
+            // Verify before de-duplicating, so a forgery that claims a real head's id cannot
+            // shadow the real head.
             if self.chain.verify_commit(&c).is_err() {
                 report.discarded_commits.push(c.commit_id);
+                continue;
+            }
+            if !once.insert(c.commit_id) {
                 continue;
             }
             self.record(&c);

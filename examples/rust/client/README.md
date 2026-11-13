@@ -82,7 +82,13 @@ in [`src/sync.rs`](src/sync.rs):
 - **Invites** (SPEC 8.2): the acceptance must verify under its host key, name this repository, the
   token's member key and home host, and not have expired.
 - **Hosts** (SPEC 3.3, 11.7): a host is matched by the key from discovery; bearer tokens are cached
-  per host and presented only to the host that minted them.
+  per host and presented only to the host that minted them. Every host answer is read up to 16 MiB
+  and decoded item by item, so one malformed item is dropped without hiding the rest.
+
+Every `pull` sends `knownHeads: []`, so the host answers with every current head. That is how the
+client learns which of the heads it merged are still heads (a non-empty `knownHeads` cannot tell a
+known head that is still current from one that was superseded); the cost is that each pull
+downloads every head body.
 
 The owner operations are `invite`, `remove` (rotation, rewrap, frontier, and rotation commit in one
 `publishManifest`, SPEC 8.3), `set_share_refresh_tokens` (SPEC 8.5), and `process_leaves`.

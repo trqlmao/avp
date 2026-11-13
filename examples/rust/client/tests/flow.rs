@@ -1569,6 +1569,49 @@ fn frontier_lists_seen_commits_not_known_as_ancestors() {
     assert_eq!(a.tip_seq(&repo), owner.tip().state.manifest_seq, "the host accepted it");
 }
 
+/// SPEC 7.5: a forged head that claims the id of a real head does not shadow it; ids are
+/// de-duplicated only among commits that verify.
+#[test]
+fn forged_commit_with_a_real_id_does_not_shadow_it() {
+    let a = node();
+    let proxy = Proxy::new(&a);
+    let (_id, mut owner) = owner_vault(&proxy.url());
+    let mut bob = invite_member(&mut owner, &a.url());
+    set(&mut bob, U2, &[("username", json!("bob-real"))], now_ms());
+    let real = bob.heads()[0];
+    proxy.on_pull(|_, ans| {
+        let heads = ans["heads"].as_array_mut().unwrap();
+        let mut forged = heads[0].clone();
+        let mut sig = avp::encoding::b64_decode(forged["authorSignature"].as_str().unwrap()).unwrap();
+        sig[0] ^= 1;
+        forged["authorSignature"] = json!(b64_encode(&sig));
+        heads.insert(0, forged);
+    });
+    let r = owner.pull().unwrap();
+    assert_eq!(r.discarded_commits, vec![real], "the forgery is discarded");
+    assert_eq!(r.readable_heads, vec![real], "the real head is still read");
+    assert_eq!(owner.heads(), &[real]);
+    assert_eq!(field(owner.payload(), U2, "username"), Some(&json!("bob-real")));
+}
+
+/// SPEC 4.3, 7.5: a commit listing the same parent twice is malformed and discarded.
+#[test]
+fn commit_with_duplicate_parents_is_discarded() {
+    let a = node();
+    let (_id, mut owner) = owner_vault(&a.url());
+    set(&mut owner, U1, &[("username", json!("u0"))], now_ms());
+    let chain = Chain::from_states(owner.chain().states()).unwrap();
+    let tip = owner.tip().clone();
+    let p = owner.heads()[0];
+    let key = owner.retained_epoch_keys[&0];
+    let header = header_at(&owner, vec![p], 1, tip.hash().unwrap(), 0);
+    let ok = forge(&key, header, "x", &owner.member().signing);
+    chain.verify_commit(&ok).unwrap();
+    let mut dup = ok.clone();
+    dup.parents = vec![p, p];
+    assert!(matches!(chain.verify_commit(&dup), Err(ClientError::CommitRejected(_))));
+}
+
 // ─── The worked flow ────────────────────────────────────────────────────────────────────
 
 #[test]
