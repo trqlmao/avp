@@ -1922,3 +1922,43 @@ fn stale_pin_recovery_is_bounded() {
     assert_eq!(d.bob.tip_hash(), d.y, "the re-pull moved bob's pin to Y");
     assert_ne!(d.bob.tip_hash(), d.x);
 }
+
+/// SPEC 6.4, 10.4: a `403` whose re-pull leaves the pin unchanged is terminal. A member pinned on the
+/// true winning tip meets `403 forbidden` on its push, re-pulls from seq 0, finds the same tip, and
+/// returns the `403` without a retry.
+#[test]
+fn unchanged_pin_403_is_terminal() {
+    let a = node();
+    let proxy = Proxy::new(&a);
+    let (_id, mut owner) = owner_vault(&proxy.url());
+    let repo = owner.repo_id().to_string();
+    let mut bob = invite_member(&mut owner, &proxy.url());
+    bob.pull().unwrap();
+    let tip = owner.tip_hash();
+    assert_eq!(a.tip_hash(&repo), Some(tip), "the host's tip is the owner's tip");
+    assert_eq!(bob.tip_hash(), tip, "bob is pinned on the winning tip");
+    let heads = sorted(a.heads(&repo));
+
+    proxy.deny("/push", 403, "forbidden", 3);
+    let mark = proxy.request_count();
+    let by = bob.member().id();
+    let r = bob.write(|p, hlc| {
+        let s = hlc.tick(now_ms(), &by);
+        set_field(p, U1, "username", json!("bob-after"), &s);
+    });
+    match r {
+        Err(ClientError::Host { status, code, .. }) => {
+            assert_eq!(
+                (status, code.as_deref()),
+                (403, Some("forbidden")),
+                "the 403 is returned"
+            );
+        }
+        other => panic!("expected the 403 forbidden host error, got {other:?}"),
+    }
+    assert_eq!(proxy.count_since(mark, "/push"), 1, "one push, no retry");
+    assert_eq!(proxy.full_pulls_since(mark), 1, "one re-pull from seq 0");
+    assert_eq!(bob.tip_hash(), tip, "the re-pull left bob's pin unchanged");
+    assert_eq!(a.tip_hash(&repo), Some(tip));
+    assert_eq!(sorted(a.heads(&repo)), heads, "nothing was pushed");
+}
