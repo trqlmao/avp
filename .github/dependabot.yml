@@ -11,6 +11,11 @@ updates:
       interval: weekly
 
   - package-ecosystem: cargo
+    directory: /examples/rust/avp
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
     directory: /examples/rust/server
     schedule:
       interval: weekly

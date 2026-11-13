@@ -1,32 +1,49 @@
 name: examples-rust
 
+# The Rust reference crates: the shared avp library, the host, and the client. Each is
+# formatted with the house profile (examples/rust/rustfmt.toml), clippy-clean with
+# -D warnings, and tested (the tests read vectors/).
+
 on:
   push:
     paths:
       - "examples/rust/**"
+      - "examples/java/avp/**"
+      - "vectors/**"
       - ".github/workflows/examples-rust.yml"
   pull_request:
     paths:
       - "examples/rust/**"
+      - "examples/java/avp/**"
+      - "vectors/**"
+      - ".github/workflows/examples-rust.yml"
 
 permissions:
   contents: read
 
 jobs:
   rust:
+    name: rust (${{ matrix.crate }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [avp, server, client]
+    defaults:
+      run:
+        working-directory: examples/rust/${{ matrix.crate }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05
         with:
           toolchain: stable
-      - name: Build and test the server
-        working-directory: examples/rust/server
-        run: |
-          cargo build --verbose
-          cargo test --verbose
-      - name: Build and test the client
-        working-directory: examples/rust/client
-        run: |
-          cargo build --verbose
-          cargo test --verbose
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --check -- --config-path ../rustfmt.toml
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
