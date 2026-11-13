@@ -1,8 +1,8 @@
 /**
  * Negative ("MUST reject") vectors (vectors/negative.json). Each case is a valid construction with one
  * mutation that a conformant implementation MUST reject: key-unwrap and wrap-unwrap MUST fail
- * authentication, ed25519-verify, manifest-verify, commit-verify, acceptance-verify, and leave-verify
- * MUST return false, manifest-link MUST find the previous hash wrong, and payload-decrypt under the
+ * authentication, ed25519-verify, manifest-verify, commit-verify, acceptance-verify, leave-verify, and
+ * challenge-verify MUST return false, manifest-link MUST find the previous hash wrong, and payload-decrypt under the
  * stated AAD v2 inputs MUST fail authentication. This guards against an implementation that
  * "succeeds" on tampered, truncated, wrong-key, or wrong-AAD inputs.
  *
@@ -34,6 +34,7 @@ import {
   manifestHash,
   unwrapSecret,
   verifyAcceptance,
+  verifyChallenge,
   verifyLeave,
 } from "../src/constructions.ts";
 import { acceptanceFromWire, commitFromWire, leaveFromWire, signedManifestFromWire } from "../src/vectors.ts";
@@ -100,6 +101,8 @@ function accepted(c: any): boolean {
       return verifyAcceptance(acceptanceFromWire(c.acceptance), fromB64(c.verifyHostKey));
     case "leave-verify":
       return verifyLeave(leaveFromWire(c.leave));
+    case "challenge-verify":
+      return verifyChallenge(fromB64(c.hostKey), fromB64(c.ed25519PublicKey), fromB64(c.nonce), fromB64(c.signature));
     default:
       throw new Error(`unknown op ${c.op}`);
   }
@@ -134,7 +137,43 @@ const REQUIRED = [
   "payload/aad-v2-wrong-repo-id",
   "link-grant/unwrapped-with-rdk-wrap-label",
   "acceptance/verified-with-other-host-key",
+  "challenge/signature-presented-as-commit-signature",
+  "challenge/commit-sig-message-as-nonce",
+  "challenge/commit-signature-presented-as-challenge",
+  "challenge/made-for-other-host-key",
+  "challenge/signature-over-raw-nonce",
 ];
+
+/**
+ * The challenge cases (SPEC 3.3, 4.1) are appended after every earlier case, so the bank's earlier
+ * positions stay fixed for runners that index them.
+ */
+test("the challenge negatives come last, after the strict ed25519 rejects", () => {
+  const names = (negative.cases as any[]).map((c) => c.name);
+  const firstChallenge = names.findIndex((n) => n.startsWith("challenge/"));
+  assert.equal(names.length - firstChallenge, 5);
+  assert.ok(names.slice(firstChallenge).every((n) => n.startsWith("challenge/")));
+  assert.equal(names[firstChallenge - 1], "ed25519/order-8-sign-bit-key-forgery");
+});
+
+/**
+ * Without domain separation each cross case is accepted: the raw-nonce signature verifies over the
+ * nonce, and a commit author signature verifies over the commit-sig message a host could pass off as
+ * a nonce. This shows the transcript, not some other mutation, is what rejects them.
+ */
+test("the challenge negatives verify under the old raw-nonce construction", () => {
+  const byName = new Map((negative.cases as any[]).map((c) => [c.name, c]));
+  const raw = byName.get("challenge/signature-over-raw-nonce");
+  assert.equal(safeVerify(fromB64(raw.ed25519PublicKey), fromB64(raw.nonce), fromB64(raw.signature)), true);
+  const asChallenge = byName.get("challenge/commit-signature-presented-as-challenge");
+  assert.equal(
+    safeVerify(fromB64(asChallenge.ed25519PublicKey), commitSigMessage(fromB64(asChallenge.nonce)), fromB64(asChallenge.signature)),
+    true,
+    "the signature is alice's valid author signature over that commit id",
+  );
+  const other = byName.get("challenge/made-for-other-host-key");
+  assert.equal(verifyChallenge(fromB64(other.base.hostKey), fromB64(other.ed25519PublicKey), fromB64(other.nonce), fromB64(other.signature)), true);
+});
 
 test("negative.json carries every 0.5 MUST-reject case", () => {
   const names = (negative.cases as any[]).map((c) => c.name);

@@ -3,9 +3,9 @@
  * vectors/federation.json.
  *
  * Token cases are a decode oracle and a canonical-encode check. Every signature in the file (the
- * host acceptance inside the invite token, the leave requests) is verified here with node:crypto
- * over a message assembled by hand from the SPEC 11.3 and 11.4 layouts, independently of the helper
- * that signed it. The link confirmation code and the fingerprints are recomputed by hand, and the
+ * host acceptance inside the invite token, the leave requests, the challenge transcripts) is verified
+ * here with node:crypto over a message assembled by hand from the SPEC 11.3, 11.4, and 3.3 layouts,
+ * independently of the helper that signed it. The link confirmation code and the fingerprints are recomputed by hand, and the
  * link grant is unwrapped by hand to recover the owner entropy.
  *
  * SPDX-License-Identifier: MIT
@@ -30,6 +30,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 
 import { entropyToMnemonic, mnemonicToSeed, ownerKeysFromSeed } from "../src/bip39.ts";
 import {
+  challengeMessage,
   decodeInviteToken,
   decodeLinkGrant,
   decodeLinkRequest,
@@ -38,6 +39,8 @@ import {
   keyFingerprint,
   linkConfirmationCode,
   ownerFingerprint,
+  signChallenge,
+  verifyChallenge,
   verifyInvite,
   type WireInviteToken,
 } from "../src/constructions.ts";
@@ -193,6 +196,64 @@ for (const lc of fed.leaves as Array<any>) {
     assert.ok(validate && validate(lc.decoded), JSON.stringify(validate?.errors));
   });
 }
+
+// ---- challenge transcript (SPEC 3.3), verified with node:crypto over a hand-assembled message ----
+
+function challengeMsg(hostKey: Buffer, key: Buffer, nonce: Buffer): Buffer {
+  return Buffer.concat([label("avp/challenge/v1"), lp(hostKey), lp(key), lp(nonce)]);
+}
+
+/** The Ed25519 seed of a manifest.json party (the owner or a member) by its public key. */
+function seedOf(pubB64: string): Buffer {
+  if (manifest.seeds.owner.ownerKey === pubB64) return Buffer.from(manifest.seeds.owner.ed25519SeedHex, "hex");
+  const m = (manifest.seeds.members as any[]).find((x) => x.ed25519PublicKey === pubB64);
+  assert.ok(m, `no manifest.json seed for ${pubB64}`);
+  return Buffer.from(m.ed25519SeedHex, "hex");
+}
+
+test("federation.json carries challenge transcripts, one with a nonce above the 32-byte minimum", () => {
+  const cs = fed.challenges as any[];
+  assert.ok(cs.length >= 2);
+  assert.ok(cs.every((c) => fromB64(c.nonce).length >= 32));
+  assert.ok(cs.some((c) => fromB64(c.nonce).length > 32));
+  const hostKeys = new Set((manifest.seeds.hosts as any[]).map((h) => h.hostKey));
+  for (const c of cs) assert.ok(hostKeys.has(c.hostKey), `${c.name}: hostKey is a manifest.json host`);
+});
+
+for (const cc of fed.challenges as Array<any>) {
+  test(`challenge ${cc.name}: messageHex is the SPEC 3.3 transcript and the signature verifies over it`, () => {
+    const hostKey = fromB64(cc.hostKey);
+    const key = fromB64(cc.ed25519PublicKey);
+    const nonce = fromB64(cc.nonce);
+    const msg = challengeMsg(hostKey, key, nonce);
+    assert.equal(msg.toString("hex"), cc.messageHex);
+    assert.equal(challengeMessage(hostKey, key, nonce).toString("hex"), cc.messageHex);
+    assert.ok(edVerify(cc.ed25519PublicKey, msg, cc.signature));
+    assert.equal(signChallenge(hostKey, seedOf(cc.ed25519PublicKey), nonce).toString("base64"), cc.signature, "the signature reproduces");
+    assert.equal(verifyChallenge(hostKey, key, nonce, fromB64(cc.signature)), true);
+  });
+
+  test(`challenge ${cc.name}: the signature does not verify for another host key, as a raw nonce, or as a commit signature`, () => {
+    const hostKey = fromB64(cc.hostKey);
+    const key = fromB64(cc.ed25519PublicKey);
+    const nonce = fromB64(cc.nonce);
+    const sig = fromB64(cc.signature);
+    const other = (manifest.seeds.hosts as any[]).find((h) => h.hostKey !== cc.hostKey);
+    assert.equal(verifyChallenge(fromB64(other.hostKey), key, nonce, sig), false, "bound to the host key");
+    assert.equal(edVerify(cc.ed25519PublicKey, nonce, cc.signature), false, "not a signature over the raw nonce");
+    assert.equal(verifyChallenge(hostKey, key, nonce, Buffer.from(sig.map((b, i) => (i === 0 ? b ^ 1 : b)))), false);
+    // The transcript of a 32-byte nonce is never the commit-sig message of that value (SPEC 4.1).
+    const asCommitSig = Buffer.concat([label("avp/commit-sig/v1"), lp(nonce.subarray(0, 32))]);
+    assert.equal(edVerify(cc.ed25519PublicKey, asCommitSig, cc.signature), false, "not a commit author signature");
+  });
+}
+
+test("challenge transcript: the construction rejects keys that are not 32 bytes", () => {
+  const k = Buffer.alloc(32, 1);
+  assert.throws(() => challengeMessage(Buffer.alloc(31), k, k));
+  assert.throws(() => challengeMessage(k, Buffer.alloc(33), k));
+  assert.equal(verifyChallenge(Buffer.alloc(31), k, k, Buffer.alloc(64)), false, "verify never throws");
+});
 
 // ---- link confirmation code, fingerprints, link grant (hand computations) ----
 

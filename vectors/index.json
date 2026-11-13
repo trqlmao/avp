@@ -107,7 +107,7 @@
         "RFC 8032 §7.1 TEST 2",
         "RFC 8032 §7.1 TEST 3"
       ],
-      "note": "Anchors the challenge -> token signature: signing the raw nonce bytes is this primitive."
+      "note": "The primitive under every AVP signature. The challenge -> token signature is over the avp/challenge/v1 transcript (SPEC 3.3), pinned in federation.json `challenges`."
     },
     {
       "id": "key-wrap",
@@ -125,10 +125,10 @@
       "id": "federation",
       "file": "federation.json",
       "kind": "composition",
-      "specSection": "11",
-      "construction": "base64url-nopad over compact JSON for InviteToken (with the host-signed Acceptance), RepoLocator, LinkRequest, LinkGrant (owner entropy wrapped under avp/owner-link/v1); LeaveRequest signatures; link confirmation codes; member and owner fingerprints; avp://<hostLocator>/<repoId> locators",
-      "expects": "decoding base64url yields the object; canonical encoding round-trips; acceptance and leave signatures verify; link codes and fingerprints recompute; the link grant unwraps to the owner entropy; avp:// URIs parse and format back",
-      "shape": "uses top-level `tokens`, `leaves`, `linkCodes`, `fingerprints`, and `uris`, not `cases`",
+      "specSection": "3.3, 11",
+      "construction": "base64url-nopad over compact JSON for InviteToken (with the host-signed Acceptance), RepoLocator, LinkRequest, LinkGrant (owner entropy wrapped under avp/owner-link/v1); LeaveRequest signatures; link confirmation codes; member and owner fingerprints; avp://<hostLocator>/<repoId> locators; challenge transcripts CE(tag \"avp/challenge/v1\", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce)) and their signatures",
+      "expects": "decoding base64url yields the object; canonical encoding round-trips; acceptance and leave signatures verify; link codes and fingerprints recompute; the link grant unwraps to the owner entropy; avp:// URIs parse and format back; each challenge messageHex recomputes and its signature verifies under the named hostKey only",
+      "shape": "uses top-level `tokens`, `leaves`, `linkCodes`, `fingerprints`, `uris`, and `challenges`, not `cases`",
       "anchors": [
         "RFC 4648 §5 (base64url)",
         "RFC 8032 Ed25519"
@@ -140,7 +140,7 @@
       "file": "negative.json",
       "kind": "negative",
       "specSection": "14",
-      "construction": "valid key-wrap / ed25519 constructions and 0.5 manifest, commit, payload, link grant, acceptance, and leave items with one mutation each (flipped tag or byte, truncation, wrong key, wrong owner signature, wrong previous hash, commit id that does not recompute, author signature over another id, AAD v2 with a wrong parent set, epoch, author, or repoId, wrong wrap label)",
+      "construction": "valid key-wrap / ed25519 constructions and 0.5 manifest, commit, payload, link grant, acceptance, and leave items with one mutation each (flipped tag or byte, truncation, wrong key, wrong owner signature, wrong previous hash, commit id that does not recompute, author signature over another id, AAD v2 with a wrong parent set, epoch, author, or repoId, wrong wrap label), and challenge domain separation cases (a challenge signature presented as a commit author signature and the reverse, a challenge signature for another host key, a signature over the raw nonce)",
       "expects": "each case MUST be rejected: unwrap and decrypt fail authentication, verify returns false, the link check fails; each 0.5 case's `base` is accepted",
       "generatedBy": "vectors/generate.ts (from the same seeds as the positive vectors)"
     }

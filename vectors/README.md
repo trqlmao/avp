@@ -31,9 +31,9 @@ These pin the 0.5 byte constructions. They are derived only from fixed seeds (li
 The CE constructions have no published anchor, so the runner also re-derives every case by a second,
 hand-written assembly of the SPEC layout (raw byte concatenation, independent of the encoder under test).
 
-- [`federation.json`](federation.json), the out-of-band tokens and addressing of SPEC §11. Unlike the
-  others it uses top-level `tokens`, `leaves`, `linkCodes`, `fingerprints`, and `uris` rather than
-  `cases`. Each token case (`InviteToken`, `RepoLocator`, `LinkRequest`, `LinkGrant`) is a **decode
+- [`federation.json`](federation.json), the out-of-band tokens and addressing of SPEC §11 and the
+  challenge transcript of SPEC §3.3. Unlike the others it uses top-level `tokens`, `leaves`, `linkCodes`,
+  `fingerprints`, `uris`, and `challenges` rather than `cases`. Each token case (`InviteToken`, `RepoLocator`, `LinkRequest`, `LinkGrant`) is a **decode
   oracle**: base64url-decoding `base64url` MUST yield `decoded`. `canonicalJson` is the compact encoding
   with the fields in the SPEC order and `"v": 2`, and `base64url` is its base64url-nopad form; a decoder
   MUST accept any field order and whitespace and MUST reject a `v` other than 2. The invite token's
@@ -42,7 +42,13 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
   verifies both with `node:crypto` over a hand-assembled message. `linkCodes` are SPEC §11.6 confirmation
   codes (one has a leading zero), `fingerprints` are the member and owner fingerprints, and the link
   grant's `checker` holds the link private key (never on the wire) and the owner entropy it unwraps to.
-  Each `avp://` URI case pins parse and format of `avp://<hostLocator>/<repoId>`.
+  Each `avp://` URI case pins parse and format of `avp://<hostLocator>/<repoId>`. Each `challenges` case
+  pins the SPEC §3.3 transcript: `messageHex` is
+  `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))` over the raw nonce
+  bytes, and `signature` is the signer's Ed25519 signature over it (`alice-to-a`, a 32-byte nonce, and
+  `owner-to-b`, a 64-byte nonce, from the `manifest.json` seeds). The runner rebuilds the message by
+  hand, verifies the signature with `node:crypto`, reproduces it from the seed, and shows it does not
+  verify for the other host key or over the raw nonce.
 
 ## Merge vectors (hand-written)
 
@@ -207,7 +213,14 @@ byte-for-byte as their third source.
   key's signature whose `R` is the identity, a valid signature with `L` added to `S`, and a forgery under
   the same order-8 key with its sign bit set (`..03fa`), whose `R` is an honest point `[r]B` (the public
   key of the seed `0x08 00..00`) and `S = r`, so only a blocklist that masks the sign bit rejects it. They carry no
-  `base`; the runner shows instead that a verifier without the strict checks accepts each. A conformant
+  `base`; the runner shows instead that a verifier without the strict checks accepts each. The five
+  `challenge/` cases come after them, at the end of the bank, and pin domain separation (SPEC §3.3,
+  §4.1): alice's challenge signature to `a.vault.example` presented as the `commit.json` single-parent
+  author signature, once with the commit id as the nonce and once with the whole 54-byte commit-sig
+  message as the nonce (`commit-verify`); that commit's author signature presented as a challenge
+  signature for a nonce equal to its id, a challenge signature made for `b.vault.example`'s host key, and
+  a signature over the raw nonce, the old construction (`challenge-verify`, which verifies under
+  `ed25519PublicKey` over the transcript built with `hostKey`). A conformant
   implementation MUST reject every case; the description lists what each `op` means. Each 0.5 case also
   carries `base`, the fields that restore the valid construction, which MUST be accepted, so the one
   mutation is shown to be the cause. Passing the positive vectors is not enough; an implementation that

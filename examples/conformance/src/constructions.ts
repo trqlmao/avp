@@ -4,6 +4,7 @@
  *   - the canonical encoding (CE) writer (SPEC 4.1),
  *   - the manifest state bytes, owner signature, manifestHash, and repoId (SPEC 4.2),
  *   - the commit header, commitId, author signature message, and AAD v2 (SPEC 4.3),
+ *   - the challenge transcript (SPEC 3.3),
  *   - the acceptance and leave signature messages, fingerprints, the link confirmation code, and the
  *     out-of-band token encoding (SPEC 3.2, 11).
  *
@@ -16,6 +17,7 @@
 
 import {
   aesGcmDecrypt,
+  ed25519PublicRaw,
   ed25519Sign,
   ed25519Verify,
   hkdfSha256,
@@ -459,6 +461,52 @@ export function signLeave(l: Omit<LeaveRequest, "signature">, memberSeed: Buffer
 export function verifyLeave(l: LeaveRequest): boolean {
   try {
     return safeVerify(l.memberKey, leaveSignMessage(l), l.signature);
+  } catch {
+    return false;
+  }
+}
+
+// ─── Challenge transcript (SPEC 3.3) ─────────────────────────────────────────────────
+
+/**
+ * The message a client signs to redeem a challenge (SPEC 3.3):
+ * `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))`.
+ *
+ * The tag keeps a host-chosen nonce from ever making this equal another signed construction
+ * (SPEC 4.1), and `hostKey` binds the signature to the host being authenticated to.
+ *
+ * @param hostKey - The 32-byte host key of the host the client authenticates to.
+ * @param ed25519PublicKey - The 32-byte key requesting the token.
+ * @param nonce - The raw (base64-decoded) nonce bytes.
+ * @returns The signature message.
+ * @throws If either key is not 32 bytes.
+ */
+export function challengeMessage(hostKey: Buffer, ed25519PublicKey: Buffer, nonce: Buffer): Buffer {
+  if (hostKey.length !== 32) throw new Error(`hostKey must be 32 bytes, got ${hostKey.length}`);
+  if (ed25519PublicKey.length !== 32) throw new Error(`ed25519PublicKey must be 32 bytes, got ${ed25519PublicKey.length}`);
+  return new CeWriter().tag("avp/challenge/v1").bytes(hostKey).bytes(ed25519PublicKey).bytes(nonce).finish();
+}
+
+/**
+ * Signs the challenge transcript of SPEC 3.3 for the key of `seed`.
+ *
+ * @param hostKey - The 32-byte host key of the host the client authenticates to.
+ * @param seed - The 32-byte Ed25519 seed of the key requesting the token.
+ * @param nonce - The raw nonce bytes.
+ * @returns The 64-byte signature.
+ */
+export function signChallenge(hostKey: Buffer, seed: Buffer, nonce: Buffer): Buffer {
+  const priv = importEd25519Private(seed);
+  return ed25519Sign(priv, challengeMessage(hostKey, ed25519PublicRaw(priv), nonce));
+}
+
+/**
+ * Whether `signature` verifies under `ed25519PublicKey` over {@link challengeMessage} built with
+ * `hostKey` (the verifying host's own key, SPEC 3.3). Never throws.
+ */
+export function verifyChallenge(hostKey: Buffer, ed25519PublicKey: Buffer, nonce: Buffer, signature: Buffer): boolean {
+  try {
+    return safeVerify(ed25519PublicKey, challengeMessage(hostKey, ed25519PublicKey, nonce), signature);
   } catch {
     return false;
   }
