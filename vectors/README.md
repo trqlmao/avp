@@ -121,7 +121,10 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
   an offer, so its tip can stop listing it; it is hosted again when the tie rule and later states give it
   a winning tip that lists it (SPEC §6.5). No scenario pins this host-level keeping: the engine itself does
   not adopt a pushed state it answers `not_hosted` (so `manifest-drops-this-host` ends at genesis), and the
-  host keeps such a state by applying the same item to its engine again with `via: "offer"`.
+  host that already holds the repository keeps such a state by applying it to its engine again with
+  `via: "offer"`, together with its rotation commit only (no commit when the epoch is unchanged), never
+  with a carried non-rotation commit, since the offer path skips the client caller check and the head
+  bound. A `createRepo` genesis answered `not_hosted` stores nothing.
 
 ## Cryptographic primitive vectors (RFC-anchored)
 

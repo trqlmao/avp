@@ -195,9 +195,12 @@ function contentOk(s: ManifestState, prev: ManifestState | undefined): boolean {
  * does not list it, it MUST discard the trial copy and answer `403 not_hosted` (a first copy is all or
  * nothing). If it held the repository, it MUST commit the trial copy atomically and answer
  * `403 not_hosted` when that tip does not list it (SPEC 8.6). A client publish this engine answers
- * `not_hosted` passed every other rule; the host MUST keep it by applying the same item again with
- * `"offer"`. Serving and client writes are gated on `tipListsHost()` (SPEC 8.6, 10.1); there is no
- * separate not-hosted marker.
+ * `not_hosted` passed every other rule; when the host already holds the repository it MUST keep the
+ * state by applying it again with `"offer"` together with its rotation commit only (with no commit
+ * when the epoch is unchanged), never with a carried non-rotation commit, because the offer path
+ * skips the client caller check and the head bound. A `createRepo` genesis answered `not_hosted`
+ * stores nothing. Serving and client writes are gated on `tipListsHost()` (SPEC 8.6, 10.1); there is
+ * no separate not-hosted marker.
  */
 export class RepoView {
   private readonly hostKey: Buffer;

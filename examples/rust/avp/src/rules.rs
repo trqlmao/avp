@@ -279,9 +279,12 @@ fn content_ok(s: &ManifestState, prev: Option<&ManifestState>) -> bool {
 /// and answer `403 not_hosted` (a first copy is all or nothing). If it held the repository, it MUST
 /// commit the trial copy atomically and answer `403 not_hosted` when that tip does not list it
 /// (SPEC 8.6). A client publish this engine answers [`RejectCode::NotHosted`] passed every other
-/// rule; the host MUST keep it by applying the same item again with [`Via::Offer`]. Serving and
-/// client writes are gated on [`RepoView::tip_lists_host`] (SPEC 8.6, 10.1); there is no separate
-/// not-hosted marker.
+/// rule; when the host already holds the repository it MUST keep the state by applying it again
+/// with [`Via::Offer`] together with its rotation commit only (with no commit when the epoch is
+/// unchanged), never with a carried non-rotation commit, because the offer path skips the client
+/// caller check and the head bound. A `createRepo` genesis answered `not_hosted` stores nothing.
+/// Serving and client writes are gated on [`RepoView::tip_lists_host`] (SPEC 8.6, 10.1); there is
+/// no separate not-hosted marker.
 #[derive(Debug, Clone)]
 pub struct RepoView {
     host_key: Id,
