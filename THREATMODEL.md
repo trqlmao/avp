@@ -215,6 +215,15 @@ listed cannot enumerate the repository ids they hold, though it can still confir
 host can withhold (A4) from its own members. A listed host can relay valid commits it receives from members
 on other hosts in any order; validation, not ordering, is what protects the repository.
 
+A signed host request is not bound to the host that receives it: the signature covers the method, path,
+body hash, and time, but not the receiver (SPEC §9.3). Within the 60-second skew window, a host that
+received a request can replay it to another host that lists the sender as a peer, and that host takes it as
+the sender's. The impact is bounded. A sender sends a repository's host requests only to that repository's
+listed hosts (SPEC §9.3), so the replaying host is itself listed and already entitled to what the replay
+reads or offers; every offered item is still validated on its own owner and author signatures (SPEC §9.2);
+and the replay repeats an idempotent message. What it adds is attribution: the third host counts as the
+sender's traffic the sender never sent it. 0.5 makes no wire change for this.
+
 ## Cryptographic assumptions
 
 AVP assumes the standard security of its primitives and their correct, side-channel-aware implementation:
