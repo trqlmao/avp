@@ -518,8 +518,21 @@ fn rotation(
     (state, commit, new_key)
 }
 
+/// The first of `make(0)`, `make(1)`, ... whose state hash is in the upper half (first byte at least
+/// 0x80), so that [`winner_against`] finds a lower-hash state quickly whatever the random keys.
+fn upper_half<T>(mut make: impl FnMut(u32) -> T, state: impl Fn(&T) -> &SignedManifest) -> T {
+    for n in 0..64 {
+        let t = make(n);
+        if hash(state(&t))[0] >= 0x80 {
+            return t;
+        }
+    }
+    panic!("no upper-half variant found");
+}
+
 /// A state on `repo`'s tip that wins the tie rule against `loser` (bytewise-lower hash, SPEC 6.5):
-/// the tip with one host locator changed, retried until its hash is lower.
+/// the tip with its first host locator changed, retried until its hash is lower. Each try wins with
+/// probability at least one half for an [`upper_half`] loser.
 fn winner_against(repo: &Repo, loser: &SignedManifest) -> SignedManifest {
     for n in 0..256 {
         let w = repo.next(|s| s.hosts[0].locator = format!("v{n}.vault.example"));
@@ -1142,7 +1155,28 @@ fn fetch_serves_losing_state_with_rotation_commit() {
     let id = repo.id();
 
     // A losing epoch-raising seq 2 and its rotation commit; the winner is published first.
-    let (lose, rot, _) = rotation(&repo, &[&repo.owner], None, vec![repo.root.commit_id], b.key());
+    let (lose, rot) = upper_half(
+        |n| {
+            let new_key = random_bytes::<32>();
+            let entry = repo.owner.entry(&new_key, 1, b.key());
+            let state = repo.next(|s| {
+                s.key_epoch = 1;
+                s.members = vec![entry];
+                if let Some(h) = s.hosts.last_mut() {
+                    h.locator = format!("l{n}.vault.example");
+                }
+            });
+            let commit = commit_on(
+                &state,
+                &new_key,
+                &repo.owner.sign,
+                vec![repo.root.commit_id],
+                b"rotation",
+            );
+            (state, commit)
+        },
+        |(m, _)| m,
+    );
     let win = winner_against(&repo, &lose);
     assert_eq!(publish(&b, &repo, &token, &win, None).status, 200);
     let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&lose], &[&rot], &[]));
@@ -1182,7 +1216,17 @@ fn held_and_pending_commits_are_not_served() {
     // Held (SPEC 6.5): bob is a member only on the losing seq 2; his commit citing it is held.
     let bob = Device::new();
     let bob_entry = bob.entry(&repo.data_key, 0, b.key());
-    let lose = repo.next(|s| s.members.push(bob_entry));
+    let lose = upper_half(
+        |n| {
+            repo.next(|s| {
+                s.members.push(bob_entry.clone());
+                if let Some(h) = s.hosts.last_mut() {
+                    h.locator = format!("l{n}.vault.example");
+                }
+            })
+        },
+        |m| m,
+    );
     let win = winner_against(&repo, &lose);
     assert_eq!(publish(&b, &repo, &token, &win, None).status, 200);
     let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&lose], &[], &[]));
