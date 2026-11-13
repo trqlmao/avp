@@ -83,6 +83,8 @@ public final class AvpVectors {
         section("token-rejects", AvpVectors::tokenRejects);
         section("bip39-rejects", AvpVectors::bip39Rejects);
         section("json", AvpVectors::json);
+        section("strict-ed25519", AvpVectors::strictEd25519);
+        section("defensive-copies", AvpVectors::defensiveCopies);
 
         System.out.println(passed + " passed");
         if (!FAILURES.isEmpty()) {
@@ -781,7 +783,8 @@ public final class AvpVectors {
 
     private static void negative() throws Exception {
         List<Object> cases = l(m(load("negative.json")).get("cases"));
-        eq(23, cases.size(), "negative case count");
+        // 23 cases plus the five strict Ed25519 rejects of SPEC 2.
+        eq(28, cases.size(), "negative case count");
         int withBase = 0;
         for (Object o : cases) {
             Map<String, Object> c = m(o);
@@ -1644,5 +1647,160 @@ public final class AvpVectors {
         rejects(() -> AvpJson.string(m(AvpJson.parse("{\"a\":1}")), "a"), "a number where a string is required");
         rejects(() -> AvpJson.integer(m(AvpJson.parse("{\"a\":\"1\"}")), "a"), "a string where an integer is required");
         rejects(() -> AvpJson.integer(m(AvpJson.parse("{}")), "a"), "a missing required field");
+
+        // A number literal is at most MAX_NUMBER_LENGTH characters, which bounds BigInteger parsing.
+        String longest = "1".repeat(AvpJson.MAX_NUMBER_LENGTH);
+        eq(new java.math.BigInteger(longest), AvpJson.parse(longest), "a number at the length bound");
+        rejectsWith(
+                AvpException.Kind.BAD_ENCODING,
+                () -> AvpJson.parse("1".repeat(AvpJson.MAX_NUMBER_LENGTH + 1)),
+                "a number past the length bound");
+        rejectsWith(
+                AvpException.Kind.BAD_ENCODING,
+                () -> AvpJson.parse("[0." + "1".repeat(AvpJson.MAX_NUMBER_LENGTH) + "]"),
+                "a fraction past the length bound");
+    }
+
+    // ─── Strict Ed25519 verification (SPEC 2) ─────────────────────────────────────────
+
+    /** The SPEC 2 small-order encodings, little-endian hex. */
+    private static final List<String> SMALL_ORDER = List.of(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
+
+    private static void strictEd25519() throws Exception {
+        Map<String, Object> rfc = m(l(m(load("ed25519.json")).get("cases")).get(0));
+        byte[] pub = hx(s(rfc, "publicKeyHex"));
+        byte[] sig = hx(s(rfc, "signatureHex"));
+        check(AvpCrypto.ed25519StrictInputsOk(pub, sig), "an RFC 8032 signature passes the pre-checks");
+
+        byte[] sig0 = new byte[64];
+        sig0[0] = 1; // R = identity, S = 0
+        for (String enc : SMALL_ORDER) {
+            byte[] key = hx(enc);
+            check(!AvpCrypto.ed25519StrictInputsOk(key, sig), "small-order key " + enc);
+            byte[] signed = key.clone();
+            signed[31] |= (byte) 0x80; // the sign bit does not change the point's order
+            check(!AvpCrypto.ed25519StrictInputsOk(signed, sig), "small-order key with the sign bit " + enc);
+            byte[] r = sig.clone();
+            System.arraycopy(key, 0, r, 0, 32);
+            check(!AvpCrypto.ed25519StrictInputsOk(pub, r), "small-order R " + enc);
+        }
+        // y = p + 2 is non-canonical but not on the blocklist: the canonical check rejects it.
+        byte[] nonCanonical = hx("ef" + "ff".repeat(30) + "7f");
+        check(!AvpCrypto.ed25519StrictInputsOk(nonCanonical, sig), "a non-canonical key y = p + 2");
+        byte[] rNonCanonical = sig.clone();
+        System.arraycopy(nonCanonical, 0, rNonCanonical, 0, 32);
+        check(!AvpCrypto.ed25519StrictInputsOk(pub, rNonCanonical), "a non-canonical R y = p + 2");
+        // S = L is the smallest non-canonical S.
+        byte[] sL = sig.clone();
+        System.arraycopy(hx("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010"), 0, sL, 32, 32);
+        check(!AvpCrypto.ed25519StrictInputsOk(pub, sL), "S = L");
+        byte[] sLm1 = sig.clone();
+        System.arraycopy(hx("ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010"), 0, sLm1, 32, 32);
+        check(AvpCrypto.ed25519StrictInputsOk(pub, sLm1), "S = L - 1 is canonical");
+
+        // The forged genesis of the review probe: ownerKey is the identity point, and the owner and
+        // commit signatures are R = identity, S = 0. No private key exists, so it MUST be rejected.
+        byte[] id = new byte[32];
+        id[0] = 1;
+        byte[] host = new byte[32];
+        host[0] = 5;
+        byte[] nonce = new byte[16];
+        String repo = AvpManifest.deriveRepoId(id, nonce);
+        AvpManifest.WrappedKey wk =
+                new AvpManifest.WrappedKey(AvpCrypto.SCHEME_ID, new byte[32], new byte[12], new byte[48]);
+        AvpManifest.MemberEntry me = new AvpManifest.MemberEntry(id, new byte[32], wk, 0, host);
+        AvpManifest.ManifestState st = new AvpManifest.ManifestState(
+                repo,
+                1,
+                new byte[0],
+                id,
+                nonce,
+                AvpCrypto.SCHEME_ID,
+                0,
+                false,
+                List.of(new AvpManifest.HostRef(host, "vault.example")),
+                List.of(me),
+                List.of());
+        AvpManifest.SignedManifest forged = new AvpManifest.SignedManifest(st, sig0);
+        check(!AvpManifest.verify(forged), "the forged genesis does not verify");
+        byte[] mh = AvpManifest.hash(forged);
+        AvpCommit.Commit unsigned =
+                new AvpCommit.Commit(repo, new byte[32], List.of(), 1, mh, 0, id, new byte[12], new byte[16], sig0);
+        AvpCommit.Commit c = new AvpCommit.Commit(
+                repo, AvpCommit.id(unsigned), List.of(), 1, mh, 0, id, new byte[12], new byte[16], sig0);
+        check(!AvpCommit.verify(c), "the forged commit does not verify");
+        for (AvpRules.Via via : AvpRules.Via.values()) {
+            AvpRules.RepoView view = new AvpRules.RepoView(host, 16);
+            eq(
+                    Optional.of("bad_request"),
+                    view.applyManifest(forged, Optional.of(c), via),
+                    "forged genesis via " + via);
+            check(view.tip().isEmpty() && view.heads().isEmpty(), "the forged genesis stores nothing via " + via);
+        }
+
+        // A commit by the identity key in a real repository is malformed (its signature cannot verify).
+        Fixture f = fixture();
+        AvpRules.RepoView view = started(f);
+        AvpCommit.Commit u = new AvpCommit.Commit(
+                f.genesis().state().repoId(),
+                new byte[32],
+                List.of(f.root().commitId()),
+                1,
+                AvpManifest.hash(f.genesis()),
+                0,
+                id,
+                new byte[12],
+                new byte[16],
+                sig0);
+        AvpCommit.Commit byIdentity = new AvpCommit.Commit(
+                u.repoId(), AvpCommit.id(u), u.parents(), 1, u.manifestHash(), 0, id, u.iv(), u.ciphertext(), sig0);
+        eq(
+                Optional.of("bad_request"),
+                view.applyCommit(byIdentity, AvpRules.Via.OFFER),
+                "an identity-key commit by offer");
+        // Leave requests and acceptances go through the same verification.
+        AvpTokens.LeaveRequest leave =
+                new AvpTokens.LeaveRequest(f.genesis().state().repoId(), id, 1, sig0);
+        check(!AvpTokens.verifyLeave(leave), "an identity-key leave does not verify");
+        AvpTokens.Acceptance acc = new AvpTokens.Acceptance(f.genesis().state().repoId(), id, id, Long.MAX_VALUE, sig0);
+        check(!AvpTokens.verifyAcceptance(acc), "an identity-key acceptance does not verify");
+    }
+
+    // ─── RepoView keeps its own copies ────────────────────────────────────────────────
+
+    private static void defensiveCopies() throws Exception {
+        Fixture f = fixture();
+        AvpCommit.Commit root = AvpCommit.fromJson(AvpCommit.toJson(f.root()));
+        AvpManifest.SignedManifest genesis = AvpManifest.signedManifestFromJson(AvpManifest.toJson(f.genesis()));
+        AvpRules.RepoView view = new AvpRules.RepoView(f.hostA(), 16);
+        eq(Optional.empty(), view.applyManifest(genesis, Optional.of(root), AvpRules.Via.PUSH), "genesis");
+        byte[] rootId = f.root().commitId();
+        byte[] genesisHash = AvpManifest.hash(f.genesis());
+
+        // Changing the caller's records after applying them does not change the view.
+        root.commitId()[0] ^= 1;
+        root.ciphertext()[0] ^= 1;
+        genesis.state().ownerKey()[0] ^= 1;
+        genesis.ownerSignature()[0] ^= 1;
+        eq(genesisHash, AvpManifest.hash(view.tip().orElseThrow()), "the stored tip is unchanged");
+        check(view.fetchCommit(rootId).map(AvpCommit::verify).orElse(false), "the stored commit still verifies");
+
+        // Changing a record a reader returned does not change the view either.
+        view.tip().orElseThrow().ownerSignature()[0] ^= 1;
+        view.fetchCommit(rootId).orElseThrow().ciphertext()[0] ^= 1;
+        eq(
+                genesisHash,
+                AvpManifest.hash(view.tip().orElseThrow()),
+                "the tip is unchanged after a reader's copy changed");
+        check(
+                view.fetchCommit(rootId).map(AvpCommit::verify).orElse(false),
+                "the commit is unchanged after a reader's copy changed");
     }
 }

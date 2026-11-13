@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -60,6 +61,28 @@ public final class AvpCrypto {
     private static final byte[] X25519_PKCS8_PREFIX = hexConstant("302e020100300506032b656e04220420");
     private static final byte[] ED25519_SPKI_PREFIX = hexConstant("302a300506032b6570032100");
     private static final byte[] ED25519_PKCS8_PREFIX = hexConstant("302e020100300506032b657004220420");
+
+    /** The field prime of edwards25519, {@code 2^255 - 19}. */
+    private static final BigInteger ED25519_P = BigInteger.ONE.shiftLeft(255).subtract(BigInteger.valueOf(19));
+
+    /** The prime order of the edwards25519 base point. */
+    private static final BigInteger ED25519_L =
+            BigInteger.ONE.shiftLeft(252).add(new BigInteger("27742317777372353535851937790883648493"));
+
+    /**
+     * The libsodium {@code has_small_order} blocklist: with the sign bit cleared, the eight small-order
+     * points have five encodings ({@code y} = 0, 1, the two order-8 values, and {@code p - 1}), followed
+     * by the non-canonical encodings {@code p} and {@code p + 1} of {@code y} = 0 and 1.
+     */
+    private static final byte[][] ED25519_SMALL_ORDER = {
+        hexConstant("0000000000000000000000000000000000000000000000000000000000000000"),
+        hexConstant("0100000000000000000000000000000000000000000000000000000000000000"),
+        hexConstant("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+        hexConstant("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+        hexConstant("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+        hexConstant("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+        hexConstant("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    };
 
     /** The X25519 base point u = 9 (RFC 7748 4.1). */
     private static final byte[] X25519_BASE = basePoint();
@@ -285,16 +308,19 @@ public final class AvpCrypto {
     }
 
     /**
-     * Verifies an Ed25519 signature (RFC 8032) under a raw public key.
+     * Verifies an Ed25519 signature strictly (SPEC 2): the pre-checks of {@link
+     * #ed25519StrictInputsOk(byte[], byte[])}, then RFC 8032 verification. The JDK's own verification is
+     * cofactorless and makes none of the pre-checks, so without them it accepts forgeries under a
+     * small-order key that has no private key.
      *
      * @param publicKey the 32-byte public key
      * @param message the message
      * @param signature the 64-byte signature
-     * @return {@code true} only if the key and signature have their lengths, the key decodes, and the
+     * @return {@code true} only if the inputs pass the strict pre-checks, the key decodes, and the
      *     signature verifies; never throws
      */
     public static boolean ed25519Verify(byte[] publicKey, byte[] message, byte[] signature) {
-        if (publicKey.length != 32 || signature.length != 64) {
+        if (!ed25519StrictInputsOk(publicKey, signature)) {
             return false;
         }
         try {
@@ -308,6 +334,56 @@ public final class AvpCrypto {
             // A key that is not a valid point, or a malformed signature, does not verify.
             return false;
         }
+    }
+
+    /**
+     * The strict pre-checks of SPEC 2 on a raw Ed25519 public key and signature: neither the key nor
+     * {@code R} (the first 32 signature bytes) is the encoding of a small-order point or a
+     * non-canonical encoding ({@code y >= p}), and {@code S} (the last 32 bytes, little-endian) is
+     * below the group order {@code L}.
+     *
+     * @param publicKey the public key
+     * @param signature the signature
+     * @return whether the lengths are 32 and 64 and every pre-check passes
+     */
+    public static boolean ed25519StrictInputsOk(byte[] publicKey, byte[] signature) {
+        if (publicKey.length != 32 || signature.length != 64) {
+            return false;
+        }
+        byte[] r = Arrays.copyOfRange(signature, 0, 32);
+        if (isSmallOrder(publicKey) || !isCanonicalPoint(publicKey) || isSmallOrder(r) || !isCanonicalPoint(r)) {
+            return false;
+        }
+        return littleEndian(Arrays.copyOfRange(signature, 32, 64)).compareTo(ED25519_L) < 0;
+    }
+
+    /** Whether a 32-byte point encoding is on the libsodium small-order blocklist, ignoring the sign bit. */
+    private static boolean isSmallOrder(byte[] p) {
+        for (byte[] e : ED25519_SMALL_ORDER) {
+            int diff = ((p[31] & 0x7f) ^ e[31]);
+            for (int k = 0; k < 31; k++) {
+                diff |= p[k] ^ e[k];
+            }
+            if (diff == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a 32-byte point encoding is canonical: its {@code y} field, sign bit cleared, is below p. */
+    private static boolean isCanonicalPoint(byte[] p) {
+        byte[] y = p.clone();
+        y[31] &= 0x7f;
+        return littleEndian(y).compareTo(ED25519_P) < 0;
+    }
+
+    private static BigInteger littleEndian(byte[] b) {
+        byte[] be = new byte[b.length];
+        for (int k = 0; k < b.length; k++) {
+            be[k] = b[b.length - 1 - k];
+        }
+        return new BigInteger(1, be);
     }
 
     // ─── Wrap scheme (SPEC 4.4) ───────────────────────────────────────────────────────

@@ -393,8 +393,10 @@ public final class AvpRules {
      * that is rejected changes nothing, except that a state that loses the tie rule but verifies is
      * retained as a verified losing state (SPEC 6.5), a rejected or held commit keeps its status, and
      * a commit header that verifies stays known for ancestry (SPEC 7.3). Every input is
-     * attacker-controlled: no {@code apply} method throws; every failure is a verdict code. A view is
-     * not thread safe; a host serializes access to it.
+     * attacker-controlled: no {@code apply} method throws; every failure is a verdict code. The view
+     * stores its own copies of the records it is given and returns copies from its readers, so no
+     * caller can change its state through a record's arrays. A view is not thread safe; a host
+     * serializes access to it.
      *
      * <p>Host implementers: on the {@link Via#OFFER} path this engine applies no per-state hosted
      * check, so it will adopt a whole repository whose states never list this host. The host MUST
@@ -445,6 +447,62 @@ public final class AvpRules {
             return new RepoView(hostKey, headBound, st.copy());
         }
 
+        // ─── Defensive copies: the store holds records that no caller can reach ───────
+
+        private static AvpCommit.Commit copyOf(AvpCommit.Commit c) {
+            // The record constructor clones every array and id list.
+            return new AvpCommit.Commit(
+                    c.repoId(),
+                    c.commitId(),
+                    c.parents(),
+                    c.manifestSeq(),
+                    c.manifestHash(),
+                    c.keyEpoch(),
+                    c.author(),
+                    c.iv(),
+                    c.ciphertext(),
+                    c.authorSignature());
+        }
+
+        private static AvpTokens.LeaveRequest copyOf(AvpTokens.LeaveRequest l) {
+            return new AvpTokens.LeaveRequest(l.repoId(), l.memberKey(), l.at(), l.signature());
+        }
+
+        private static AvpManifest.SignedManifest copyOf(AvpManifest.SignedManifest m) {
+            AvpManifest.ManifestState s = m.state();
+            List<AvpManifest.HostRef> hosts = new ArrayList<>();
+            for (AvpManifest.HostRef h : s.hosts()) {
+                hosts.add(new AvpManifest.HostRef(h.hostKey(), h.locator()));
+            }
+            List<AvpManifest.MemberEntry> members = new ArrayList<>();
+            for (AvpManifest.MemberEntry x : s.members()) {
+                AvpManifest.WrappedKey wk = x.wrappedDataKey();
+                members.add(new AvpManifest.MemberEntry(
+                        x.ed25519PublicKey(),
+                        x.x25519PublicKey(),
+                        new AvpManifest.WrappedKey(wk.schemeId(), wk.ephemeralPublicKey(), wk.iv(), wk.ciphertext()),
+                        x.keyEpoch(),
+                        x.homeHostKey()));
+            }
+            List<AvpManifest.Removal> removals = new ArrayList<>();
+            for (AvpManifest.Removal r : s.removals()) {
+                removals.add(new AvpManifest.Removal(r.memberKey(), r.removedAtSeq(), r.frontier()));
+            }
+            AvpManifest.ManifestState state = new AvpManifest.ManifestState(
+                    s.repoId(),
+                    s.manifestSeq(),
+                    s.prevManifestHash(),
+                    s.ownerKey(),
+                    s.genesisNonce(),
+                    s.schemeId(),
+                    s.keyEpoch(),
+                    s.shareRefreshTokens(),
+                    hosts,
+                    members,
+                    removals);
+            return new AvpManifest.SignedManifest(state, m.ownerSignature());
+        }
+
         // ─── Applying items ───────────────────────────────────────────────────────────
 
         /**
@@ -476,7 +534,7 @@ public final class AvpRules {
                 AvpManifest.SignedManifest m, Optional<AvpCommit.Commit> commit, Via via) {
             Store snap = st.copy();
             try {
-                return state(m, commit, via);
+                return state(copyOf(m), commit.map(RepoView::copyOf), via);
             } catch (AvpException | RuntimeException e) {
                 // A state or commit that cannot be encoded is malformed; nothing of it is kept.
                 restore(snap);
@@ -508,7 +566,7 @@ public final class AvpRules {
         public Optional<String> applyCommit(AvpCommit.Commit c, Via via) {
             Store snap = st.copy();
             try {
-                return oneCommit(c, via, false);
+                return oneCommit(copyOf(c), via, false);
             } catch (RuntimeException e) {
                 // Not reachable by design (every rule is total); kept so that no unchecked exception
                 // escapes on attacker input. The operation is undone and the item refused.
@@ -540,6 +598,18 @@ public final class AvpRules {
          *     the owner
          */
         public Optional<String> applyLeave(AvpTokens.LeaveRequest l, Via via) {
+            Store snap = st.copy();
+            try {
+                return oneLeave(copyOf(l));
+            } catch (RuntimeException e) {
+                // Not reachable by design (every rule is total); kept so that no unchecked exception
+                // escapes on attacker input. The operation is undone and the item refused.
+                st = snap;
+                return fail(BAD_REQUEST);
+            }
+        }
+
+        private Optional<String> oneLeave(AvpTokens.LeaveRequest l) {
             if (!AvpTokens.verifyLeave(l)) {
                 return fail(BAD_REQUEST);
             }
@@ -605,7 +675,7 @@ public final class AvpRules {
          */
         public Optional<AvpManifest.SignedManifest> tip() {
             StateRec t = tipRec();
-            return t == null ? Optional.empty() : Optional.of(t.m());
+            return t == null ? Optional.empty() : Optional.of(copyOf(t.m()));
         }
 
         /**
@@ -635,7 +705,7 @@ public final class AvpRules {
             List<AvpCommit.Commit> out = new ArrayList<>();
             for (byte[] id : heads()) {
                 if (!skip.contains(key(id))) {
-                    out.add(st.commits.get(key(id)));
+                    out.add(copyOf(st.commits.get(key(id))));
                 }
             }
             return out;
@@ -652,7 +722,7 @@ public final class AvpRules {
             List<AvpManifest.SignedManifest> out = new ArrayList<>();
             for (StateRec r : st.chain) {
                 if (r.seq() > seq) {
-                    out.add(r.m());
+                    out.add(copyOf(r.m()));
                 }
             }
             return out;
@@ -664,7 +734,7 @@ public final class AvpRules {
          * @return the requests, sorted by member key
          */
         public List<AvpTokens.LeaveRequest> leaves() {
-            return List.copyOf(st.leaves);
+            return st.leaves.stream().map(RepoView::copyOf).toList();
         }
 
         /**
@@ -685,7 +755,7 @@ public final class AvpRules {
          */
         public Optional<AvpManifest.SignedManifest> manifest(byte[] hash) {
             StateRec r = st.states.get(key(hash));
-            return r == null ? Optional.empty() : Optional.of(r.m());
+            return r == null ? Optional.empty() : Optional.of(copyOf(r.m()));
         }
 
         /**
@@ -711,7 +781,7 @@ public final class AvpRules {
             List<AvpManifest.SignedManifest> out = new ArrayList<>();
             StateRec cur = st.states.get(key(hash));
             while (cur != null) {
-                out.add(0, cur.m());
+                out.add(0, copyOf(cur.m()));
                 if (cur.seq() <= 1) {
                     return Optional.of(out);
                 }
@@ -728,7 +798,9 @@ public final class AvpRules {
          */
         public Optional<AvpCommit.Commit> rotationCommit(byte[] hash) {
             String id = st.rotation.get(key(hash));
-            return id == null ? Optional.empty() : Optional.ofNullable(st.commits.get(id));
+            return id == null
+                    ? Optional.empty()
+                    : Optional.ofNullable(st.commits.get(id)).map(RepoView::copyOf);
         }
 
         /**
@@ -746,7 +818,7 @@ public final class AvpRules {
                 return Optional.empty();
             }
             boolean rotation = st.rotation.containsValue(k);
-            return st.status.get(k) == CommitStatus.ACCEPTED || rotation ? Optional.of(c) : Optional.empty();
+            return st.status.get(k) == CommitStatus.ACCEPTED || rotation ? Optional.of(copyOf(c)) : Optional.empty();
         }
 
         /**

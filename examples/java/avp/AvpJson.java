@@ -25,7 +25,8 @@ import java.util.Optional;
  * bits, a {@link BigInteger} for a larger integer, a {@link BigDecimal} for a number with a fraction
  * or an exponent, a {@link Boolean}, or {@code null}. The parser rejects every input RFC 8259 does
  * not allow, and also a duplicate object key, an escaped lone surrogate, nesting deeper than {@link
- * #MAX_DEPTH}, and bytes that are not well-formed UTF-8. Every rejection is an {@link AvpException}
+ * #MAX_DEPTH}, a number literal longer than {@link #MAX_NUMBER_LENGTH}, and bytes that are not
+ * well-formed UTF-8. Every rejection is an {@link AvpException}
  * of kind {@link AvpException.Kind#BAD_ENCODING}, which a host answers with {@code 400 bad_request}.
  *
  * <p>The writer emits compact JSON: no whitespace, object fields in map iteration order, and only
@@ -36,6 +37,9 @@ public final class AvpJson {
 
     /** The deepest nesting of arrays and objects the parser accepts. */
     public static final int MAX_DEPTH = 64;
+
+    /** The longest number literal, in characters, the parser accepts. */
+    public static final int MAX_NUMBER_LENGTH = 1000;
 
     private static final BigInteger LONG_MIN = BigInteger.valueOf(Long.MIN_VALUE);
     private static final BigInteger LONG_MAX = BigInteger.valueOf(Long.MAX_VALUE);
@@ -320,6 +324,10 @@ public final class AvpJson {
                 if (digits() == 0) {
                     throw fail("bad exponent");
                 }
+            }
+            if (pos - start > MAX_NUMBER_LENGTH) {
+                // Bounds the cost of BigInteger and BigDecimal parsing, which is super-linear in length.
+                throw fail("number longer than " + MAX_NUMBER_LENGTH + " characters");
             }
             String text = s.substring(start, pos);
             try {
