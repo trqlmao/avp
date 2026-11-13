@@ -85,6 +85,7 @@ public final class SmokeTest {
         checks.put("token_required", SmokeTest::tokenRequired);
         checks.put("server_never_sees_plaintext", SmokeTest::serverNeverSeesPlaintext);
         checks.put("discovery_reports_version_profiles_and_host_key", SmokeTest::discoveryReports);
+        checks.put("bind_address_defaults_to_all_interfaces_and_honors_avp_bind", SmokeTest::bindAddressHonorsAvpBind);
         checks.put("challenge_nonce_is_32_random_bytes", SmokeTest::challengeNonceIs32RandomBytes);
         checks.put("token_response_has_token_and_expiry", SmokeTest::tokenResponseHasTokenAndExpiry);
         checks.put("expired_challenge_is_unauthorized", SmokeTest::expiredChallengeIsUnauthorized);
@@ -1502,6 +1503,29 @@ public final class SmokeTest {
                 "127.0.0.1", fixedSeed, Replication.Peers.none(), new Server.Limits(), Replication.Config.defaults());
         Node fixed = new Node(cfg);
         eq(fixed.get("/.well-known/avp").at("hostKey"), b64(pk(fixedSeed)), "fixed host key");
+    }
+
+    private static void bindAddressHonorsAvpBind() throws Exception {
+        // Unset AVP_BIND keeps the old 0.0.0.0 listener; a set one is the address bound.
+        eq(Server.parseBind(null), "0.0.0.0", "default bind");
+        eq(Server.parseBind("127.0.0.1"), "127.0.0.1", "loopback bind");
+        eq(Server.parseBind(" ::1 "), "0:0:0:0:0:0:0:1", "ipv6 loopback bind");
+        for (String bad : List.of("", "localhost", "127.0.0.256", "127.0.0.1:8787")) {
+            try {
+                Server.parseBind(bad);
+                throw new AssertionError("accepted AVP_BIND " + bad);
+            } catch (IllegalArgumentException e) {
+                // Expected.
+            }
+        }
+        Server.ServerConfig cfg = new Server.ServerConfig(
+                Server.parseBind("127.0.0.1"),
+                seed(),
+                Replication.Peers.none(),
+                new Server.Limits(),
+                Replication.Config.defaults());
+        Node host = new Node(cfg);
+        eq(host.http.getAddress().getAddress().getHostAddress(), "127.0.0.1", "bound address");
     }
 
     private static void challengeNonceIs32RandomBytes() throws Exception {

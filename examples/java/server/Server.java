@@ -11,7 +11,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -54,14 +57,23 @@ import java.util.concurrent.locks.ReentrantLock;
  * in memory and there is no TLS.
  *
  * <p>Build and run from this directory: {@code javac -d build ../avp/*.java *.java} then {@code java -cp
- * build Server}. Environment: {@code PORT} (default 8787), {@code AVP_HOST_SEED} (64 hex digits, else a
- * random host key), {@code AVP_PEERS} ({@code <base64 hostKey>@<http base url>,...}), and {@code
- * AVP_TEST_CONTROL=1} for the test control route.
+ * build Server}. Environment: {@code PORT} (default 8787), {@code AVP_BIND} (default 0.0.0.0), {@code
+ * AVP_HOST_SEED} (64 hex digits, else a random host key), {@code AVP_PEERS} ({@code <base64 hostKey>@<http
+ * base url>,...}), and {@code AVP_TEST_CONTROL=1} for the test control route.
  */
 public final class Server {
 
     /** The default port of the binary ({@code PORT} overrides it). */
     public static final int DEFAULT_PORT = 8787;
+
+    /**
+     * The default listen address of the binary ({@code AVP_BIND} overrides it): every interface, which
+     * container and CI runs rely on.
+     */
+    public static final String DEFAULT_BIND = "0.0.0.0";
+
+    /** A dotted-quad IPv4 literal, each part 0 to 255 without a leading zero. */
+    private static final String IPV4_PART = "(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])";
 
     /** How long an acceptance from {@code prepareJoin} stays valid (SPEC 8.2: 15 minutes). */
     static final long ACCEPTANCE_TTL_MS = 15 * 60 * 1000L;
@@ -136,7 +148,7 @@ public final class Server {
     /**
      * How to start a host.
      *
-     * @param bindHost the address to listen on ({@code 0.0.0.0} in the binary)
+     * @param bindHost the address to listen on ({@code AVP_BIND} in the binary, default {@code 0.0.0.0})
      * @param hostSeed the 32-byte Ed25519 seed of the host key
      * @param peers the static peer list (SPEC 9.3)
      * @param limits the deployment limits, copied at start
@@ -649,6 +661,28 @@ public final class Server {
         return out;
     }
 
+    /**
+     * Parses {@code AVP_BIND}: the IP address the binary listens on. Only an IPv4 or IPv6 literal is taken
+     * (a host name or an address with a port is refused), so parsing never does a name lookup.
+     *
+     * @param text the text, or {@code null} when unset for {@link #DEFAULT_BIND}
+     * @return the address in its numeric form
+     * @throws IllegalArgumentException naming the variable
+     */
+    static String parseBind(String text) {
+        String t = text == null ? DEFAULT_BIND : text.trim();
+        boolean v4 = t.matches(IPV4_PART + "(?:\\." + IPV4_PART + "){3}");
+        boolean v6 = t.contains(":") && t.matches("[0-9A-Fa-f:.]+");
+        if (v4 || v6) {
+            try {
+                return InetAddress.getByName(t).getHostAddress();
+            } catch (UnknownHostException e) {
+                // Not a valid literal: refused below.
+            }
+        }
+        throw new IllegalArgumentException("AVP_BIND must be an IP address, for example 127.0.0.1");
+    }
+
     private static int hexDigit(char c) {
         if (c >= '0' && c <= '9') {
             return c - '0';
@@ -663,8 +697,8 @@ public final class Server {
     }
 
     /**
-     * The binary: listens on {@code 0.0.0.0:$PORT} and replicates with {@code AVP_PEERS}. A bad value exits
-     * with code 1 and a message.
+     * The binary: listens on {@code $AVP_BIND:$PORT} (default {@code 0.0.0.0:8787}) and replicates with
+     * {@code AVP_PEERS}. A bad value exits with code 1 and a message.
      *
      * @param args ignored
      */
@@ -681,6 +715,14 @@ public final class Server {
                 System.err.println("PORT must be a port number");
                 System.exit(1);
             }
+        }
+        String bind;
+        try {
+            bind = parseBind(System.getenv("AVP_BIND"));
+        } catch (IllegalArgumentException e) {
+            System.err.println(e.getMessage());
+            System.exit(1);
+            return;
         }
         byte[] seed;
         String seedText = System.getenv("AVP_HOST_SEED");
@@ -709,14 +751,16 @@ public final class Server {
                 control != null && control.trim().equals("1"));
         HttpServer http;
         try {
-            http = start(port, new ServerConfig("0.0.0.0", seed, peers, new Limits(), config));
+            http = start(port, new ServerConfig(bind, seed, peers, new Limits(), config));
         } catch (IOException e) {
-            System.err.println("cannot listen on port " + port + ": " + e.getMessage());
+            System.err.println("cannot listen on " + bind + " port " + port + ": " + e.getMessage());
             System.exit(1);
             return;
         }
         Host h = host(http);
-        System.out.println("AVP 0.5 reference host listening on http://0.0.0.0:"
+        InetAddress bound = http.getAddress().getAddress();
+        String shown = bound instanceof Inet6Address ? "[" + bound.getHostAddress() + "]" : bound.getHostAddress();
+        System.out.println("AVP 0.5 reference host listening on http://" + shown + ":"
                 + http.getAddress().getPort()
                 + ", host key " + AvpEncoding.base64(h.hostKey) + ", " + peers.size() + " peer(s)");
     }

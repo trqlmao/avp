@@ -27,6 +27,7 @@ JDK 21 or later, nothing else: no build tool, no dependencies (`com.sun.net.http
 javac -d build ../avp/*.java *.java
 java -cp build Server                                   # listens on http://0.0.0.0:8787
 PORT=9000 java -cp build Server                         # another port
+AVP_BIND=127.0.0.1 java -cp build Server                # loopback only
 AVP_HOST_SEED=<64 hex digits> java -cp build Server     # a fixed host key
 AVP_PEERS="<base64 key>@http://b.vault.example:8787" java -cp build Server   # peer with another host
 java -cp build SmokeTest                                # the API and replication suite
@@ -34,15 +35,16 @@ java -cp build SmokeTest                                # the API and replicatio
 
 | Variable | Meaning |
 |---|---|
-| `PORT` | Listen port on `0.0.0.0`. Default `8787`. |
+| `PORT` | Listen port. Default `8787`. |
+| `AVP_BIND` | Listen address, an IPv4 or IPv6 literal. Default `0.0.0.0` (every interface, as containers and CI need). Set `127.0.0.1` to listen on loopback only. |
 | `AVP_HOST_SEED` | The 32-byte Ed25519 seed of the host key, as 64 hex digits. Without it the host key is random for each start. |
 | `AVP_PEERS` | The static peer list, `<base64 hostKey>@<http base url>,...` (SPEC 9.3). Only these keys may call the host routes. Unset or empty means no peers. Plain `http://` only. |
 | `AVP_TEST_CONTROL` | `1` enables `POST /v1/test/replication` (below). Never set it in production; without it the route does not exist (`404`). |
 
-A bad `PORT`, `AVP_HOST_SEED`, or `AVP_PEERS` value exits with code 1 and a message naming it.
+A bad `PORT`, `AVP_BIND`, `AVP_HOST_SEED`, or `AVP_PEERS` value exits with code 1 and a message naming it.
 
-The binary prints the port and the host key (base64) at start. A client checks that key against
-`GET /.well-known/avp` and against the manifest's `hosts` (SPEC 3.3, 11.7).
+The binary prints the bound address and the host key (base64) at start. A client checks that key
+against `GET /.well-known/avp` and against the manifest's `hosts` (SPEC 3.3, 11.7).
 
 `SmokeTest` starts hosts in-process (`Server.start(port, config)`, port `0` for a free one) and talks
 to them over real HTTP, with every body built by the shared sources from real keys and signatures. It
