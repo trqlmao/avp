@@ -692,11 +692,12 @@ export function verifyInvite(t: WireInviteToken, repoId: string, nowMs: number):
       expiresAt: a.expiresAt,
       signature: Buffer.from(a.signature, "base64"),
     };
+    // Keys are compared as decoded bytes, not as their base64 text (SPEC 3.3: hosts match by key).
     return (
       verifyAcceptance(acc, acc.hostKey) &&
       a.repoId === repoId &&
-      a.memberKey === t.ed25519PublicKey &&
-      a.hostKey === t.homeHostKey &&
+      acc.memberKey.equals(Buffer.from(t.ed25519PublicKey, "base64")) &&
+      acc.hostKey.equals(Buffer.from(t.homeHostKey, "base64")) &&
       a.expiresAt > nowMs
     );
   } catch {

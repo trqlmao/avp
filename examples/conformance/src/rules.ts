@@ -44,7 +44,12 @@ const fail = (code: VerdictCode): Verdict => ({ ok: false, code });
 
 const key = (b: Buffer) => b.toString("base64");
 
-type Status = "accepted" | "held" | "rejected";
+/**
+ * `pending` is a stored commit whose removal cutoff became undecidable (a frontier commit's header is
+ * unknown, SPEC 7.3): it is not accepted (not a head), not held, and not dropped. The cutoff is run
+ * again whenever a new verified header arrives.
+ */
+type Status = "accepted" | "held" | "rejected" | "pending";
 
 interface StateRec {
   m: SignedManifest;
@@ -338,9 +343,15 @@ export class RepoView {
     const rec: StateRec = { m, hash, key: key(hash), seq: s.manifestSeq };
 
     if (s.manifestSeq === 1) {
+      // createRepo carries the genesis and its first commit together (SPEC 8.2); without the commit
+      // the client request is malformed.
+      if (via === "push" && commit === undefined) return fail("bad_request");
       // Rule 3, genesis.
       if (!genesisOk(s)) return fail("bad_request");
       if (this.st.chain.length > 0) {
+        // Host level, not an engine verdict: a host answers createRepo for a repoId it already holds
+        // with 409 duplicate_repo (SPEC 8.2, 12.3) before consulting the engine. The answer below is a
+        // placeholder that no acceptance.json scenario pins.
         const same = this.st.chain[0].key === rec.key;
         return same && via === "offer" && commit === undefined ? OK : fail("manifest_conflict");
       }
@@ -354,13 +365,20 @@ export class RepoView {
     const prev = this.st.states.get(key(s.prevManifestHash));
     if (prev === undefined || prev.seq !== s.manifestSeq - 1) return fail("manifest_conflict");
     const known = this.st.states.get(rec.key);
-    if (known !== undefined) {
-      // A retry of a state already held: idempotent by replication, a conflict on publish (SPEC 12.3).
+    if (known !== undefined && (this.isWinning(known) || via === "push")) {
+      // A retry of a state already on the chain: idempotent by replication, a conflict on publish
+      // (SPEC 12.3). A retained losing state offered again is evaluated again below.
       return this.isWinning(known) && via === "offer" && commit === undefined ? OK : fail("manifest_conflict");
     }
     // Rule 5, content.
     if (!contentOk(s, prev.m.state)) return fail("bad_request");
 
+    if (via === "push" && prev !== this.tipRec()) {
+      // A client publish is accepted only at tip + 1 linked to the tip (SPEC 6.3); the tie rule is for
+      // states that arrive by replication. A verifying state is still kept as a losing state (SPEC 6.5).
+      this.retainLosing(rec, prev, commit);
+      return fail("manifest_conflict");
+    }
     if (!this.isWinning(prev)) {
       // Extends a losing chain: verified and retained, never adopted (SPEC 6.5).
       this.retainLosing(rec, prev, commit);
@@ -429,7 +447,7 @@ export class RepoView {
     this.st.chain = [...this.st.chain.slice(0, s.manifestSeq - 1), rec];
 
     if (switching) this.recheckAccepted(s.manifestSeq);
-    this.recheckRemovals();
+    this.recheckCutoffs();
     for (const r of s.removals) this.st.leaves.delete(key(r.memberKey));
     this.recheckHeld();
     this.propagate();
@@ -452,10 +470,18 @@ export class RepoView {
   private commit(c: Commit, via: Via, carried: boolean): Verdict {
     if (!commitShapeOk(c)) return fail("bad_request");
     const tip = this.tipRec();
+    // Host level, not an engine verdict: a host answers 404 not_found for a repository it does not
+    // hold (SPEC 10.1) before consulting the engine. The answer below is a placeholder that no
+    // acceptance.json scenario pins.
     if (tip === undefined) return fail("missing_parents");
     if (c.repoId !== tip.m.state.repoId || !this.headerOk(c)) return fail("bad_request");
     const id = key(c.commitId);
-    this.st.headers.set(id, c);
+    if (!this.st.headers.has(id)) {
+      this.st.headers.set(id, c);
+      // A new verified header can complete the ancestry an undecided cutoff was waiting for (SPEC 7.3).
+      this.recheckCutoffs();
+      this.propagate();
+    }
 
     // Caller check on the client routes: the caller is the author (the owner for a carried commit)
     // and is a member of the tip.
@@ -465,7 +491,11 @@ export class RepoView {
     }
 
     const existing = this.st.commits.get(id);
-    if (existing !== undefined) return existing.status === "accepted" ? OK : fail("forbidden");
+    if (existing !== undefined) {
+      if (existing.status === "accepted") return OK;
+      // Undecided cutoff: retryable once the missing frontier commit arrives (SPEC 7.3).
+      return existing.status === "pending" ? fail("missing_parents") : fail("forbidden");
+    }
 
     const cls = this.classify(c, via === "push");
     switch (cls.kind) {
@@ -506,7 +536,8 @@ export class RepoView {
     // 7.4 parents.
     const parents = c.parents.map((p) => this.st.commits.get(key(p)));
     if (parents.some((r) => r?.status === "rejected")) return { kind: "rejected" };
-    if (parents.some((r) => r === undefined)) return { kind: "error", code: "missing_parents" };
+    // A pending parent is not accepted and is waiting on a missing frontier commit: retryable.
+    if (parents.some((r) => r === undefined || r.status === "pending")) return { kind: "error", code: "missing_parents" };
     if (parents.some((r) => r?.status === "held")) status = "held";
 
     if (status === "accepted" && applyBound) {
@@ -532,11 +563,14 @@ export class RepoView {
     return "held";
   }
 
-  /** SPEC 6.5 drop test: the tip's epoch passed the commit's, or the author was removed without cover. */
+  /**
+   * SPEC 6.5 drop test: the tip's epoch passed the commit's, or the author was removed and the commit
+   * is not covered by the frontier. A cutoff that cannot be decided yet is not a drop (SPEC 7.3 says
+   * only that the host MUST NOT accept such a commit).
+   */
   private dropTest(c: Commit, tip: StateRec): boolean {
-    const s = tip.m.state;
-    if (s.keyEpoch > c.keyEpoch) return true;
-    return s.removals.some((r) => r.memberKey.equals(c.author)) && this.cutoff(c, tip) !== "ok";
+    if (tip.m.state.keyEpoch > c.keyEpoch) return true;
+    return this.cutoff(c, tip) === "fail";
   }
 
   /**
@@ -570,6 +604,11 @@ export class RepoView {
     return undecided ? "undecided" : "fail";
   }
 
+  private cutoffOk(c: Commit): boolean {
+    const tip = this.tipRec();
+    return tip !== undefined && this.cutoff(c, tip) === "ok";
+  }
+
   // ─── Re-checks after a new winning state ────────────────────────────────────
 
   /** SPEC 6.5: after a switch, every accepted commit citing a state from the fork point on. */
@@ -581,15 +620,25 @@ export class RepoView {
       if (bound === undefined || this.isWinning(bound)) continue;
       const v = this.losingVerdict(r.c, tip);
       if (v === "rejected" || v === "held") this.setStatus(id, v);
+      else if (v === "undecided") this.setStatus(id, "pending");
     }
   }
 
-  /** SPEC 7.3: every held or accepted commit by a removed member that fails the cutoff is dropped. */
-  private recheckRemovals(): void {
-    const tip = this.tipRec() as StateRec;
+  /**
+   * SPEC 7.3, run on each new winning state and each new verified header: every stored commit by a
+   * removed member is checked against the tip's cutoff. One that fails is dropped; an accepted one
+   * that cannot be decided leaves the heads as pending; a pending one that is now covered is accepted
+   * again. A held commit stays held unless it fails.
+   */
+  private recheckCutoffs(): void {
+    const tip = this.tipRec();
+    if (tip === undefined) return;
     for (const [id, r] of [...this.st.commits]) {
       if (r.status === "rejected") continue;
-      if (this.cutoff(r.c, tip) === "fail") this.setStatus(id, "rejected");
+      const cut = this.cutoff(r.c, tip);
+      if (cut === "fail") this.setStatus(id, "rejected");
+      else if (cut === "undecided" && r.status === "accepted") this.setStatus(id, "pending");
+      else if (cut === "ok" && r.status === "pending") this.setStatus(id, "accepted");
     }
   }
 
@@ -610,7 +659,7 @@ export class RepoView {
         if (this.dropTest(r.c, tip)) {
           this.setStatus(id, "rejected");
           changed = true;
-        } else if (hasMember(tip.m.state, r.c.author) && tip.m.state.keyEpoch === r.c.keyEpoch) {
+        } else if (this.cutoff(r.c, tip) === "ok" && hasMember(tip.m.state, r.c.author) && tip.m.state.keyEpoch === r.c.keyEpoch) {
           this.setStatus(id, "accepted");
           changed = true;
         }
@@ -618,7 +667,10 @@ export class RepoView {
     }
   }
 
-  /** A commit with a rejected parent is rejected; an accepted commit with a held parent is held. */
+  /**
+   * A commit with a rejected parent is rejected; an accepted commit with a held parent is held, and
+   * one with a pending parent is pending.
+   */
   private propagate(): void {
     for (let changed = true; changed; ) {
       changed = false;
@@ -630,6 +682,13 @@ export class RepoView {
           changed = true;
         } else if (r.status === "accepted" && parents.includes("held")) {
           this.setStatus(id, "held");
+          changed = true;
+        } else if (r.status === "accepted" && parents.includes("pending")) {
+          this.setStatus(id, "pending");
+          changed = true;
+        } else if (r.status === "pending" && !parents.includes("pending") && this.cutoffOk(r.c)) {
+          // Waiting only on its parent: accepted again once the parent is.
+          this.setStatus(id, parents.includes("held") ? "held" : "accepted");
           changed = true;
         }
       }

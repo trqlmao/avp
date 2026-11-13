@@ -94,6 +94,12 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
 
   After the last step, the host's heads (accepted commits with no accepted child) MUST equal
   `finalHeads`, its held commits `finalHeld`, and its tip `finalTip`, compared as sets for the lists.
+  A stored commit whose removal cutoff cannot yet be decided (SPEC §7.3) is in neither list.
+
+  Two answers are host level, not engine verdicts, and no scenario pins them: `createRepo` for a
+  `repoId` the host already holds is `409 duplicate_repo` (SPEC §8.2, §12.3), and any operation on a
+  repository the host does not hold is `404 not_found` (SPEC §10.1). A host answers both before it
+  consults its rules engine, so the engine's verdict type has neither code.
 
 ## Cryptographic primitive vectors (RFC-anchored)
 

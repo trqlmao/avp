@@ -1480,6 +1480,80 @@ function buildAcceptance(ctx: Ctx): any {
     );
   }
 
+  // ── fix round 1: undecided cutoff, client publish, createRepo (SPEC 7.3, 6.3, 8.2) ──
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    const b3 = cm("b3-after-cutoff", bob, [r], M2ab);
+    const b0 = cm("b0", bob, [r], M2ab);
+    const b2 = cm("b2-child-of-b0", bob, [b0], M2ab);
+    const M3 = epoch1(M2ab, [a1, b1, b2]);
+    const rot = cm("rot", owner, [a1, b1], M3);
+    add(
+      "removed-member-undecided-then-dropped",
+      "SPEC 7.3: bob's b3 is accepted while bob is a member. seq 3 removes bob with frontier {a1, b1, b2}; b2 is unknown, so the host cannot decide b3 and MUST NOT keep accepting it (it leaves the heads, undecided, not dropped). b0 and b2 arrive (each first missing_parents); once b2's verified header is known, the frontier's ancestry is complete, b3 is neither in it nor an ancestor of it, and b3 is dropped. b0 and b2 are then accepted.",
+      [
+        genesis,
+        M("M2", M2ab, "ok"),
+        C(a1, "ok"),
+        C(b1, "ok"),
+        C(b3, "ok", "offer"),
+        M("M3", M3, "ok", "push", rot),
+        C(b0, "missing_parents", "offer"),
+        C(b2, "missing_parents", "offer"),
+        C(b0, "ok", "offer"),
+        C(b2, "ok", "offer"),
+      ],
+      [rot, b2],
+      [],
+      M3,
+    );
+  }
+  {
+    const W3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]]);
+    const L3 = above((t) => epoch1(M2ab, [r], { tweak: t }), W3);
+    const rotL = cm("rotL", owner, [r], L3);
+    const a2 = cm("a2-cites-L3", alice, [r], L3);
+    const x = cm("x-unseen", alice, [r], W3);
+    const W4 = state(4, W3, 1, [[owner, hostA], [bob, hostB], [carol, hostB]], { removals: [removal(alice, 4, [x])] });
+    const rot4 = cm("rot4", owner, [r], W4);
+    add(
+      "removed-member-undecided-held-kept",
+      "SPEC 6.5, 7.3: holding W3, the host is offered the losing L3 (epoch 1) with its rotation commit rotL, which is kept held (SPEC 8.3); alice's a2 citing L3 at epoch 1 is held. W4 removes alice (epoch 1) with frontier {x}, a commit this host never saw. Deciding the held commits against W4: rotL meets no drop test and W4 lists the owner at epoch 1, so it is accepted; for a2 the cutoff cannot be decided without x, so a2 is neither accepted (W4 does not list alice) nor dropped: it stays held.",
+      [
+        genesis,
+        M("M2", M2ab, "ok"),
+        M("W3", W3, "ok", "offer"),
+        M("L3", L3, "manifest_conflict", "offer", rotL),
+        C(a2, "forbidden"),
+        M("W4", W4, "ok", "push", rot4),
+      ],
+      [rotL, rot4],
+      [a2],
+      W4,
+    );
+  }
+  {
+    const X2 = state(2, G, 0, [[owner, hostA], [alice, hostA]]);
+    const Y2 = above((t) => state(2, G, 0, [[owner, hostA], [carol, hostB]], { tweak: t }), X2);
+    add(
+      "diverged-owner-publish-needs-tip-plus-one",
+      "SPEC 6.3, 6.5: holding Y2 (adds carol), the host gets a client publish of X2 (adds alice), whose manifestHash is lower. A host accepts a state from a client only at tip + 1 linked to the tip, so the publish is manifest_conflict and the tip stays Y2 (X2 is kept as a verified losing state). The same X2 by replication wins the tie rule and becomes the tip.",
+      [genesis, M("Y2", Y2, "ok"), M("X2", X2, "manifest_conflict"), M("X2", X2, "ok", "offer")],
+      [r],
+      [],
+      X2,
+    );
+  }
+  add(
+    "genesis-without-commit",
+    "SPEC 8.2, 10.4: createRepo carries the genesis state and its first commit, accepted together or not at all; a client publish of the genesis without the commit is a malformed request: bad_request, nothing stored.",
+    [M("G", G, "bad_request")],
+    [],
+    [],
+    null,
+  );
+
   return {
     description:
       "Host acceptance scenarios (SPEC 6, 7, 8.3, 8.4, 9.1). Each scenario is one host's view of one repository: create a rules engine for `hostKey` (a.vault.example) " +
