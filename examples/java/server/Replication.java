@@ -41,8 +41,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>{@link #run} starts one worker thread per peer, so a dead or slow peer delays only its own worker.
  *       A worker offers each accepted client write in the {@link Outbox} to its peer when the repository's
  *       tip lists both hosts, catches up from the peer when an offer from it was incomplete, and sweeps
- *       every held repository against the peer at startup and every sweep interval ({@code heads}, then
- *       {@code fetch} for what this host lacks, SPEC 9.2).
+ *       every held repository whose winning tip lists the peer at startup and every sweep interval
+ *       ({@code heads}, then {@code fetch} for what this host lacks, SPEC 9.2). A peer that is not listed
+ *       gets no request for the repository at all (SPEC 9.3).
  *   <li>Every item a peer sends, by {@code offer} or in a {@code fetch} answer, goes through the engine
  *       with {@link AvpRules.Via#OFFER} on a trial copy of the repository's view (SPEC 9: validated
  *       whatever the transport). The validated received tip then decides what is kept (SPEC 6.1 rule 6,
@@ -1462,7 +1463,17 @@ final class Replication {
                             return false;
                         });
                         if (now - nextSweep >= 0) {
-                            repos.addAll(new TreeSet<>(host.repos.keySet()));
+                            // SPEC 9.3: only the repositories whose winning tip lists this peer, so a peer
+                            // that is not listed never learns which repoIds this host holds.
+                            TreeSet<String> listed = new TreeSet<>();
+                            host.repos.forEach((r, v) -> {
+                                if (v.tip()
+                                        .map(t -> t.state().hasHost(peer.key()))
+                                        .orElse(false)) {
+                                    listed.add(r);
+                                }
+                            });
+                            repos.addAll(listed);
                             nextSweep = now + TimeUnit.MILLISECONDS.toNanos(host.replication.sweepIntervalMs());
                         }
                         List<String> unique = new ArrayList<>(new java.util.LinkedHashSet<>(repos));

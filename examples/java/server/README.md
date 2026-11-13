@@ -169,7 +169,8 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
 - **On startup** each worker sweeps its peer at once.
 - **After every accepted client write** (`createRepo`, `push`, `publishManifest`, `leave`) the write is
   offered to each peer whose key is in the repository's tip `hosts`, while that tip lists this host.
-- **Every 5 seconds** each worker sweeps every held repository against its peer: `heads`, then `fetch`
+- **Every 5 seconds** each worker sweeps every held repository whose winning tip lists its peer:
+  `heads`, then `fetch`
   for the tip state and the heads this host lacks (and always once, for the leave requests), then
   `fetch` for what the items not applied yet still miss, at most 64 rounds and 4096 ids per catch-up.
   What is not applied yet is carried into the next round with the ids it waits on and is tried again
@@ -177,6 +178,9 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
   4096 per round (those carried longest are dropped first), and one catch-up makes at most 24704
   engine applications in all its rounds. These bound a peer that keeps a catch-up going, not the
   length of an honest history.
+- **Only listed hosts** get host requests for a repository (SPEC 9.3): a peer in `AVP_PEERS` that
+  is not in the repository's winning tip `hosts` gets no `heads`, `fetch`, or `offer` for it, so it
+  never learns the repoId. A catch-up after an incomplete offer goes to the peer that sent the offer.
 
 The state lock is never held across an outbound call. A held repository is updated under it; a first
 copy is validated outside the lock and admitted under it, after re-checking that the repository is

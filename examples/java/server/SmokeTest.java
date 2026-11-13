@@ -2181,15 +2181,24 @@ public final class SmokeTest {
             Thread.sleep(SWEEP_MS * 6);
             isTrue(!c.holds(id), "C does not hold it");
 
-            // SPEC 9.2 and 9.3: A offers each accepted write only to the peers in the repository's hosts. D
-            // is reachable (A's sweep calls it), yet it never gets an offer, so it never sees the manifest,
-            // the ciphertext, or the commits. The sweep's heads call carries only the repoId (SPEC 9.3
-            // cadence) and is not an offer.
+            // Positive control: a second repository that does list D. A offers it to D and sweeps it, so the
+            // recorder is reachable and records A's requests.
+            Repo listed = genesis(a.key(), a.key(), pk(d.seed));
+            create(a, listed);
+            String listedId = listed.id();
+            eventuallyTrue("D gets requests for the repository that lists it", () -> {
+                List<String> got = d.paths();
+                return got.contains(hostPath(listedId, "offer")) && got.contains(hostPath(listedId, "heads"));
+            });
+            Thread.sleep(SWEEP_MS * 3);
+
+            // SPEC 9.2 and 9.3: A sends heads, fetch, and offer for a repository only to the peers in its
+            // hosts. D is in A's AVP_PEERS but not in the first repository's hosts, so it gets no request for
+            // it at all, sweep included, and never learns its repoId.
             List<String> got = d.paths();
-            isTrue(!got.isEmpty(), "A never called D, so the recorder proves nothing");
+            String prefix = "/v1/host/repos/" + id + "/";
             for (String p : got) {
-                isTrue(!p.equals(hostPath(id, "offer")), "A offered the repository to D: " + got);
-                isTrue(p.equals(hostPath(id, "heads")), "A sent D more than a heads call: " + got);
+                isTrue(!p.startsWith(prefix), "A sent D a request for a repository that does not list it: " + got);
             }
         }
     }
