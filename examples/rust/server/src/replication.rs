@@ -956,9 +956,10 @@ fn parents_first(commits: Vec<Commit>) -> Vec<Commit> {
 /// engine rejects is stored with that status, and the header of a commit that misses a parent is
 /// kept for ancestry (SPEC 7.3). So when an offered commit ends neither accepted, held, nor pending,
 /// the copy is rebuilt from `base` with the states, the leave requests, and only the commits that
-/// ended accepted, held, or pending. Held commits stay stored as SPEC 6.5 requires. Applying the
-/// same states and the commits that were kept gives them the same status again: a kept commit
-/// depends only on states and on kept parents. No engine change is involved.
+/// ended accepted, held, or pending. Held commits stay stored as SPEC 6.5 requires. A kept commit
+/// depends only on states, on kept parents, and on verified headers; when a header of a dropped
+/// commit was what decided it in the trial, the answer reports its stored status instead, so the
+/// answer always matches what is stored. No engine change is involved.
 pub(crate) fn apply_kept(base: &RepoView, repo_id: &str, items: Items, states_only: bool) -> (RepoView, Applied) {
     let manifests = items.manifests.clone();
     let commits = items.commits.clone();
@@ -982,12 +983,29 @@ pub(crate) fn apply_kept(base: &RepoView, repo_id: &str, items: Items, states_on
         repo_id,
         Items {
             manifests,
-            commits,
+            commits: commits.clone(),
             leaves,
         },
         states_only,
     )
     .applications;
+    // The answer reports what is stored. A commit the trial accepted only thanks to a header the
+    // rebuild left out (a dropped commit that resolved a removal cutoff, SPEC 7.3) is not stored as
+    // accepted: it is reported with the code its stored status gives, and waits for a retry.
+    let (stored, moved): (Vec<Id>, Vec<Id>) = std::mem::take(&mut applied.accepted)
+        .into_iter()
+        .partition(|id| clean.manifest(id).is_some() || clean.status(id) == Some(CommitStatus::Accepted));
+    applied.accepted = stored;
+    for id in moved {
+        let code = match clean.status(&id) {
+            Some(CommitStatus::Held | CommitStatus::Rejected) => RejectCode::Forbidden,
+            _ => RejectCode::MissingParents,
+        };
+        applied.reject(id, code);
+        if let Some(c) = commits.iter().find(|c| c.commit_id == id) {
+            applied.waiting.push(c.clone());
+        }
+    }
     (clean, applied)
 }
 

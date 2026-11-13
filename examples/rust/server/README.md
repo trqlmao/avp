@@ -122,7 +122,9 @@ Checks, in order:
    A peer cannot grow a repository with items the engine refuses: a commit that ends neither
    accepted, held, nor pending (rejected, or still missing a parent) is not stored, nor is its
    header. The host re-applies the states, the leave requests, and only the kept commits to a fresh
-   copy before it stores the result; held commits are stored as SPEC 6.5 requires.
+   copy before it stores the result; held commits are stored as SPEC 6.5 requires. The answer
+   reports what is stored: a commit whose acceptance on the trial rested on a header left out of the
+   stored copy is reported with the code its stored status gives (`missing_parents` while pending).
 
    An offer with missing items, or for a repository the host does not hold yet, also makes the host
    catch up from the sender. A first copy whose received tip is not known yet (no genesis, or a gap

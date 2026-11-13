@@ -2257,6 +2257,64 @@ fn decoy_rotation_candidate_does_not_block_its_state() {
     assert_eq!(b.heads(&id), vec![rot.commit_id]);
 }
 
+/// Minor 4: the offer answer matches what is stored. A frontier commit the engine rejects is not
+/// kept (nor its header), so a commit whose acceptance on the trial rested on that header is not
+/// reported as accepted: every id the answer accepts is stored as accepted.
+#[test]
+fn offer_answer_matches_what_is_stored() {
+    let (b, p) = node_with_fake();
+    let mut repo = genesis(&[b.key(), p.key()], b.key());
+    let token = create(&b, &repo);
+    let id = repo.id();
+    let carol = Device::new();
+    let entry = carol.entry(&repo.data_key, 0, b.key());
+    let s2 = repo.next(|s| s.members.push(entry));
+    assert_eq!(publish(&b, &repo, &token, &s2, None).status, 200);
+    repo.tip = s2.clone();
+    let x = repo.commit(&carol.sign, vec![repo.root.commit_id], b"x");
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[], &[&x], &[]));
+    assert_eq!(id_set(&r.json["accepted"]), b64_set(&[x.commit_id]));
+    // Removing carol with a frontier naming f, whose header this host lacks: x becomes pending.
+    // f, in the removal's frontier, also has a parent the engine rejects (a stranger's commit), so
+    // f is tried (its verified header covers x) but ends rejected and is not kept.
+    let stranger = repo.commit(&new_key(), vec![repo.root.commit_id], b"stranger");
+    let f = repo.commit(&carol.sign, vec![x.commit_id, stranger.commit_id], b"f");
+    let (s3, rot, new_key) = rotation(
+        &repo,
+        &[&repo.owner],
+        Some((&carol, vec![f.commit_id])),
+        vec![repo.root.commit_id],
+        b.key(),
+    );
+    assert_eq!(publish(&b, &repo, &token, &s3, Some(&rot)).status, 200);
+    assert_eq!(b.view(&id, RepoView::pending), Some(vec![x.commit_id]));
+    repo.tip = s3;
+    repo.data_key = new_key;
+    // On the trial f's header covers x, so k (a child of x) is accepted there; the stored copy drops
+    // f with its header, x stays pending, and k is not stored.
+    let k = repo.commit(&repo.owner.sign, vec![x.commit_id], b"k");
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[], &[&stranger, &f, &k], &[]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    for a in r.json["accepted"].as_array().unwrap() {
+        let accepted: Id = b64_decode(a.as_str().unwrap()).unwrap().try_into().unwrap();
+        assert_eq!(
+            b.view(&id, |v| v.status(&accepted)),
+            Some(Some(CommitStatus::Accepted)),
+            "answer accepts {} but it is not stored as accepted: {}",
+            a,
+            r.json
+        );
+    }
+    assert!(rejected(&r).contains(&pair(&f.commit_id, "forbidden")), "{}", r.json);
+    assert!(
+        rejected(&r).contains(&pair(&k.commit_id, "missing_parents")),
+        "{}",
+        r.json
+    );
+    assert_eq!(b.view(&id, |v| v.status(&k.commit_id)), Some(None));
+    assert_eq!(b.view(&id, RepoView::pending), Some(vec![x.commit_id]));
+}
+
 /// Minor 3, losing side: a verified losing epoch-raising state keeps its real rotation commit as a
 /// held commit (SPEC 6.5, 8.3) even when a forged candidate is tried first.
 #[test]
