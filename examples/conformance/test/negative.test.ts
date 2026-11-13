@@ -157,6 +157,42 @@ test("the challenge negatives come last, after the strict ed25519 rejects", () =
 });
 
 /**
+ * Each challenge case's valid signature verifies with node:crypto over the SPEC 3.3 transcript
+ * assembled here by hand, with the label written out, so a generator that signed under any other
+ * label (or without a field) fails this bank even after its output is regenerated.
+ */
+test("the challenge negatives carry signatures over a hand-built avp/challenge/v1 transcript", () => {
+  const u32 = (n: number) => Buffer.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
+  const lp = (b: Buffer) => Buffer.concat([u32(b.length), b]);
+  const transcript = (hostKey: Buffer, key: Buffer, nonce: Buffer) =>
+    Buffer.concat([Buffer.from("avp/challenge/v1", "utf8"), Buffer.from([0]), lp(hostKey), lp(key), lp(nonce)]);
+  const edVerify = (pub: Buffer, msg: Buffer, sig: Buffer) =>
+    rawVerify(null, msg, createPublicKey({ key: Buffer.concat([SPKI, pub]), format: "der", type: "spki" }), sig);
+  const byName = new Map((negative.cases as any[]).map((c) => [c.name, c]));
+  const challenges = (negative.cases as any[]).filter((c) => c.op === "challenge-verify");
+  assert.equal(challenges.length, 3);
+  for (const c of challenges) {
+    const restored = { ...c, ...c.base };
+    assert.ok(
+      edVerify(fromB64(restored.ed25519PublicKey), transcript(fromB64(restored.hostKey), fromB64(restored.ed25519PublicKey), fromB64(restored.nonce)), fromB64(restored.signature)),
+      `${c.name}: the base is a signature over the hand-built transcript`,
+    );
+  }
+  const other = byName.get("challenge/made-for-other-host-key");
+  assert.ok(edVerify(fromB64(other.ed25519PublicKey), transcript(fromB64(other.base.hostKey), fromB64(other.ed25519PublicKey), fromB64(other.nonce)), fromB64(other.signature)));
+  // The commit-verify cases carry alice's transcript signature for a.vault.example, whose nonce is the
+  // commit id or the whole commit-sig message, as their author signature.
+  const hostA = fromB64(other.hostKey);
+  for (const [name, nonceOf] of [
+    ["challenge/signature-presented-as-commit-signature", (id: Buffer) => id],
+    ["challenge/commit-sig-message-as-nonce", (id: Buffer) => commitSigMessage(id)],
+  ] as const) {
+    const cm = commitFromWire(byName.get(name).commit);
+    assert.ok(edVerify(cm.author, transcript(hostA, cm.author, nonceOf(cm.commitId)), cm.authorSignature), `${name}: a transcript signature`);
+  }
+});
+
+/**
  * Without domain separation each cross case is accepted: the raw-nonce signature verifies over the
  * nonce, and a commit author signature verifies over the commit-sig message a host could pass off as
  * a nonce. This shows the transcript, not some other mutation, is what rejects them.
