@@ -47,6 +47,7 @@ import {
   deriveRepoId,
   ed25519PublicRaw,
   ed25519Sign,
+  sha512,
   ed25519Verify,
   decodeInviteToken,
   encodeToken,
@@ -278,6 +279,55 @@ function withForeignSignature(c: Commit, other: Party): Commit {
 const IDENTITY_KEY = Buffer.from("0100000000000000000000000000000000000000000000000000000000000000", "hex");
 /** `R` = identity, `S` = 0: verifies under the identity key for every message without the strict checks. */
 const IDENTITY_FORGERY = Buffer.concat([IDENTITY_KEY, Buffer.alloc(32)]);
+/** An order-8 point (SPEC 2, negative.json ed25519/order-8-key-forgery): `[k]A` is the identity when 8 divides k. */
+const ORDER8_KEY = Buffer.from("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "hex");
+/** The order-8 point with the sign bit set (negative.json ed25519/order-8-sign-bit-key-forgery). */
+const ORDER8_SIGN_BIT_KEY = Buffer.from("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "hex");
+/** `y = p + 1`, the non-canonical encoding of the identity (SPEC 2, negative.json ed25519/non-canonical-key). */
+const NONCANONICAL_KEY = Buffer.from("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "hex");
+/** The order of the edwards25519 base point (SPEC 2). */
+const ED25519_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+
+const leToInt = (b: Buffer): bigint => {
+  let x = 0n;
+  for (let i = b.length - 1; i >= 0; i--) x = (x << 8n) | BigInt(b[i]);
+  return x;
+};
+const intToLe32 = (n: bigint): Buffer => {
+  const out = Buffer.alloc(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = Number(n & 0xffn);
+    n >>= 8n;
+  }
+  return out;
+};
+/** The RFC 8032 challenge scalar `k = SHA-512(R || A || M) mod L`. */
+const edChallenge = (r: Buffer, a: Buffer, m: Buffer) => leToInt(sha512(r, a, m)) % ED25519_L;
+
+/**
+ * A signature by an honest key with `R` = identity and `S = k * a mod L` (negative.json ed25519/identity-r):
+ * it passes the cofactorless equation `[S]B = R + [k]A`, and strict verification rejects it because `R`
+ * is small order (SPEC 2).
+ */
+/** The RFC 8032 secret scalar of a seed: the clamped first half of `SHA-512(seed)`. */
+function secretScalar(seed: Buffer): bigint {
+  const h = Buffer.from(sha512(seed).subarray(0, 32));
+  h[0] &= 248;
+  h[31] &= 127;
+  h[31] |= 64;
+  return leToInt(h);
+}
+
+function identityRSignature(p: Party, message: Buffer): Buffer {
+  const s = (edChallenge(IDENTITY_KEY, p.pub, message) * secretScalar(p.seed)) % ED25519_L;
+  return Buffer.concat([IDENTITY_KEY, intToLe32(s)]);
+}
+
+/** A valid signature with `L` added to `S` (negative.json ed25519/s-plus-l): `S >= L` is non-canonical (SPEC 2). */
+function sPlusLSignature(p: Party, message: Buffer): Buffer {
+  const sig = ed25519Sign(importEd25519Private(p.seed), message);
+  return Buffer.concat([sig.subarray(0, 32), intToLe32(leToInt(sig.subarray(32)) + ED25519_L)]);
+}
 
 function genesisState(owner: Party, dataKey: Buffer, hosts: HostRef[], home: Buffer, nonce = randomBytes(16)): ManifestState {
   return {
@@ -428,6 +478,25 @@ async function run(): Promise<void> {
   } else {
     check("§2", "no token for a small-order key's forged challenge signature (strict Ed25519)",
       weak.status >= 400 && weak.status < 500 && typeof weak.body?.error === "string", show(weak));
+  }
+  {
+    // SPEC 2, 3.3: the other strict rejections on the challenge signature, each 401 unauthorized.
+    const c = await challenge(dave.pub);
+    const n = String(c.body?.nonce ?? "");
+    expectError("§2", "no token for an honest key's signature with R = identity (strict Ed25519)",
+      await redeem(dave.pub, n, identityRSignature(dave, Buffer.from(n, "base64"))), 401, "unauthorized");
+    const c2 = await challenge(dave.pub);
+    const n2 = String(c2.body?.nonce ?? "");
+    expectError("§2", "no token for a valid signature with L added to S (strict Ed25519)",
+      await redeem(dave.pub, n2, sPlusLSignature(dave, Buffer.from(n2, "base64"))), 401, "unauthorized");
+    const nc = await challenge(NONCANONICAL_KEY);
+    if (nc.status === 200 && typeof nc.body?.nonce === "string") {
+      expectError("§2", "no token for a non-canonical key's forged signature (strict Ed25519)",
+        await redeem(NONCANONICAL_KEY, nc.body.nonce, IDENTITY_FORGERY), 401, "unauthorized");
+    } else {
+      check("§2", "no token for a non-canonical key's forged signature (strict Ed25519)",
+        nc.status >= 400 && nc.status < 500 && typeof nc.body?.error === "string", show(nc));
+    }
   }
 
   await login(bob);
@@ -697,6 +766,51 @@ async function run(): Promise<void> {
     expectError("§2", "a commit by a small-order author key with a forged signature is 400 bad_request (strict Ed25519)",
       await push(forged, alice.token), 400, "bad_request");
   }
+  {
+    // The rest of the strict rules of SPEC 2 on the author signature, each 400 bad_request (SPEC 7.1).
+    // Signed by alice's own key, a host without them would accept these as alice's writes.
+    const c = write(alice, [b1.commitId]);
+    expectError("§2", "a commit signed with R = identity is 400 bad_request (strict Ed25519)",
+      await push({ ...c, authorSignature: identityRSignature(alice, commitSigMessage(c.commitId)) }, alice.token),
+      400, "bad_request");
+    const d = write(alice, [b1.commitId]);
+    expectError("§2", "a commit whose signature has L added to S is 400 bad_request (strict Ed25519)",
+      await push({ ...d, authorSignature: sPlusLSignature(alice, commitSigMessage(d.commitId)) }, alice.token),
+      400, "bad_request");
+    // Order-8 author key: re-draw the IV until 8 divides k, so R = identity, S = 0 passes the cofactorless
+    // equation for this commit id (as negative.json ed25519/order-8-key-forgery does for its message).
+    const base = write(alice, [b1.commitId]);
+    let o8: Commit | undefined;
+    for (let i = 0; i < 1000 && o8 === undefined; i++) {
+      const h: CommitHeader = { ...base, author: ORDER8_KEY, iv: randomBytes(12) };
+      const id = commitId(h);
+      if (edChallenge(IDENTITY_KEY, ORDER8_KEY, commitSigMessage(id)) % 8n === 0n) {
+        o8 = { ...h, commitId: id, authorSignature: IDENTITY_FORGERY };
+      }
+    }
+    if (o8 === undefined) throw new Error("could not build the order-8 forgery");
+    expectError("§2", "a commit by an order-8 author key with a forged signature is 400 bad_request (strict Ed25519)",
+      await push(o8, alice.token), 400, "bad_request");
+    // The sign-bit variant uses an honest R (the public key of seed 08 00..00) and S its scalar, so only
+    // the small-order check on the key itself rejects it.
+    const seed8 = Buffer.alloc(32);
+    seed8[0] = 8;
+    const sig8 = Buffer.concat([ed25519PublicRaw(importEd25519Private(seed8)), intToLe32(secretScalar(seed8) % ED25519_L)]);
+    let o8s: Commit | undefined;
+    for (let i = 0; i < 1000 && o8s === undefined; i++) {
+      const h: CommitHeader = { ...base, author: ORDER8_SIGN_BIT_KEY, iv: randomBytes(12) };
+      const id = commitId(h);
+      if (edChallenge(sig8.subarray(0, 32), ORDER8_SIGN_BIT_KEY, commitSigMessage(id)) % 8n === 0n) {
+        o8s = { ...h, commitId: id, authorSignature: sig8 };
+      }
+    }
+    if (o8s === undefined) throw new Error("could not build the order-8 sign-bit forgery");
+    expectError("§2", "a commit by the sign-bit order-8 key with an honest-R forgery is 400 bad_request (strict Ed25519)",
+      await push(o8s, alice.token), 400, "bad_request");
+    const hn: CommitHeader = { ...write(alice, [b1.commitId]), author: NONCANONICAL_KEY };
+    expectError("§2", "a commit by a non-canonical author key with a forged signature is 400 bad_request (strict Ed25519)",
+      await push({ ...hn, commitId: commitId(hn), authorSignature: IDENTITY_FORGERY }, alice.token), 400, "bad_request");
+  }
   expectError("§7.2", "a commit whose keyEpoch differs from the cited state's is 403 forbidden",
     await push(write(bob, [b1.commitId], m2, k0, 1), bob.token), 403, "forbidden");
   expectError("§7.2", "a commit citing a state where its author is not a member is 403 forbidden",
@@ -780,6 +894,11 @@ async function run(): Promise<void> {
     check("§10.1", "pull from 0 returns all three states in order",
       r.status === 200 && (r.body?.manifests ?? []).map((m: WireSignedManifest) => m.state.manifestSeq).join(",") === "1,2,3", show(r));
   }
+  // SPEC 7.3, 7.4: a dropped commit stays rejected, so a child of it is 403 forbidden, from a member in good standing.
+  expectError("§7.4", "a child of the descendant the cutoff dropped is 403 forbidden",
+    await push(write(bob, [b2.commitId]), bob.token), 403, "forbidden");
+  expectError("§7.4", "a child of the removed member's commit the cutoff dropped is 403 forbidden",
+    await push(write(bob, [cc3.commitId]), bob.token), 403, "forbidden");
   expectError("§10.1", "the removed member's pull is 403 forbidden",
     await req("POST", repoPath(repoId, "pull"), { sinceManifestSeq: 0, knownHeads: [] }, carol.token), 403, "forbidden");
   expectError("§7.1", "the removed member's push is 403 forbidden", await push(write(carol, [rotation.commitId]), carol.token), 403, "forbidden");
