@@ -1612,6 +1612,20 @@ fn commit_with_duplicate_parents_is_discarded() {
     assert!(matches!(chain.verify_commit(&dup), Err(ClientError::CommitRejected(_))));
 }
 
+/// SPEC 3.3, 11.7: a client matches a host by key, never by locator alone. Connecting to host A while
+/// expecting host B's key (a key from a token or a manifest's `hosts`) fails; expecting A's own key
+/// succeeds.
+#[test]
+fn connect_expecting_matches_the_host_key() {
+    let a = node();
+    let b = node();
+    let r = HostClient::connect_expecting(&a.url(), &b.key());
+    assert!(matches!(r, Err(ClientError::HostKeyMismatch)), "{:?}", r.err());
+    let h = HostClient::connect_expecting(&a.url(), &a.key()).unwrap();
+    assert_eq!(h.key(), a.key());
+    assert_eq!(h.locator(), a.serving.addr().to_string());
+}
+
 // ─── The worked flow ────────────────────────────────────────────────────────────────────
 
 #[test]
