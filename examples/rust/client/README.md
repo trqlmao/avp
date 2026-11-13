@@ -1,100 +1,116 @@
-# AVP reference client, Rust
+# AVP reference client (Rust)
 
-A tiny, runnable reference client for the [HTTP/JSON profile](../../../SPEC.md). It drives the full
-lifecycle against a running server so you can watch every operation happen end to end, including
-real envelope encryption and key wrapping. The source is [`src/main.rs`](src/main.rs) and
-[`src/crypto.rs`](src/crypto.rs). It is a sibling of the
-[Java reference client](../../java/client/) and is wire-compatible with every reference server in
-this repository.
+A reference client for [AVP 0.5](../../../SPEC.md), HTTP/JSON profile, built on the shared
+[`avp`](../avp/) crate. The library (`src/lib.rs`) holds one member device's copy of a repository;
+the binary (`src/main.rs`) runs a worked flow against live hosts and prints each step. It talks to
+the [Rust reference host](../server/) and to any other conformant host.
 
-```sh
-cargo build           # compile
-cargo run             # drives the flow against http://localhost:8787
-cargo test            # run the conformance vector tests
-cargo build --release # optimized binary at target/release/avp-reference-client
-```
+> **Illustrative, not for production.** Keys live in memory and there is no TLS. What it does
+> honour is the client side of the protocol: it never trusts a host, and it never sends a host the
+> recovery phrase, its entropy or seed, a private key, a data key, or a plaintext.
 
-Point it at a different server with the `AVP_SERVER_URL` environment variable:
+## Build and run
+
+Requires a Rust toolchain with `cargo`, edition 2024, Rust 1.85 or later.
 
 ```sh
-AVP_SERVER_URL=http://vault.example:8787 cargo run
+cargo build
+cargo test        # tests/flow.rs, against real in-process hosts
 ```
 
-You need a server running first. The sibling [`../server`](../server) is the obvious one:
+Start a host, then run the flow against it:
 
 ```sh
-cd ../server && cargo run   # listens on http://localhost:8787
+cd ../server && PORT=19001 cargo run &
+AVP_SERVER_URL=http://localhost:19001 cargo run
 ```
 
-The [Java server](../../java/server/) is wire-compatible and works just as well.
+With a second host that replicates with the first, bob's home host is that second host:
 
-## What it does
+```sh
+AVP_SERVER_URL=http://a.vault.example:19001 AVP_SERVER_URL_B=http://b.vault.example:19002 cargo run
+```
 
-In one run, with two locally generated members (`alice` and `bob`):
+| Variable | Meaning |
+|---|---|
+| `AVP_SERVER_URL` | The owner's host. Default `http://localhost:8787`. |
+| `AVP_SERVER_URL_B` | Optional. Bob's home host; it must list the first host in its `AVP_PEERS` and the first host must list it. |
 
-1. **Generate keypairs**, each member is a fresh Ed25519 keypair (the member id, SPEC section 2)
-   plus a real X25519 keypair for data-key wrapping.
-2. **Authenticate**, the `challenge` -> sign nonce -> `token` flow. The client signs the **raw
-   nonce bytes** (base64-decoded), which is exactly what a conformant server verifies.
-3. **createRepo**, alice mints a 32-byte per-repo data key, AES-256-GCM-encrypts the initial alt
-   payload, wraps the data key to her own X25519 key, and creates a repo as its sole member.
-4. **pull**, once at the known version (server reports `unchanged`, omits the envelope) and once
-   from version 0 (server returns the current envelope).
-5. **push**, encrypts and writes a new payload version with optimistic concurrency, then
-   deliberately re-pushes at a stale expected version to show the `conflict` response.
-6. **addMember**, alice wraps the data key to bob's X25519 key and records his entry.
-7. **fetchMemberKey**, looks bob's entry back up by member id (URL-encoded, because base64 ids
-   contain `+ / =`).
-8. **bob pulls and decrypts**, bob authenticates with his own keypair, pulls the shared repo,
-   finds his member entry in the manifest, unwraps the data key with his X25519 private key,
-   and decrypts the payload -- recovering exactly what alice stored.
+The binary exits 0 when every step succeeds and 1 with the error otherwise.
 
-Each step prints a one-line transcript entry.
+## The worked flow
 
-## The crypto is real
+1. **create**: a new owner identity from 32 bytes of entropy; the 24-word phrase is shown once
+   (SPEC 3.1). The owner creates the repository on host A: a random genesis nonce, the `repoId`
+   derived from it, an epoch-0 data key wrapped to the owner, the owner-signed genesis state, and
+   an empty first commit (SPEC 8.2). It prints the repo locator token (SPEC 11.2).
+2. **write**: the owner adds an account to the payload (SPEC 5).
+3. **invite**: bob calls `prepareJoin` on his home host and builds an invite token with the host's
+   acceptance; the owner verifies the acceptance and wraps the data key to exactly the token's
+   X25519 key (SPEC 8.1, 8.2). Both sides print bob's key fingerprint (SPEC 3.2). Bob joins from
+   his home host and checks the owner fingerprint (SPEC 11.2).
+4. **write** and **merge**: the owner and bob edit the same account concurrently; the owner pulls,
+   merges both heads per field, and pushes the merge commit; bob pulls it and sees both edits
+   (SPEC 5).
+5. **leave**: bob sends a signed leave request and stops syncing; the owner processes it as a
+   removal with key rotation (SPEC 8.3, 8.4).
+6. **link**: a new owner device shows a link request and its confirmation code, the existing device
+   shows the same code and the owner confirms, the grant carries the entropy, and the new device
+   regenerates the same phrase and reads the vault (SPEC 11.6).
 
-Unlike placeholder reference clients, this one does the full envelope work (SPEC sections 4-5)
-in [`src/crypto.rs`](src/crypto.rs):
+## What the client checks itself
 
-- derives a per-repo symmetric **data key** (32 random bytes),
-- **AES-256-GCM** encrypts the alt payload, binding `(repoId, payloadVersion, keyEpoch)` into
-  the AAD (SPEC section 4),
-- **wraps** the data key to each member's X25519 public key via
-  `X25519-HKDF-SHA256-AESGCM-v1`: ephemeral X25519 ECDH (shared secret used raw, unhashed),
-  HKDF-SHA256 for the key-encryption key, AES-256-GCM to seal the data key,
-- **unwraps** the data key on the receiving side using the recipient's X25519 private key.
+The host's acceptance is never trusted on its own (SPEC 7.5). Everything below runs in the client,
+in [`src/sync.rs`](src/sync.rs):
 
-Those constructions are checked byte-for-byte against the shared
-[conformance vectors](../../../vectors/) by `cargo test`, so this client genuinely interoperates
-rather than only round-tripping its own values.
+- **Manifest states** (SPEC 6.1 rules 1 to 5, 6.2): structure and lengths, the owner signature, the
+  genesis rules with `repoId` recomputed, the chain link, and the content rules against the
+  previous state. A state that fails is discarded with every state after it.
+- **Rollback protection** (SPEC 6.4, 6.5): the client pins its highest verified state. A chain that
+  does not contain the pin is rejected, unless it diverges at or below the pin and wins the tie rule
+  (bytewise-lower `manifestHash`), in which case the client re-pins to its tip.
+- **Pulled commits** (SPEC 7.5): the id recomputes and the author signature verifies; a head by a
+  removed member passes only if its id is in the removal's frontier; the author is a member, at the
+  commit's epoch, of the cited state when it is on the client's chain, or of a state at or after
+  the cited seq otherwise. A commit that fails is never merged and never a parent.
+- **Merge and unreadable heads** (SPEC 5, 7.5): every readable head is merged and the merge is
+  pushed with exactly those heads as parents; the clock observes every stamp first. A head the
+  client cannot read (no key for its epoch, or a payload that does not decrypt) is left alone
+  without error. Every epoch's data key is retained, so old-epoch heads are merged forward.
+- **Refresh-token policy** (SPEC 5.1): unless the latest verified state has `shareRefreshTokens`
+  `true`, `refreshToken` and `expiresAt` are removed with their stamps on write and on read.
+- **Invites** (SPEC 8.2): the acceptance must verify under its host key, name this repository, the
+  token's member key and home host, and not have expired.
+- **Hosts** (SPEC 3.3, 11.7): a host is matched by the key from discovery; bearer tokens are cached
+  per host and presented only to the host that minted them.
+
+The owner operations are `invite`, `remove` (rotation, rewrap, frontier, and rotation commit in one
+`publishManifest`, SPEC 8.3), `set_share_refresh_tokens` (SPEC 8.5), and `process_leaves`.
+
+## Tests
+
+`tests/flow.rs` starts real reference hosts in-process on port 0 (two peered hosts where a test
+needs replication) and builds every item with real keys. Where a test needs a misbehaving host
+(a forged or rewritten manifest, a rolled-back chain, a commit a host would never serve), it puts
+a malicious in-process proxy between the client and an honest host: the proxy forwards every
+request, records every request body, and rewrites the `pull` answer. One test checks every
+recorded body and everything the host stores for the phrase, entropy, seed, private keys, data
+keys, and plaintexts.
 
 ## Dependencies
 
-Minimal and version-pinned (see [`Cargo.toml`](Cargo.toml)):
+Pinned exactly in [`Cargo.toml`](Cargo.toml):
 
 | Crate | Why |
 |---|---|
-| `ureq` | tiny blocking HTTP/1.1 client, no async runtime |
-| `serde_json` | build and parse JSON message shapes (`Value`) |
-| `ed25519-dalek` | generate the Ed25519 keypair and sign the challenge nonce |
-| `base64` | standard-base64 encode/decode for all wire byte fields |
-| `rand` | random keypair seeds, data key, IVs, and the opaque repoId |
-| `aes-gcm` | AES-256-GCM payload AEAD and data-key wrap seal/open |
-| `hkdf` | HKDF-SHA256 key derivation for the KEK in X25519-HKDF-SHA256-AESGCM-v1 |
-| `sha2` | SHA-256 hash function, pulled in by `hkdf` |
-| `x25519-dalek` | X25519 Diffie-Hellman for ephemeral key agreement in the wrap scheme |
+| `avp` (path `../avp`) | wire types, crypto, owner identity, payload merge, tokens |
+| `ureq` | a small blocking HTTP/1.1 client; default features off (no TLS, no compression) |
+| `serde`, `serde_json` | request and response bodies |
+| `ed25519-dalek`, `x25519-dalek` | member key pairs |
+| `thiserror` | the client error type |
 
-## What is simplified (do not ship this)
-
-- **No TLS.** It talks plain HTTP to `localhost` by default. A real client uses HTTPS; bearer
-  tokens are credentials and the transport MUST be TLS (SPEC section 12).
-- **Single process, no persistence.** It generates fresh keypairs each run and keeps no state.
-- **No key rotation on removal.** The lifecycle here does not exercise `removeMember`; a real
-  client rotates the key epoch and re-wraps the data key to the remaining members when someone
-  leaves.
-- **No anti-MITM key-binding verification.** A production client SHOULD (and, off a host it does
-  not operate, MUST) verify `MemberEntry.keyBindingSig` before wrapping a data key to a served
-  member entry (SPEC section 9). This example skips that check.
+Dev dependencies: `avp-reference-server` (path `../server`, the in-process hosts) and `tiny_http`
+(the test proxy).
 
 ## License
 
