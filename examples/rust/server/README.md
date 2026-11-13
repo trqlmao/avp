@@ -105,9 +105,11 @@ Checks, in order:
    its rotation commit as one atomic pair, then commits parents first); one that cannot apply yet
    waits on the ids it misses and is tried again only when one of them settles, so the engine work
    is linear in the items, and it is capped at three engine applications per item plus 64. A commit
-   that cannot apply in the offer at all (a parent or cited state neither held nor offered, or a
-   state behind a gap nothing fills) is not tried. An epoch-raising state tries each commit shaped
-   like its rotation commit (at most 8) until one pairs with it, so a decoy does not block it.
+   that cannot apply in the offer at all (a parent or cited state neither held nor offered, a state
+   behind a gap nothing fills, or a state waiting for a rotation commit that cannot apply) is not
+   tried. An epoch-raising state tries each commit shaped like its rotation commit until one pairs
+   with it, so a decoy does not block it: only commits whose id and owner signature verify count
+   (only the owner can make one), those with accepted parents first, at most 8.
    Leave requests come last. The **received tip** then decides (SPEC 9.2):
    - it does not list this host: `403 not_hosted`. A first copy stores nothing; a held repository
      keeps the validated states (with their rotation commits, not the other items) and is then not
@@ -164,10 +166,14 @@ One worker thread per peer, so a dead or slow peer delays only its own worker:
   for the tip state and the heads this host lacks (and always once, for the leave requests), then
   `fetch` for what the states and commits not applied yet still miss (a previous state, a parent, a
   cited state, a frontier header), at most 64 rounds and 4096 ids per catch-up. What is not applied
-  yet is carried into the next round, so a rotation pair whose parent this host lacks is applied
-  once that parent arrives; a round whose engine-work cap ran out is followed by one that continues
-  on the carried items even when nothing new is fetched. The bounds are on work, not on the length
-  of an honest history: a first copy across 40 rotations, each after a push, bootstraps. A peer
+  yet is carried into the next round with the ids it waits on, and is tried again only when one of
+  those arrives or becomes known (so a rotation pair whose parent this host lacks is applied once
+  that parent arrives); a round whose engine-work cap ran out is followed by one that continues on
+  the carried items even when nothing new is fetched. Carried and fetched items together are at
+  most 4096 per round (those carried longest are dropped first), and one catch-up makes at most
+  24704 engine applications in all its rounds (twice the cap of a full batch). These bound a peer
+  that keeps a catch-up going, not the length of an honest history: a first copy across 40
+  rotations, each after a push, bootstraps in a few hundred. A peer
   that answers `403` or `404` for one repository does not stop the others. A host on the losing side
   of diverged owner states converges through this sweep, since a peer offers only to hosts its own
   tip lists.

@@ -2372,3 +2372,276 @@ fn losing_state_keeps_its_real_rotation_commit() {
     let r = b.host(&p.sign, &id, "fetch", &fetch_body(&id, &[hash(&lose)]));
     assert_eq!(r.json["commits"], json!([to_json(&rot)]));
 }
+
+// ─── Fix round 3: what a catch-up carries between rounds ────────────────────────────────
+
+/// A minimal HTTP peer: reads one request (headers and `Content-Length` body), answers with
+/// `answer(path)`, closes. Runs until `stop`.
+fn scripted_peer(
+    stop: Arc<AtomicBool>,
+    mut answer: impl FnMut(&str) -> (u16, String) + Send + 'static,
+) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let handle = thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            let Ok((mut s, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            let _ = s.set_nonblocking(false);
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 65536];
+            let mut need = None;
+            while let Ok(n) = s.read(&mut tmp) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if need.is_none() {
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..p]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0usize);
+                        need = Some(p + 4 + len);
+                    }
+                }
+                if need.is_some_and(|n| buf.len() >= n) {
+                    break;
+                }
+            }
+            let first = String::from_utf8_lossy(&buf).lines().next().unwrap_or("").to_string();
+            let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+            let (status, body) = answer(&path);
+            let reply = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(reply.as_bytes());
+        }
+    });
+    (addr, handle)
+}
+
+/// Runs one catch-up of `repo` on `b` from a scripted peer whose `heads` answers `tip` once (later
+/// sweeps stop there) and whose `fetch` answers `round(n)` for the first `fetches` rounds; returns
+/// the rounds run, the engine applications they cost, and the items fetched.
+fn one_catch_up(
+    b: &mut Node,
+    peer: &SigningKey,
+    tip: (i64, Id),
+    fetches: usize,
+    round: impl Fn(usize) -> (Vec<SignedManifest>, Vec<Commit>) + Send + 'static,
+) -> (usize, u64, u64) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let heads_served = Arc::new(AtomicUsize::new(0));
+    let fetched = Arc::new(AtomicUsize::new(0));
+    let rounds = Arc::new(AtomicUsize::new(0));
+    let (h2, f2, r2) = (Arc::clone(&heads_served), Arc::clone(&fetched), Arc::clone(&rounds));
+    let (addr, server) = scripted_peer(Arc::clone(&stop), move |path| {
+        let not_found = (404, r#"{"error":"x","code":"not_found"}"#.to_string());
+        if path.ends_with("/heads") {
+            if h2.fetch_add(1, Ordering::SeqCst) > 0 {
+                return not_found;
+            }
+            let body =
+                json!({ "manifestTip": { "manifestSeq": tip.0, "manifestHash": b64_encode(&tip.1) }, "heads": [] });
+            return (200, body.to_string());
+        }
+        if path.ends_with("/fetch") {
+            let n = r2.fetch_add(1, Ordering::SeqCst);
+            if n >= fetches {
+                return not_found;
+            }
+            let (ms, cs) = round(n);
+            f2.fetch_add(ms.len() + cs.len(), Ordering::SeqCst);
+            let body = json!({
+                "manifests": ms.iter().map(to_json).collect::<Vec<_>>(),
+                "commits": cs.iter().map(to_json).collect::<Vec<_>>(),
+                "leaves": [],
+            });
+            return (200, body.to_string());
+        }
+        not_found
+    });
+    let before = engine_applications(b);
+    b.peer_with(&[format!("{}@http://{addr}", b64_encode(&pk(peer)))]);
+    // Wait until the catch-up has stopped (no fetch and no engine work for a while), at most 60 s.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = (rounds.load(Ordering::SeqCst), engine_applications(b));
+    loop {
+        thread::sleep(SWEEP * 5);
+        let now = (rounds.load(Ordering::SeqCst), engine_applications(b));
+        if (now == last && now.0 >= 2) || Instant::now() > deadline {
+            last = now;
+            break;
+        }
+        last = now;
+    }
+    stop.store(true, Ordering::SeqCst);
+    b.repl = None;
+    let _ = server.join();
+    (
+        last.0.min(fetches),
+        last.1 - before,
+        fetched.load(Ordering::SeqCst) as u64,
+    )
+}
+
+/// Important (finding 1, catch-up path): a listed peer whose `heads` names an epoch-raising state
+/// that can never pair (its rotation commit has an unknown parent) and whose every `fetch` answer
+/// carries a fresh batch of strangers' commits citing that state plus one orphan (which keeps the
+/// catch-up asking for more) cannot make one catch-up's work grow with the number of rounds. On the
+/// earlier design every round retried everything carried so far, so the work grew quadratically
+/// with the rounds; now none of these can apply in its batch, so none is tried.
+#[test]
+fn catch_up_work_does_not_grow_with_carried_rounds() {
+    const PER_ROUND: usize = 100;
+    let peer = new_key();
+    let mut b = node();
+    let repo = genesis(&[b.key(), pk(&peer)], b.key());
+    create(&b, &repo);
+    let (s, rot, key) = rotation(&repo, &[&repo.owner], None, vec![random_bytes::<32>()], b.key());
+    let s_hash = hash(&s);
+    let (genesis_m, root, data_key, owner) = (
+        repo.genesis.clone(),
+        repo.root.commit_id,
+        repo.data_key,
+        repo.owner.sign.clone(),
+    );
+    let (rounds, work, fetched) = one_catch_up(&mut b, &peer, (2, s_hash), 12, move |n| {
+        let mut commits = vec![rot.clone()];
+        for i in 0..PER_ROUND {
+            commits.push(commit_on(
+                &s,
+                &key,
+                &new_key(),
+                vec![root],
+                format!("j{n}-{i}").as_bytes(),
+            ));
+        }
+        commits.push(commit_on(
+            &genesis_m,
+            &data_key,
+            &owner,
+            vec![random_bytes::<32>()],
+            b"more",
+        ));
+        (vec![s.clone()], commits)
+    });
+    eprintln!("catch-up: {rounds} rounds, {work} engine applications for {fetched} fetched items");
+    assert!(rounds >= 2, "the catch-up fetched only {rounds} times");
+    // Linear in what was fetched, not in rounds times what was carried.
+    assert!(
+        work <= 2 * fetched + 256,
+        "{work} engine applications for {fetched} fetched items"
+    );
+    assert!(
+        work <= 2 * (3 * 4096 + 64),
+        "{work} engine applications in one catch-up"
+    );
+    // None of the strangers' commits can apply in its batch (the state they cite waits for a
+    // rotation commit that cannot apply), so none is tried: the work is the pair's, once a round.
+    assert!(
+        work <= 4 * rounds as u64,
+        "{work} engine applications for {rounds} rounds"
+    );
+    assert_eq!(b.tip_hash(&repo.id()), Some(hash(&repo.genesis)));
+}
+
+/// Important (finding 1, catch-up path), carried items: commits that can be tried but wait for good
+/// (a removed member's commits whose removal cutoff names a frontier commit the peer never sends)
+/// are carried from round to round and tried again only when something they wait on arrives, so a
+/// peer adding a fresh batch each round (plus an orphan that keeps the catch-up going) costs work
+/// linear in what it sends; on the earlier design each round retried all of them.
+#[test]
+fn carried_items_are_retried_only_when_their_wait_ends() {
+    const PER_ROUND: usize = 100;
+    let peer = new_key();
+    let mut b = node();
+    let mut repo = genesis(&[b.key(), pk(&peer)], b.key());
+    let token = create(&b, &repo);
+    let carol = Device::new();
+    let entry = carol.entry(&repo.data_key, 0, b.key());
+    let s2 = repo.next(|s| s.members.push(entry));
+    assert_eq!(publish(&b, &repo, &token, &s2, None).status, 200);
+    repo.tip = s2.clone();
+    let (s3, rot, _) = rotation(
+        &repo,
+        &[&repo.owner],
+        Some((&carol, vec![random_bytes::<32>()])),
+        vec![repo.root.commit_id],
+        b.key(),
+    );
+    assert_eq!(publish(&b, &repo, &token, &s3, Some(&rot)).status, 200);
+    let s3_hash = hash(&s3);
+    let (genesis_m, root, data_key, owner) = (
+        repo.genesis.clone(),
+        repo.root.commit_id,
+        repo.data_key,
+        repo.owner.sign.clone(),
+    );
+    let carol_sign = carol.sign.clone();
+    let (rounds, work, fetched) = one_catch_up(&mut b, &peer, (3, s3_hash), 12, move |n| {
+        let mut commits: Vec<Commit> = (0..PER_ROUND)
+            .map(|i| commit_on(&s2, &data_key, &carol_sign, vec![root], format!("c{n}-{i}").as_bytes()))
+            .collect();
+        commits.push(commit_on(
+            &genesis_m,
+            &data_key,
+            &owner,
+            vec![random_bytes::<32>()],
+            b"more",
+        ));
+        (Vec::new(), commits)
+    });
+    eprintln!("carried: {rounds} rounds, {work} engine applications for {fetched} fetched items");
+    assert!(rounds >= 4, "the catch-up fetched only {rounds} times");
+    assert!(
+        work <= 2 * fetched + 256,
+        "{work} engine applications for {fetched} fetched items"
+    );
+    assert_eq!(b.heads(&repo.id()), vec![rot.commit_id]);
+}
+
+/// Minor a: a listed peer cannot put eight decoys ahead of the real rotation commit to push it past
+/// the candidate cut: a candidate must carry a valid owner signature to be one (only the owner can
+/// sign such a commit), and candidates with accepted parents are tried first.
+#[test]
+fn eight_decoys_before_the_rotation_commit_do_not_block_it() {
+    let (b, p) = node_with_fake();
+    let repo = genesis(&[b.key(), p.key()], b.key());
+    create(&b, &repo);
+    let id = repo.id();
+    let (s2, rot, new_key_2) = rotation(&repo, &[&repo.owner], None, vec![repo.root.commit_id], b.key());
+    let decoys: Vec<Commit> = (0..8)
+        .map(|i| {
+            let mut c = commit_on(
+                &s2,
+                &new_key_2,
+                &repo.owner.sign,
+                vec![repo.root.commit_id],
+                format!("d{i}").as_bytes(),
+            );
+            c.author_signature[i] ^= 1;
+            c
+        })
+        .collect();
+    let mut cs: Vec<&Commit> = decoys.iter().collect();
+    cs.push(&rot);
+    let r = b.host(&p.sign, &id, "offer", &offer(&id, &[&s2], &cs, &[]));
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(b.tip_hash(&id), Some(hash(&s2)));
+    assert_eq!(
+        b.view(&id, |v| v.rotation_commit(&hash(&s2)).cloned()),
+        Some(Some(rot.clone()))
+    );
+    assert_eq!(id_set(&r.json["accepted"]), b64_set(&[hash(&s2), rot.commit_id]));
+    for d in &decoys {
+        assert!(rejected(&r).contains(&pair(&d.commit_id, "bad_request")), "{}", r.json);
+    }
+}

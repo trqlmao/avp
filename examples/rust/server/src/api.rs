@@ -870,19 +870,23 @@ fn host_offer(state: &Mutex<State>, req: &Incoming, repo_id: &str) -> Answer {
     };
     let (admitted, applied) = match sender_listed(&guard) {
         Some(false) => return Err(ApiError::forbidden("the calling host is not in the repository's hosts")),
-        Some(true) => replication::receive(&mut guard, repo_id, &peer, items),
+        Some(true) => replication::receive(&mut guard, repo_id, &peer, items, u64::MAX),
         None => {
             let fresh = RepoView::new(guard.host_key(), guard.limits.head_bound);
             let copy = items.clone();
             drop(guard);
-            let (trial, applied) = replication::apply_kept(&fresh, repo_id, items, false);
+            let (trial, applied) = replication::apply_kept(&fresh, repo_id, items, false, u64::MAX);
             guard = state.lock().map_err(|_| ApiError::internal())?;
             guard.replication_stats.engine_applications += applied.applications;
+            // The test control may have paused the host meanwhile (SPEC 9.3).
+            if guard.repl.paused {
+                return Err(ApiError::paused());
+            }
             match sender_listed(&guard) {
                 Some(false) => {
                     return Err(ApiError::forbidden("the calling host is not in the repository's hosts"));
                 }
-                Some(true) => replication::receive(&mut guard, repo_id, &peer, copy),
+                Some(true) => replication::receive(&mut guard, repo_id, &peer, copy, u64::MAX),
                 None if applied.has_gap() => (Admitted::Incomplete, applied),
                 None => (
                     replication::admit_first_copy(&mut guard, repo_id, &peer, trial),
