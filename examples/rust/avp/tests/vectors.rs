@@ -8,6 +8,7 @@
 
 use std::fs;
 
+use avp::auth::{challenge_message, sign_challenge, verify_challenge};
 use avp::commit::{Commit, CommitHeader, aad_v2, commit_sig_message};
 use avp::crypto::{self, OWNER_LINK_INFO, WRAP_INFO};
 use avp::encoding::Ce;
@@ -568,6 +569,72 @@ fn federation() {
     }
 }
 
+// ─── federation.json challenges: the challenge transcript (SPEC 3.3) ─────────────────────
+
+/// The Ed25519 seed of a `manifest.json` party (the owner or a member) by its public key.
+fn seed_of(manifest: &Value, public: &str) -> SigningKey {
+    let owner = &manifest["seeds"]["owner"];
+    let seed = if s(owner, "ownerKey") == public {
+        s(owner, "ed25519SeedHex")
+    } else {
+        let m = arr(&manifest["seeds"], "members")
+            .iter()
+            .find(|m| s(m, "ed25519PublicKey") == public)
+            .unwrap_or_else(|| panic!("no manifest.json seed for {public}"));
+        s(m, "ed25519SeedHex")
+    };
+    SigningKey::from_bytes(&unhex32(seed))
+}
+
+#[test]
+fn challenges() {
+    let file = load("federation.json");
+    let manifest = load("manifest.json");
+    let host_keys: Vec<[u8; 32]> = arr(&manifest["seeds"], "hosts")
+        .iter()
+        .map(|h| b64_32(s(h, "hostKey")))
+        .collect();
+    let cases = arr(&file, "challenges");
+    assert_eq!(cases.len(), 2);
+    for c in cases {
+        let name = s(c, "name");
+        let host_key = b64_32(s(c, "hostKey"));
+        let key = b64_32(s(c, "ed25519PublicKey"));
+        let nonce = b64(s(c, "nonce"));
+        let sig: [u8; 64] = b64(s(c, "signature")).try_into().unwrap();
+        assert!(nonce.len() >= 32, "{name}: nonce of at least 32 bytes");
+        assert_eq!(
+            hex(&challenge_message(&host_key, &key, &nonce).unwrap()),
+            s(c, "messageHex"),
+            "{name}"
+        );
+        // The SPEC 3.3 layout written out by hand: tag, then three length-prefixed fields.
+        let mut by_hand = b"avp/challenge/v1\0".to_vec();
+        for field in [&host_key[..], &key[..], &nonce[..]] {
+            by_hand.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
+            by_hand.extend_from_slice(field);
+        }
+        assert_eq!(hex(&by_hand), s(c, "messageHex"), "{name}: hand-built transcript");
+        verify_challenge(&host_key, &key, &nonce, &sig).unwrap();
+        let signer = seed_of(&manifest, s(c, "ed25519PublicKey"));
+        assert_eq!(
+            sign_challenge(&host_key, &signer, &nonce).unwrap(),
+            sig,
+            "{name}: signature reproduces"
+        );
+        for other in host_keys.iter().filter(|k| **k != host_key) {
+            assert!(
+                verify_challenge(other, &key, &nonce, &sig).is_err(),
+                "{name}: bound to its host key"
+            );
+        }
+        assert!(
+            crypto::ed25519_verify(&key, &nonce, &sig).is_err(),
+            "{name}: not over the raw nonce"
+        );
+    }
+}
+
 // ─── negative.json (MUST reject, and each base MUST be accepted) ────────────────────────
 
 /// Applies the case's operation and reports whether the input was accepted.
@@ -629,6 +696,16 @@ fn accepted(c: &Value) -> bool {
             let leave: LeaveRequest = serde_json::from_value(c["leave"].clone()).unwrap();
             leave.verify().is_ok()
         }
+        "challenge-verify" => {
+            let sig: [u8; 64] = b64(s(c, "signature")).try_into().unwrap();
+            verify_challenge(
+                &b64_32(s(c, "hostKey")),
+                &b64_32(s(c, "ed25519PublicKey")),
+                &b64(s(c, "nonce")),
+                &sig,
+            )
+            .is_ok()
+        }
         op => panic!("unknown op {op}"),
     }
 }
@@ -637,8 +714,18 @@ fn accepted(c: &Value) -> bool {
 fn negative() {
     let file = load("negative.json");
     let cases = arr(&file, "cases");
-    // 23 cases plus the six strict Ed25519 rejects of SPEC 2.
-    assert_eq!(cases.len(), 29);
+    // 23 cases, the six strict Ed25519 rejects of SPEC 2, then the five challenge cases (SPEC 3.3, 4.1).
+    assert_eq!(cases.len(), 34);
+    let names: Vec<&str> = cases.iter().map(|c| s(c, "name")).collect();
+    for n in [
+        "challenge/signature-presented-as-commit-signature",
+        "challenge/commit-sig-message-as-nonce",
+        "challenge/commit-signature-presented-as-challenge",
+        "challenge/made-for-other-host-key",
+        "challenge/signature-over-raw-nonce",
+    ] {
+        assert!(names[29..].contains(&n), "missing or misplaced negative {n}");
+    }
     let mut with_base = 0;
     for c in cases {
         let name = s(c, "name");
@@ -658,5 +745,5 @@ fn negative() {
             );
         }
     }
-    assert_eq!(with_base, 15);
+    assert_eq!(with_base, 20);
 }

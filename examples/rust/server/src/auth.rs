@@ -3,7 +3,9 @@
 //! Host-issued authentication (SPEC 3.3): challenges and bearer tokens.
 //!
 //! A challenge is 32 random bytes from a CSPRNG, issued for one Ed25519 key, single-use, and valid
-//! for [`CHALLENGE_TTL_MS`]. A token is 32 random bytes (base64url), valid only at this host for
+//! for [`CHALLENGE_TTL_MS`]. The client signs the challenge transcript
+//! `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))`, never the raw
+//! nonce, and the host verifies it with its own host key. A token is 32 random bytes (base64url), valid only at this host for
 //! [`TOKEN_TTL_MS`], whose subject is the key that signed the challenge.
 //!
 //! Neither secret is stored: both maps are keyed by the SHA-256 digest of the secret, so a lookup
@@ -16,7 +18,8 @@
 
 use std::collections::HashMap;
 
-use avp::crypto::{ct_eq, ed25519_verify, random_bytes, sha256};
+use avp::auth::verify_challenge;
+use avp::crypto::{ct_eq, random_bytes, sha256};
 use avp::encoding::b64url_encode;
 
 /// How long a challenge nonce stays valid (SPEC 3.3: RECOMMENDED at most 2 minutes).
@@ -93,18 +96,21 @@ impl Auth {
         Ok(nonce)
     }
 
-    /// Redeems a signed challenge for a token whose subject is `key` (SPEC 3.3 step 2). The nonce
-    /// is consumed whatever the outcome, so it can never be tried twice.
+    /// Redeems a signed challenge for a token whose subject is `key` (SPEC 3.3 step 2). The
+    /// signature is verified over the challenge transcript built with `host_key`, this host's own
+    /// key. The nonce is consumed whatever the outcome, so it can never be tried twice.
     ///
     /// Returns the token text and its expiry in epoch milliseconds.
     ///
     /// # Errors
     ///
     /// [`AuthError::Unauthorized`] if the nonce was not issued, was already used, has expired, was
-    /// issued for another key, or the signature over the raw nonce bytes does not verify under
-    /// `key`; [`AuthError::Full`] when `key` already has `caps.per_key` live tokens.
+    /// issued for another key, or the signature over the transcript does not verify under `key`
+    /// (a signature over the raw nonce, or a transcript built with another host key, does not);
+    /// [`AuthError::Full`] when `key` already has `caps.per_key` live tokens.
     pub fn token(
         &mut self,
+        host_key: &[u8; 32],
         key: [u8; 32],
         nonce: &[u8],
         signature: &[u8; 64],
@@ -115,7 +121,7 @@ impl Auth {
         if challenge.expires_at <= now || !ct_eq(&challenge.key, &key) {
             return Err(AuthError::Unauthorized);
         }
-        ed25519_verify(&key, nonce, signature).map_err(|_| AuthError::Unauthorized)?;
+        verify_challenge(host_key, &key, nonce, signature).map_err(|_| AuthError::Unauthorized)?;
         make_room(&mut self.tokens, &key, now, caps)?;
         let token = b64url_encode(&random_bytes::<32>());
         let expires_at = now.saturating_add(TOKEN_TTL_MS);

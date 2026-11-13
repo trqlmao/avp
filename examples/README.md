@@ -85,7 +85,7 @@ See [`offer-request.json`](offer-request.json) for the shape of an `offer` (host
 `AVP-Host-*` headers, SPEC section 9.3). `b.vault.example` validates every item by the same rules as a
 client write and, because the received tip lists it, keeps the copy.
 
-bob authenticates to his home host (SPEC section 3.3: `challenge`, sign the raw nonce bytes, `token`) and
+bob authenticates to his home host (SPEC section 3.3: `challenge`, sign the `avp/challenge/v1` transcript of the host key, his key, and the nonce, `token`) and
 calls `pull`. He gets the manifest states after his pinned seq, the heads he does not know, and the
 pending leave requests. See [`pull-response.json`](pull-response.json). He verifies every owner signature
 and chain link, checks the genesis owner key against the locator's fingerprint, unwraps the data key from

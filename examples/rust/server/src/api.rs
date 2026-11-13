@@ -502,7 +502,8 @@ fn token(st: &mut State, body: &[u8]) -> Answer {
         total: st.limits.max_tokens,
         per_key: st.limits.max_tokens_per_key,
     };
-    match st.auth.token(key, &nonce, &signature, now, caps) {
+    let host_key = st.host_key();
+    match st.auth.token(&host_key, key, &nonce, &signature, now, caps) {
         Ok((token, expires_at)) => Ok(json!({ "token": token, "expiresAt": expires_at })),
         Err(AuthError::Unauthorized) => Err(ApiError::unauthorized(
             "challenge nonce unknown, used, expired, or not issued for this key, or bad signature",

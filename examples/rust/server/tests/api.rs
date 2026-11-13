@@ -12,7 +12,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use avp::commit::{Commit, CommitHeader};
+use avp::auth::sign_challenge;
+use avp::commit::{Commit, CommitHeader, commit_sig_message};
 use avp::crypto::{SCHEME_ID, WRAP_INFO, ed25519_verify, random_bytes, wrap, x25519_public, x25519_random};
 use avp::encoding::{Ce, b64_decode, b64_decode_array, b64_encode};
 use avp::manifest::{HostRef, ManifestState, MemberEntry, Removal, SignedManifest, derive_repo_id};
@@ -108,7 +109,7 @@ impl Host {
     /// The challenge and token flow of SPEC 3.3; returns the bearer token.
     fn login(&self, key: &SigningKey) -> String {
         let nonce = self.challenge(key);
-        let r = self.redeem(key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+        let r = self.redeem(key, &nonce, &self.sign_challenge(key, &nonce));
         assert_eq!(r.status, 200, "token: {}", r.json);
         r.json["token"].as_str().unwrap().to_string()
     }
@@ -121,6 +122,11 @@ impl Host {
         );
         assert_eq!(r.status, 200, "challenge: {}", r.json);
         r.json["nonce"].as_str().unwrap().to_string()
+    }
+
+    /// `key`'s signature over the SPEC 3.3 transcript for this host's key and `nonce` (base64).
+    fn sign_challenge(&self, key: &SigningKey, nonce: &str) -> [u8; 64] {
+        sign_challenge(&self.key(), key, &b64_decode(nonce).unwrap()).unwrap()
     }
 
     fn redeem(&self, key: &SigningKey, nonce: &str, signature: &[u8; 64]) -> Reply {
@@ -747,7 +753,7 @@ fn token_response_has_token_and_expiry() {
     let host = start();
     let key = new_key();
     let nonce = host.challenge(&key);
-    let r = host.redeem(&key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&key, &nonce, &host.sign_challenge(&key, &nonce));
     assert_eq!(r.status, 200);
     let keys: HashSet<&str> = r.json.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, HashSet::from(["token", "expiresAt"]));
@@ -761,7 +767,7 @@ fn expired_challenge_is_unauthorized() {
     let nonce = host.challenge(&key);
     // The challenge TTL is 2 minutes (SPEC 3.3 RECOMMENDED at most 2 minutes).
     host.advance_clock(2 * 60 * 1000 + 1);
-    let r = host.redeem(&key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&key, &nonce, &host.sign_challenge(&key, &nonce));
     assert_error(&r, 401, "unauthorized");
 }
 
@@ -770,7 +776,7 @@ fn reused_challenge_is_unauthorized() {
     let host = start();
     let key = new_key();
     let nonce = host.challenge(&key);
-    let sig = key.sign(&b64_decode(&nonce).unwrap()).to_bytes();
+    let sig = host.sign_challenge(&key, &nonce);
     assert_eq!(host.redeem(&key, &nonce, &sig).status, 200);
     assert_error(&host.redeem(&key, &nonce, &sig), 401, "unauthorized");
 }
@@ -784,15 +790,15 @@ fn bad_challenge_signature_is_unauthorized() {
     let r = host.redeem(&key, &nonce, &key.sign(nonce.as_bytes()).to_bytes());
     assert_error(&r, 401, "unauthorized");
     // A failed attempt consumes the nonce: it is single-use.
-    let r = host.redeem(&key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&key, &nonce, &host.sign_challenge(&key, &nonce));
     assert_error(&r, 401, "unauthorized");
     // A signature by another key.
     let nonce = host.challenge(&key);
-    let r = host.redeem(&key, &nonce, &new_key().sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&key, &nonce, &host.sign_challenge(&new_key(), &nonce));
     assert_error(&r, 401, "unauthorized");
     // A nonce the host never issued.
     let fake = b64_encode(&random_bytes::<32>());
-    let r = host.redeem(&key, &fake, &key.sign(&b64_decode(&fake).unwrap()).to_bytes());
+    let r = host.redeem(&key, &fake, &host.sign_challenge(&key, &fake));
     assert_error(&r, 401, "unauthorized");
 }
 
@@ -803,8 +809,50 @@ fn challenge_for_another_key_is_unauthorized() {
     let mallory = new_key();
     let nonce = host.challenge(&alice);
     // Mallory signs alice's nonce correctly with her own key: not issued for that key.
-    let r = host.redeem(&mallory, &nonce, &mallory.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&mallory, &nonce, &host.sign_challenge(&mallory, &nonce));
     assert_error(&r, 401, "unauthorized");
+}
+
+#[test]
+fn raw_nonce_signature_is_unauthorized() {
+    // SPEC 3.3: the old construction, a signature over the raw nonce bytes, is no longer accepted.
+    let host = start();
+    let key = new_key();
+    let nonce = host.challenge(&key);
+    let raw = key.sign(&b64_decode(&nonce).unwrap()).to_bytes();
+    assert_error(&host.redeem(&key, &nonce, &raw), 401, "unauthorized");
+}
+
+#[test]
+fn transcript_for_another_host_key_is_unauthorized() {
+    // SPEC 3.3: the transcript binds the host key, so a signature a client made for another host
+    // (here host b, relaying a's nonce) is rejected at host a.
+    let a = start();
+    let b = start();
+    let key = new_key();
+    let nonce = a.challenge(&key);
+    let for_b = b.sign_challenge(&key, &nonce);
+    assert_error(&a.redeem(&key, &nonce, &for_b), 401, "unauthorized");
+    // The same nonce signed for a's key would have verified; the failed attempt consumed it.
+    let r = a.redeem(&key, &nonce, &a.sign_challenge(&key, &nonce));
+    assert_error(&r, 401, "unauthorized");
+}
+
+#[test]
+fn transcript_signature_is_not_a_commit_signature() {
+    // SPEC 4.1: a host that picks a commit id as its "nonce" gets a challenge-domain signature,
+    // which never verifies as the author signature of that commit.
+    let host = start();
+    let (repo, _) = created(&host);
+    let commit_id = repo.root.commit_id;
+    let sig = sign_challenge(&host.key(), &repo.owner.sign, &commit_id).unwrap();
+    let msg = commit_sig_message(&commit_id).unwrap();
+    assert!(ed25519_verify(&pk(&repo.owner.sign), &msg, &sig).is_err());
+    let forged = Commit {
+        author_signature: sig,
+        ..repo.root.clone()
+    };
+    assert!(forged.verify().is_err());
 }
 
 #[test]
@@ -1214,7 +1262,7 @@ fn challenge_global_cap_evicts_the_oldest() {
     let nb = host.challenge(&b);
     host.advance_clock(1);
     let nc = host.challenge(&c);
-    let sign = |k: &SigningKey, n: &str| k.sign(&b64_decode(n).unwrap()).to_bytes();
+    let sign = |k: &SigningKey, n: &str| host.sign_challenge(k, n);
     assert_error(&host.redeem(&a, &na, &sign(&a, &na)), 401, "unauthorized");
     assert_eq!(host.redeem(&b, &nb, &sign(&b, &nb)).status, 200);
     assert_eq!(host.redeem(&c, &nc, &sign(&c, &nc)).status, 200);
@@ -1227,7 +1275,7 @@ fn token_cap_per_key_is_quota_exceeded() {
     host.login(&key);
     host.login(&key);
     let nonce = host.challenge(&key);
-    let r = host.redeem(&key, &nonce, &key.sign(&b64_decode(&nonce).unwrap()).to_bytes());
+    let r = host.redeem(&key, &nonce, &host.sign_challenge(&key, &nonce));
     assert_error(&r, 429, "quota_exceeded");
     // Another key still logs in.
     host.login(&new_key());

@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use avp::auth::sign_challenge;
 use avp::commit::{Commit, CommitHeader};
 use avp::crypto::{SCHEME_ID, WRAP_INFO, random_bytes, sha256, wrap, x25519_public, x25519_random};
 use avp::encoding::{Ce, b64_decode, b64_encode};
@@ -126,7 +127,7 @@ impl Node {
         );
         assert_eq!(r.status, 200, "challenge: {}", r.json);
         let nonce = r.json["nonce"].as_str().unwrap().to_string();
-        let sig = key.sign(&b64_decode(&nonce).unwrap()).to_bytes();
+        let sig = sign_challenge(&self.key(), key, &b64_decode(&nonce).unwrap()).unwrap();
         let r = self.post(
             "/api/auth/keypair/token",
             None,

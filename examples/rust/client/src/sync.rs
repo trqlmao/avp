@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use avp::auth::sign_challenge;
 use avp::commit::{Commit, CommitHeader};
 use avp::crypto::{SCHEME_ID, WRAP_INFO, ct_eq, random_bytes, unwrap, wrap, x25519_public, x25519_random};
 use avp::encoding::{V2, b64_array, b64_decode, b64_encode, b64_ids};
@@ -24,7 +25,7 @@ use avp::manifest::{HostRef, ManifestState, MemberEntry, Removal, SignedManifest
 use avp::owner::OwnerKeys;
 use avp::payload::{Field, Hlc, PayloadV2, Stamp, merge};
 use avp::tokens::{Acceptance, InviteToken, LeaveRequest, RepoLocator, key_fingerprint, owner_fingerprint};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -308,7 +309,7 @@ impl HostClient {
     }
 
     /// A bearer token for `me`, from the cache or from the challenge flow (SPEC 3.3): the client
-    /// signs the raw nonce bytes.
+    /// signs the challenge transcript for this host's expected key, never the raw nonce.
     fn token(&mut self, me: &SigningKey) -> Result<String> {
         let subject = me.verifying_key().to_bytes();
         if let Some(t) = &self.token {
@@ -319,7 +320,7 @@ impl HostClient {
         let ChallengeAnswer { nonce } =
             self.post_open("/api/auth/keypair/challenge", &ChallengeBody { key: subject })?;
         let raw = b64_decode(&nonce).map_err(|_| ClientError::BadResponse("challenge nonce is not base64".into()))?;
-        let signature = me.sign(&raw).to_bytes();
+        let signature = sign_challenge(&self.key, me, &raw)?;
         let TokenAnswer { token, expires_at } = self.post_open(
             "/api/auth/keypair/token",
             &TokenBody {
