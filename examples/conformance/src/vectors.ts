@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import type { Commit, ManifestState, SignedManifest } from "./constructions.ts";
+import type { Acceptance, Commit, LeaveRequest, ManifestState, SignedManifest, WireAcceptance } from "./constructions.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // examples/conformance/src -> repo root (three levels up: src -> conformance -> examples -> root).
@@ -361,6 +361,34 @@ export function commitToWire(c: Commit): WireCommit {
     ciphertext: b64e(c.ciphertext),
     authorSignature: b64e(c.authorSignature),
   };
+}
+
+/** Wire `LeaveRequest`. */
+export interface WireLeaveRequest {
+  repoId: string;
+  memberKey: string;
+  at: number;
+  signature: string;
+}
+
+/** Decodes a wire `LeaveRequest`. */
+export function leaveFromWire(w: WireLeaveRequest): LeaveRequest {
+  return { repoId: w.repoId, memberKey: b64d(w.memberKey), at: w.at, signature: b64d(w.signature) };
+}
+
+/** Encodes a leave request as its wire JSON. */
+export function leaveToWire(l: LeaveRequest): WireLeaveRequest {
+  return { repoId: l.repoId, memberKey: b64e(l.memberKey), at: l.at, signature: b64e(l.signature) };
+}
+
+/** Decodes a wire `Acceptance`. */
+export function acceptanceFromWire(w: WireAcceptance): Acceptance {
+  return { repoId: w.repoId, memberKey: b64d(w.memberKey), hostKey: b64d(w.hostKey), expiresAt: w.expiresAt, signature: b64d(w.signature) };
+}
+
+/** Encodes an acceptance as its wire JSON, fields in the SPEC 11.3 order. */
+export function acceptanceToWire(a: Acceptance): WireAcceptance {
+  return { repoId: a.repoId, memberKey: b64e(a.memberKey), hostKey: b64e(a.hostKey), expiresAt: a.expiresAt, signature: b64e(a.signature) };
 }
 
 // ─── AVP 0.5 vector files ───────────────────────────────────────────────────────────

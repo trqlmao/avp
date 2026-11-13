@@ -5,13 +5,14 @@
  *   --check (default): re-derive every committed vector's value fields from its documented seeds and
  *     assert the committed file matches. This is the provenance and drift gate: the vectors are not
  *     arbitrary bytes, they are exactly what this script computes. Read-only.
- *   --write: (re)generate the files this script owns: negative.json (the MUST-reject bank) and the
- *     0.5 construction vectors bip39-owner.json, manifest.json, and commit.json, which are derived
- *     only from the seeds documented below and in each file's `seeds`.
+ *   --write: (re)generate the files this script owns: negative.json (the MUST-reject bank), the
+ *     0.5 construction vectors bip39-owner.json, manifest.json, and commit.json, the tokens of
+ *     federation.json, which are derived only from the seeds documented below and in each file, and
+ *     merge.json and acceptance.json, whose inputs are built from those seeds and whose expected
+ *     results are literal data below, written by hand from the SPEC rule each case cites.
  *
- * The RFC-anchored positive vectors (hkdf, x25519, ed25519, key-wrap) and federation.json are
- * re-derived and checked here but never rewritten, so their reviewed prose and formatting are
- * preserved. The crypto is reused from the vector-tested reference at ../examples/conformance/src so
+ * The RFC-anchored positive vectors (hkdf, x25519, ed25519, key-wrap) are re-derived and checked here
+ * but never rewritten, so their reviewed prose and formatting are preserved. The crypto is reused from the vector-tested reference at ../examples/conformance/src so
  * the generator cannot drift from the runner. The pinned BIP39 wordlist (bip39-english.txt) is
  * checked against the SHA-256 of the upstream bitcoin/bips file.
  *
@@ -43,21 +44,32 @@ import {
 } from "../examples/conformance/src/crypto.ts";
 import { entropyToMnemonic, mnemonicToEntropy, mnemonicToSeed, ownerKeysFromSeed } from "../examples/conformance/src/bip39.ts";
 import {
+  acceptanceSignMessage,
   buildAadV2,
+  commitSigMessage,
   deriveRepoId,
   encodeCommitHeader,
   encodeManifestState,
+  keyFingerprint,
+  leaveSignMessage,
+  linkConfirmationCode,
   manifestHash,
+  OWNER_LINK_INFO,
+  ownerFingerprint,
+  signAcceptance,
   signCommit,
+  signLeave,
   signManifest,
+  type Acceptance,
   type Commit,
   type HostRef,
+  type LeaveRequest,
   type ManifestState,
   type MemberEntry,
   type Removal,
   type SignedManifest,
 } from "../examples/conformance/src/constructions.ts";
-import { commitToWire, signedManifestToWire } from "../examples/conformance/src/vectors.ts";
+import { acceptanceToWire, commitToWire, leaveToWire, signedManifestToWire } from "../examples/conformance/src/vectors.ts";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const read = (f: string) => JSON.parse(readFileSync(join(dir, f), "utf8"));
@@ -239,7 +251,25 @@ function partySeed(p: Party) {
   return { label: p.label, ed25519SeedHex: hex(p.edSeed), ed25519PublicKey: b64(p.edPub), x25519PrivateHex: hex(p.xPriv), x25519PublicKey: b64(p.xPub) };
 }
 
-function build05(): { bip39: any; manifest: any; commit: any } {
+/** The parties and items of the 0.5 construction vectors, reused by the token, acceptance, and negative builders. */
+interface Ctx {
+  owner: Party;
+  alice: Party;
+  bob: Party;
+  carol: Party;
+  hostA: HostRef & { seed: Buffer; label: string };
+  hostB: HostRef & { seed: Buffer; label: string };
+  hosts: HostRef[];
+  repoId: string;
+  t0: number;
+  m1: SignedManifest;
+  m2: SignedManifest;
+  c1: Commit;
+  c2: Commit;
+  c3: Commit;
+}
+
+function build05(): { bip39: any; manifest: any; commit: any; ctx: Ctx } {
   // bip39-owner.json
   const bipCases = [
     { name: "owner-counting-00", entropy: OWNER_ENTROPY },
@@ -417,7 +447,8 @@ function build05(): { bip39: any; manifest: any; commit: any } {
     ],
   };
 
-  return { bip39, manifest, commit: commitFile };
+  const ctx: Ctx = { owner, alice, bob, carol, hostA, hostB, hosts, repoId, t0, m1, m2, c1, c2, c3 };
+  return { bip39, manifest, commit: commitFile, ctx };
 }
 
 /** Checks the library against the Trezor anchors, so a broken BIP39 cannot regenerate silently. */
@@ -438,15 +469,1032 @@ function checkGenerated(file: string, want: any, r: Check[]): void {
     return;
   }
   for (const k of Object.keys(want)) {
-    if (k === "cases") continue;
-    eq(`${file} ${k}`, JSON.stringify(got[k]), JSON.stringify(want[k]), r);
-  }
-  eq(`${file} case count`, String(got.cases?.length), String(want.cases.length), r);
-  for (const c of want.cases) {
-    const g = (got.cases ?? []).find((x: any) => x.name === c.name);
-    eq(`${file} ${c.name}`, JSON.stringify(g), JSON.stringify(c), r);
+    if (!Array.isArray(want[k])) {
+      eq(`${file} ${k}`, JSON.stringify(got[k]), JSON.stringify(want[k]), r);
+      continue;
+    }
+    // A list of named items: report each drifted item by name.
+    eq(`${file} ${k} count`, String(got[k]?.length), String(want[k].length), r);
+    for (const c of want[k]) {
+      const g = (got[k] ?? []).find((x: any) => x.name === c.name);
+      eq(`${file} ${k} ${c.name}`, JSON.stringify(g), JSON.stringify(c), r);
+    }
   }
   eq(`${file} matches generator output`, JSON.stringify(got), JSON.stringify(want), r);
+}
+
+// ─── merge.json: payload v2 merge and the HLC (SPEC 5, 5.1), hand-written ─────────
+
+/**
+ * Member ids (SPEC 2: base64 of the Ed25519 public key) of alice (seed 0x11), bob (0x22), and carol
+ * (0x33), written out so the merge vectors are literal data. By UTF-8 bytes, alice ("0", 0x30) <
+ * carol ("F", 0x46) < bob ("o", 0x6f). buildMerge checks them against the derived keys.
+ */
+const ID_ALICE = "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=";
+const ID_BOB = "oJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=";
+const ID_CAROL = "F8t5+ytBIPKx7GXkGY1uCLKOgT/rAeSkAIObheGAgM4=";
+
+/**
+ * The merge cases. Every `expected` and `expectedDeleted` below is written by hand from SPEC 5
+ * (greatest stamp per field and per ban server id, greatest `deleted`, deleted iff `deleted` is
+ * strictly greater than every field and ban stamp) and SPEC 5.1 (strip removes `refreshToken` and
+ * `expiresAt` with their stamps). None of it is computed by the merge under test.
+ */
+function buildMerge(ctx: Ctx): any {
+  const derived = [ctx.alice, ctx.bob, ctx.carol].map((p) => b64(p.edPub));
+  if (derived.join() !== [ID_ALICE, ID_BOB, ID_CAROL].join()) throw new Error("merge member ids drifted from the party seeds");
+  const A = ID_ALICE;
+  const B = ID_BOB;
+  const C = ID_CAROL;
+  const T0 = 1767225600000;
+  const f = (value: unknown, at: number, n: number, by: string) => ({ value, at, n, by });
+  const s = (at: number, n: number, by: string) => ({ at, n, by });
+  const U1 = "00000000-0000-4000-8000-000000000001";
+  const U2 = "00000000-0000-4000-8000-000000000002";
+  const pl = (accounts: Record<string, unknown>) => ({ v: 2, accounts });
+  const banKick = { banned: true, observedAt: T0, source: "kick", detail: "banned for 7d", observedBy: A };
+  const banLifted = { banned: false, observedAt: T0 + 500, source: "join", detail: "joined fine", observedBy: B };
+  const banPvp = { banned: true, observedAt: T0 + 20, source: "kick", detail: "cheating", observedBy: null };
+
+  const cases = [
+    {
+      name: "field-conflict-newest-wins",
+      note: "username: the later at wins. accessToken: equal at, so the greater n (2, alice) wins over carol's n 1 although carol's id is greater; n is compared before by.",
+      inputs: [
+        pl({ [U1]: { fields: { username: f("old_name", T0, 0, A), accessToken: f("tok-alice", T0 + 5, 2, A) }, bans: {} } }),
+        pl({ [U1]: { fields: { username: f("new_name", T0 + 1000, 0, B), accessToken: f("tok-carol", T0 + 5, 1, C) }, bans: {} } }),
+      ],
+      expected: pl({ [U1]: { fields: { accessToken: f("tok-alice", T0 + 5, 2, A), username: f("new_name", T0 + 1000, 0, B) }, bans: {} } }),
+      expectedDeleted: { [U1]: false },
+    },
+    {
+      name: "tie-broken-by-member-id",
+      note: "three writes with equal at and n: by decides, compared by UTF-8 bytes; bob's id (first byte 0x6f) is the greatest.",
+      inputs: [
+        pl({ [U1]: { fields: { username: f("from_alice", T0, 0, A) }, bans: {} } }),
+        pl({ [U1]: { fields: { username: f("from_bob", T0, 0, B) }, bans: {} } }),
+        pl({ [U1]: { fields: { username: f("from_carol", T0, 0, C) }, bans: {} } }),
+      ],
+      expected: pl({ [U1]: { fields: { username: f("from_bob", T0, 0, B) }, bans: {} } }),
+      expectedDeleted: { [U1]: false },
+    },
+    {
+      name: "different-fields-both-kept",
+      note: "disjoint fields, disjoint ban servers, and disjoint accounts: the result is the union, nothing lost.",
+      inputs: [
+        pl({ [U1]: { fields: { username: f("alt_one", T0, 0, A) }, bans: { "mc.example": f(banKick, T0, 0, A) } } }),
+        pl({
+          [U1]: { fields: { type: f("MICROSOFT", T0 + 10, 0, B) }, bans: { "play.example": f(null, T0 + 10, 0, B) } },
+          [U2]: { fields: { username: f("alt_two", T0 + 20, 0, B) }, bans: {} },
+        }),
+      ],
+      expected: pl({
+        [U1]: {
+          fields: { type: f("MICROSOFT", T0 + 10, 0, B), username: f("alt_one", T0, 0, A) },
+          bans: { "mc.example": f(banKick, T0, 0, A), "play.example": f(null, T0 + 10, 0, B) },
+        },
+        [U2]: { fields: { username: f("alt_two", T0 + 20, 0, B) }, bans: {} },
+      }),
+      expectedDeleted: { [U1]: false, [U2]: false },
+    },
+    {
+      name: "delete-then-edit-revives",
+      note: "alice deletes at T0+100; bob sets lastUsed at T0+200. The marker is kept but is not greater than every stamp, so the account is live.",
+      inputs: [
+        pl({ [U1]: { deleted: s(T0 + 100, 0, A), fields: { username: f("alt_one", T0, 0, A) }, bans: {} } }),
+        pl({ [U1]: { fields: { username: f("alt_one", T0, 0, A), lastUsed: f(T0 + 200, T0 + 200, 0, B) }, bans: {} } }),
+      ],
+      expected: pl({
+        [U1]: { deleted: s(T0 + 100, 0, A), fields: { lastUsed: f(T0 + 200, T0 + 200, 0, B), username: f("alt_one", T0, 0, A) }, bans: {} },
+      }),
+      expectedDeleted: { [U1]: false },
+    },
+    {
+      name: "edit-then-delete-removes",
+      note: "bob renames at T0+100; alice deletes at T0+200, after every field stamp, so the account is deleted (its fields stay). u2's marker equals its field stamp, which is not strictly greater, so u2 is live.",
+      inputs: [
+        pl({
+          [U1]: { fields: { username: f("renamed", T0 + 100, 0, B) }, bans: {} },
+          [U2]: { deleted: s(T0 + 50, 0, C), fields: { username: f("alt_two", T0 + 50, 0, C) }, bans: {} },
+        }),
+        pl({ [U1]: { deleted: s(T0 + 200, 0, A), fields: { username: f("orig", T0, 0, A) }, bans: {} } }),
+      ],
+      expected: pl({
+        [U1]: { deleted: s(T0 + 200, 0, A), fields: { username: f("renamed", T0 + 100, 0, B) }, bans: {} },
+        [U2]: { deleted: s(T0 + 50, 0, C), fields: { username: f("alt_two", T0 + 50, 0, C) }, bans: {} },
+      }),
+      expectedDeleted: { [U1]: true, [U2]: false },
+    },
+    {
+      name: "three-way",
+      note: "each input wins one field: username from alice, type from bob, accessToken from carol; carol's old marker survives as the only deleted stamp but does not delete.",
+      inputs: [
+        pl({ [U1]: { fields: { username: f("name_alice", T0 + 300, 0, A), type: f("COOKIE", T0, 0, A) }, bans: {} } }),
+        pl({ [U1]: { fields: { type: f("MICROSOFT", T0 + 400, 0, B), accessToken: f("tok-bob", T0 + 100, 0, B) }, bans: {} } }),
+        pl({
+          [U1]: {
+            deleted: s(T0 + 1, 0, C),
+            fields: { accessToken: f("tok-carol", T0 + 500, 0, C), username: f("name_carol", T0 + 200, 0, C) },
+            bans: {},
+          },
+        }),
+      ],
+      expected: pl({
+        [U1]: {
+          deleted: s(T0 + 1, 0, C),
+          fields: { accessToken: f("tok-carol", T0 + 500, 0, C), type: f("MICROSOFT", T0 + 400, 0, B), username: f("name_alice", T0 + 300, 0, A) },
+          bans: {},
+        },
+      }),
+      expectedDeleted: { [U1]: false },
+    },
+    {
+      name: "bans-per-server",
+      note: "bans merge per server id: mc.example takes bob's later lift, play.example keeps alice's null, pvp.example keeps bob's ban.",
+      inputs: [
+        pl({
+          [U1]: {
+            fields: { username: f("alt_one", T0, 0, A) },
+            bans: { "mc.example": f(banKick, T0, 0, A), "play.example": f(null, T0 + 10, 0, A) },
+          },
+        }),
+        pl({ [U1]: { fields: {}, bans: { "mc.example": f(banLifted, T0 + 500, 0, B), "pvp.example": f(banPvp, T0 + 20, 0, B) } } }),
+      ],
+      expected: pl({
+        [U1]: {
+          fields: { username: f("alt_one", T0, 0, A) },
+          bans: { "mc.example": f(banLifted, T0 + 500, 0, B), "play.example": f(null, T0 + 10, 0, A), "pvp.example": f(banPvp, T0 + 20, 0, B) },
+        },
+      }),
+      expectedDeleted: { [U1]: false },
+    },
+    {
+      name: "strip-after-policy-off",
+      stripRefresh: true,
+      note: "heads written while shareRefreshTokens was true carry refreshToken and expiresAt; with the policy now false the merged result is stripped: both fields and their stamps are gone from every account (u2 is left with no fields).",
+      inputs: [
+        pl({
+          [U1]: {
+            fields: {
+              username: f("alt_one", T0, 0, A),
+              accessToken: f("tok-1", T0 + 100, 0, A),
+              refreshToken: f("rt-1", T0 + 100, 0, A),
+              expiresAt: f(T0 + 3600000, T0 + 100, 0, A),
+            },
+            bans: {},
+          },
+        }),
+        pl({
+          [U1]: {
+            fields: { refreshToken: f("rt-2", T0 + 200, 0, B), expiresAt: f(T0 + 7200000, T0 + 200, 0, B), lastUsed: f(T0 + 200, T0 + 200, 0, B) },
+            bans: {},
+          },
+          [U2]: { fields: { refreshToken: f(null, T0 + 300, 0, C) }, bans: {} },
+        }),
+      ],
+      expected: pl({
+        [U1]: { fields: { accessToken: f("tok-1", T0 + 100, 0, A), lastUsed: f(T0 + 200, T0 + 200, 0, B), username: f("alt_one", T0, 0, A) }, bans: {} },
+        [U2]: { fields: {}, bans: {} },
+      }),
+      expectedDeleted: { [U1]: false, [U2]: false },
+    },
+  ];
+
+  const hlc = [
+    {
+      name: "tick-follows-wall-clock",
+      note: "tick(now) is (now, 0) when now > at, else (at, n + 1), so a clock that stalls or steps back still issues increasing stamps.",
+      start: { at: 0, n: 0 },
+      steps: [
+        { op: "tick", now: 1000, expect: { at: 1000, n: 0 } },
+        { op: "tick", now: 1000, expect: { at: 1000, n: 1 } },
+        { op: "tick", now: 999, expect: { at: 1000, n: 2 } },
+        { op: "tick", now: 1001, expect: { at: 1001, n: 0 } },
+      ],
+    },
+    {
+      name: "observe-then-tick",
+      note: "observe takes a later at with its n, the larger n at an equal at, and ignores an earlier at; the next tick then exceeds every observed stamp.",
+      start: { at: 1000, n: 0 },
+      steps: [
+        { op: "observe", stamp: { at: 5000, n: 3, by: A }, expect: { at: 5000, n: 3 } },
+        { op: "tick", now: 2000, expect: { at: 5000, n: 4 } },
+        { op: "observe", stamp: { at: 5000, n: 9, by: B }, expect: { at: 5000, n: 9 } },
+        { op: "observe", stamp: { at: 4000, n: 50, by: C }, expect: { at: 5000, n: 9 } },
+        { op: "observe", stamp: { at: 5000, n: 2, by: C }, expect: { at: 5000, n: 9 } },
+        { op: "tick", now: 6000, expect: { at: 6000, n: 0 } },
+      ],
+    },
+    {
+      name: "observe-later-at-resets-n",
+      note: "a later at replaces the state outright, n included, even when the local n was larger.",
+      start: { at: 7000, n: 8 },
+      steps: [
+        { op: "observe", stamp: { at: 7001, n: 0, by: A }, expect: { at: 7001, n: 0 } },
+        { op: "tick", now: 7001, expect: { at: 7001, n: 1 } },
+      ],
+    },
+  ];
+
+  return {
+    description:
+      "Payload v2 merge (SPEC 5, 5.1). Each case: merging `inputs` in every order MUST give `expected` (commutativity), merging `expected` with any input or itself MUST " +
+      "give `expected` (idempotence), and merge MUST be associative. When `stripRefresh` is true the result is stripped (SPEC 5.1: refreshToken and expiresAt removed with " +
+      "their stamps) after the merge. `expectedDeleted` is the SPEC 5 deletion state of each account. Stamps order by at, then n, then by compared by its UTF-8 bytes. " +
+      "`hlc` pins the hybrid logical clock: start at `start`, apply each step, and the state MUST equal `expect` after it (tick returns the new state). " +
+      "The expected values are written by hand from the SPEC rule. Member ids are base64 Ed25519 keys of alice (seed 0x11), bob (0x22), carol (0x33) as in manifest.json. " +
+      "Generated by vectors/generate.ts.",
+    cases,
+    hlc,
+  };
+}
+
+// ─── federation.json: tokens, signatures, fingerprints, linking (SPEC 11) ─────────
+
+const LINK_EPHEMERAL = (i: number) => sha256(Buffer.from(`avp/vectors/link-ephemeral/${i}`, "utf8"));
+
+function token(name: string, schema: string, direction: string, decoded: any, extra: Record<string, unknown> = {}) {
+  const canonicalJson = JSON.stringify(decoded);
+  return { name, schema, direction, decoded, canonicalJson, base64url: Buffer.from(canonicalJson, "utf8").toString("base64url"), ...extra };
+}
+
+interface FedItems {
+  acceptance: Acceptance;
+  aliceLeave: LeaveRequest;
+  linkEphemeralPriv: Buffer;
+  grantWrap: ReturnType<typeof wrapSecret>;
+}
+
+function buildFederation(ctx: Ctx): { file: any; items: FedItems } {
+  const { owner, alice, bob, hostA, hostB, repoId, t0 } = ctx;
+  const acceptance = signAcceptance({ repoId, memberKey: alice.edPub, hostKey: hostB.hostKey, expiresAt: t0 + 15 * 60_000 }, hostB.seed);
+  const invite = {
+    v: 2,
+    ed25519PublicKey: b64(alice.edPub),
+    x25519PublicKey: b64(alice.xPub),
+    homeHostKey: b64(hostB.hostKey),
+    homeHostLocator: hostB.locator,
+    acceptance: acceptanceToWire(acceptance),
+  };
+  const fp = ownerFingerprint(owner.edPub);
+  const locator = (hostLocator: string) => ({ v: 2, repoId, hostKey: b64(hostA.hostKey), hostLocator, ownerFingerprint: fp });
+
+  const linkEphemeralPriv = LINK_EPHEMERAL(0);
+  const linkPub = x25519PublicRaw(importX25519Private(linkEphemeralPriv));
+  const grantWrap = wrapSecret(
+    linkPub,
+    sha256(Buffer.from("avp/vectors/link-wrap-ephemeral", "utf8")),
+    sha256(Buffer.from("avp/vectors/link-wrap-iv", "utf8")).subarray(0, 12),
+    OWNER_ENTROPY,
+    OWNER_LINK_INFO,
+  );
+
+  const aliceLeave = signLeave({ repoId, memberKey: alice.edPub, at: t0 + 3_600_000 }, alice.edSeed);
+  const bobLeave = signLeave({ repoId, memberKey: bob.edPub, at: t0 + 7_200_000 }, bob.edSeed);
+  const leaveCase = (name: string, l: LeaveRequest) => ({
+    name,
+    schema: "LeaveRequest",
+    decoded: leaveToWire(l),
+    signatureMessageHex: hex(leaveSignMessage(l)),
+  });
+
+  // A second link key whose code has a leading zero, found by counting up, so zero padding is pinned.
+  let zeroIdx = 1;
+  while (!linkConfirmationCode(x25519PublicRaw(importX25519Private(LINK_EPHEMERAL(zeroIdx)))).startsWith("0")) zeroIdx++;
+  const zeroPub = x25519PublicRaw(importX25519Private(LINK_EPHEMERAL(zeroIdx)));
+
+  const file = {
+    description:
+      "Out-of-band tokens and addressing (SPEC 11). Tokens are base64url-nopad (RFC 4648 section 5) over compact JSON with the fields in the SPEC order and \"v\": 2. " +
+      "Each token case is a decode oracle (decoding `base64url` MUST yield `decoded`) and an encode check (`canonicalJson` is the compact form, `base64url` its encoding). " +
+      "The invite token's acceptance is signed by the joiner's home host (b.vault.example) over `acceptanceMessageHex` = CE(tag \"avp/accept/v1\", str(repoId), " +
+      "bytes(memberKey), bytes(hostKey), i64(expiresAt)). `leaves` are leave request bodies (JSON, not base64url-wrapped) signed by memberKey over `signatureMessageHex` = " +
+      "CE(tag \"avp/leave/v1\", str(repoId), bytes(memberKey), i64(at)). `linkCodes` are SPEC 11.6 confirmation codes. The link grant wraps the owner's 32-byte mnemonic " +
+      "entropy to the link request's ephemeral key under info avp/owner-link/v1; `checker` holds the link private key (never on the wire) and the expected entropy. " +
+      "`fingerprints` pin the member key fingerprint (SPEC 3.2) and owner fingerprint (SPEC 11.2). Keys, hosts, and repoId are those of manifest.json; the link keys are " +
+      "SHA-256(UTF8(\"avp/vectors/link-ephemeral/\" + i)) and the grant's wrap ephemeral key and IV are SHA-256 of \"avp/vectors/link-wrap-ephemeral\" and " +
+      "\"avp/vectors/link-wrap-iv\" (first 12 bytes), fixed only for reproducibility. The avp-uri cases pin parse and format of avp://<hostLocator>/<repoId>. " +
+      "Generated by vectors/generate.ts.",
+    tokens: [
+      token("invite-token", "InviteToken", "joiner -> owner", invite, { acceptanceMessageHex: hex(acceptanceSignMessage(acceptance)) }),
+      token("repo-locator", "RepoLocator", "owner -> joiner", locator(hostA.locator)),
+      token("repo-locator-port", "RepoLocator", "owner -> joiner", locator(`${hostA.locator}:8443`)),
+      token("link-request", "LinkRequest", "new owner device -> existing owner device", { v: 2, ephemeralPublicKey: b64(linkPub) }),
+      token(
+        "link-grant",
+        "LinkGrant",
+        "existing owner device -> new owner device",
+        {
+          v: 2,
+          wrap: { schemeId: grantWrap.schemeId, ephemeralPublicKey: b64(grantWrap.ephemeralPublicKey), iv: b64(grantWrap.iv), ciphertext: b64(grantWrap.ciphertext) },
+        },
+        { checker: { linkEphemeralPrivateHex: hex(linkEphemeralPriv), entropyHex: hex(OWNER_ENTROPY) } },
+      ),
+    ],
+    leaves: [leaveCase("alice-leaves", aliceLeave), leaveCase("bob-leaves", bobLeave)],
+    linkCodes: [
+      { name: "link-request", ephemeralPublicKey: b64(linkPub), code: linkConfirmationCode(linkPub) },
+      { name: "leading-zero", ephemeralPublicKey: b64(zeroPub), code: linkConfirmationCode(zeroPub) },
+    ],
+    fingerprints: {
+      members: [ctx.alice, ctx.bob, ctx.carol].map((p) => ({
+        label: p.label,
+        ed25519PublicKey: b64(p.edPub),
+        x25519PublicKey: b64(p.xPub),
+        fingerprint: keyFingerprint(p.edPub, p.xPub),
+      })),
+      owner: { ownerKey: b64(owner.edPub), ownerFingerprint: fp },
+    },
+    uris: [
+      { name: "plain-host", uri: `avp://${hostA.locator}/${repoId}`, host: hostA.locator, repoId },
+      { name: "host-with-port", uri: `avp://${hostA.locator}:8443/${repoId}`, host: `${hostA.locator}:8443`, repoId },
+    ],
+  };
+  return { file, items: { acceptance, aliceLeave, linkEphemeralPriv, grantWrap } };
+}
+
+// ─── acceptance.json: host acceptance scenarios (SPEC 6, 7, 8.3, 8.4) ─────────────
+
+/**
+ * Builds the shared host acceptance scenarios. The signed items (states, commits, leave requests)
+ * are built from the manifest.json seeds; every `expect`, `finalHeads`, `finalHeld`, and `finalTip`
+ * below is written by hand from the SPEC rule named in the scenario's description, never captured
+ * from a rules engine.
+ */
+function buildAcceptance(ctx: Ctx): any {
+  const { owner, alice, bob, carol, hostA, hostB, repoId } = ctx;
+  const ref = (h: HostRef) => ({ hostKey: h.hostKey, locator: h.locator });
+  const HOSTS = [ref(hostA), ref(hostB)];
+  const EMPTY = Buffer.alloc(0);
+  const PLAINTEXT = Buffer.from(JSON.stringify({ v: 2, accounts: {} }), "utf8");
+  const labels = new Map<Commit, string>();
+
+  // Member wraps as in manifest.json; a non-empty `tweak` varies the wrap ephemeral key and IV, which
+  // is owner-chosen randomness, to order two diverged states by manifestHash deterministically.
+  const entry = (p: Party, epoch: number, home: HostRef, tweak: string): MemberEntry => {
+    const l = tweak === "" ? p.label : `${p.label}/${tweak}`;
+    const w = wrapSecret(p.xPub, wrapEphemeral(epoch, l), wrapIv(epoch, l), DATA_KEYS[epoch]);
+    return { ed25519PublicKey: p.edPub, x25519PublicKey: p.xPub, wrappedDataKey: w, keyEpoch: epoch, homeHostKey: home.hostKey };
+  };
+
+  interface StOpts {
+    share?: boolean;
+    hosts?: HostRef[];
+    repoId?: string;
+    signer?: Party;
+    tweak?: string;
+    removals?: Removal[];
+  }
+  const state = (seq: number, prev: SignedManifest | null, epoch: number, members: Array<[Party, HostRef]>, o: StOpts = {}): SignedManifest => {
+    const s: ManifestState = {
+      repoId: o.repoId ?? repoId,
+      manifestSeq: seq,
+      prevManifestHash: prev ? manifestHash(prev) : EMPTY,
+      ownerKey: owner.edPub,
+      genesisNonce: seq === 1 ? GENESIS_NONCE : EMPTY,
+      schemeId: WRAP_SCHEME_ID,
+      keyEpoch: epoch,
+      shareRefreshTokens: o.share ?? false,
+      hosts: o.hosts ?? HOSTS,
+      members: members.map(([p, h]) => entry(p, epoch, h, o.tweak ?? "")),
+      removals: o.removals ?? [],
+    };
+    return signManifest(wireOrder(s), (o.signer ?? owner).edSeed);
+  };
+  /** The first build whose manifestHash is above `other`'s, counting the tweak up from g0. */
+  const above = (build: (tweak: string) => SignedManifest, other: SignedManifest): SignedManifest => {
+    for (let i = 0; ; i++) {
+      const m = build(`g${i}`);
+      if (Buffer.compare(manifestHash(m), manifestHash(other)) > 0) return m;
+    }
+  };
+
+  interface CmOpts {
+    epoch?: number;
+    seq?: number;
+    repoId?: string;
+  }
+  const cm = (label: string, author: Party, parents: Commit[], at: SignedManifest, o: CmOpts = {}): Commit => {
+    const epoch = o.epoch ?? at.state.keyEpoch;
+    const rid = o.repoId ?? at.state.repoId;
+    const ids = parents.map((p) => p.commitId);
+    const iv = sha256(Buffer.from(`avp/vectors/acceptance-iv/${label}`, "utf8")).subarray(0, 12);
+    const ciphertext = aesGcmEncrypt(DATA_KEYS[epoch], iv, buildAadV2(rid, epoch, author.edPub, ids), PLAINTEXT);
+    const c = signCommit(
+      { repoId: rid, parents: ids, manifestSeq: o.seq ?? at.state.manifestSeq, manifestHash: manifestHash(at), keyEpoch: epoch, author: author.edPub, iv, ciphertext },
+      author.edSeed,
+    );
+    labels.set(c, label);
+    return c;
+  };
+  const removal = (p: Party, seq: number, frontier: Commit[]): Removal => ({ memberKey: p.edPub, removedAtSeq: seq, frontier: frontier.map((c) => c.commitId) });
+
+  type Expect = "ok" | "bad_request" | "forbidden" | "not_hosted" | "too_many_heads" | "manifest_conflict" | "missing_parents";
+  const M = (label: string, m: SignedManifest, expect: Expect, via: "push" | "offer" = "push", commit?: Commit) => ({
+    op: "manifest",
+    via,
+    label: commit ? `${label} + ${labels.get(commit)}` : label,
+    item: commit ? { manifest: signedManifestToWire(m), commit: commitToWire(commit) } : { manifest: signedManifestToWire(m) },
+    expect,
+  });
+  const C = (c: Commit, expect: Expect, via: "push" | "offer" = "push", label?: string) => ({
+    op: "commit",
+    via,
+    label: label ?? (labels.get(c) as string),
+    item: commitToWire(c),
+    expect,
+  });
+  const L = (label: string, l: LeaveRequest, expect: Expect) => ({ op: "leave", via: "push", label, item: leaveToWire(l), expect });
+  const ids = (cs: Commit[]) => cs.map((c) => b64(c.commitId)).sort();
+  const scenario = (name: string, description: string, steps: any[], finalHeads: Commit[], finalHeld: Commit[], finalTip: SignedManifest | null) => ({
+    name,
+    description,
+    hostKey: b64(hostA.hostKey),
+    headBound: 16,
+    steps,
+    finalHeads: ids(finalHeads),
+    finalHeld: ids(finalHeld),
+    finalTip: finalTip ? b64(manifestHash(finalTip)) : null,
+  });
+
+  // The common start: genesis (owner only, hosts a and b, owner home a) published with its first commit.
+  const G = state(1, null, 0, [[owner, hostA]]);
+  const r = cm("r", owner, [], G);
+  const genesis = M("G", G, "ok", "push", r);
+  // seq 2 states on G.
+  const M2a = state(2, G, 0, [[owner, hostA], [alice, hostA]]);
+  const M2ab = state(2, G, 0, [[owner, hostA], [alice, hostA], [bob, hostB]]);
+  const sixteen = (at: SignedManifest) => Array.from({ length: 16 }, (_, i) => cm(`head-${i + 1}`, alice, [r], at));
+
+  const scenarios: any[] = [];
+  const add = (...args: Parameters<typeof scenario>) => scenarios.push(scenario(...args));
+
+  // ── genesis (SPEC 6.1, 6.2, 8.2) ──
+  add(
+    "genesis-ok",
+    "SPEC 6.2, 8.2: a valid genesis state that lists this host, published with a first commit that has no parents, cites seq 1 and the genesis hash, is by the owner at epoch 0: both are accepted and the commit is the only head.",
+    [genesis],
+    [r],
+    [],
+    G,
+  );
+  {
+    const Gx = state(1, null, 0, [[owner, hostA]], { repoId: deriveRepoId(owner.edPub, Buffer.alloc(16, 0x02)) });
+    add(
+      "genesis-wrong-repo-id",
+      "SPEC 6.2, 4.2: the genesis repoId does not recompute from ownerKey and genesisNonce (it was derived from another nonce), so the state is rejected (bad_request) and its commit with it.",
+      [M("G-wrong-repo-id", Gx, "bad_request", "push", cm("r-wrong-repo", owner, [], Gx))],
+      [],
+      [],
+      null,
+    );
+  }
+  {
+    const Gb = state(1, null, 0, [[owner, hostB]], { hosts: [ref(hostB)] });
+    add(
+      "genesis-host-not-listed",
+      "SPEC 6.1 rule 6, 8.2: a valid genesis whose hosts list only b.vault.example, applied at a.vault.example: not_hosted, nothing stored.",
+      [M("G-hosts-b-only", Gb, "not_hosted", "push", cm("r-b", owner, [], Gb))],
+      [],
+      [],
+      null,
+    );
+  }
+
+  // ── manifest chain (SPEC 6.1, 6.3, 6.4) ──
+  {
+    const M3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA], [bob, hostB]]);
+    add(
+      "manifest-seq-skip",
+      "SPEC 6.1 rule 4, 6.3: a seq 3 state arrives while the tip is seq 1 (its seq 2 predecessor never arrived); its seq is not tip + 1, so manifest_conflict.",
+      [genesis, M("M3", M3, "manifest_conflict")],
+      [r],
+      [],
+      G,
+    );
+  }
+  {
+    const forged = state(2, G, 0, [[owner, hostA], [alice, hostA]], { signer: alice });
+    add(
+      "manifest-bad-owner-sig",
+      "SPEC 6.1 rule 2: a seq 2 state whose ownerSignature is alice's signature, not the owner's: bad_request; the tip stays at genesis.",
+      [genesis, M("M2-signed-by-alice", forged, "bad_request")],
+      [r],
+      [],
+      G,
+    );
+  }
+  {
+    const M3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA], [bob, hostB]]);
+    add(
+      "manifest-rollback",
+      "SPEC 6.3, 6.4, 12.3: after seq 2 and seq 3 are accepted, the seq 2 state is published again; its seq is not tip + 1, so manifest_conflict, and the tip stays at seq 3.",
+      [genesis, M("M2", M2a, "ok"), M("M3", M3, "ok"), M("M2-again", M2a, "manifest_conflict")],
+      [r],
+      [],
+      M3,
+    );
+  }
+  {
+    const M3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA]]);
+    add(
+      "manifest-member-dropped-without-removal",
+      "SPEC 6.1 rule 5: a seq 3 state drops bob from members without a removal: bad_request.",
+      [genesis, M("M2", M2ab, "ok"), M("M3-drops-bob", M3, "bad_request")],
+      [r],
+      [],
+      M2ab,
+    );
+  }
+  {
+    const M3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA]], { removals: [removal(bob, 3, [r])] });
+    add(
+      "manifest-removal-without-epoch-bump",
+      "SPEC 6.1 rule 5: a seq 3 state adds a removal but keeps keyEpoch 0; a state that adds a removal MUST raise keyEpoch by one: bad_request.",
+      [genesis, M("M2", M2ab, "ok"), M("M3-removal-epoch-0", M3, "bad_request")],
+      [r],
+      [],
+      M2ab,
+    );
+  }
+
+  // ── commits: binding, membership, epoch (SPEC 7.1, 7.2) ──
+  {
+    const c1 = cm("c1", carol, [r], G);
+    add(
+      "commit-non-member",
+      "SPEC 7.1, 7.2: carol, who is not a member, commits under genesis: forbidden on push (the caller is not a member of the tip) and forbidden by replication (the author is not a member of the cited state).",
+      [genesis, C(c1, "forbidden"), C(c1, "forbidden", "offer")],
+      [r],
+      [],
+      G,
+    );
+  }
+  {
+    const a1 = cm("a1-epoch-1", alice, [r], M2a, { epoch: 1 });
+    add(
+      "commit-epoch-mismatch",
+      "SPEC 7.2: alice cites seq 2 (keyEpoch 0) but writes keyEpoch 1: forbidden.",
+      [genesis, M("M2", M2a, "ok"), C(a1, "forbidden")],
+      [r],
+      [],
+      M2a,
+    );
+  }
+  {
+    const a0 = cm("a0", alice, [r], M2a);
+    const a1 = cm("a1", alice, [a0], M2a);
+    add(
+      "commit-unknown-parent",
+      "SPEC 7.4: a1's parent a0 is unknown: missing_parents, which is retryable; once a0 is accepted the same a1 is accepted.",
+      [genesis, M("M2", M2a, "ok"), C(a1, "missing_parents"), C(a0, "ok"), C(a1, "ok")],
+      [a1],
+      [],
+      M2a,
+    );
+  }
+  {
+    const unseen = state(2, G, 0, [[owner, hostA], [alice, hostA], [carol, hostB]]);
+    const a1 = cm("a1-cites-unknown-state", alice, [r], unseen);
+    const a2 = cm("a2-seq-hash-mismatch", alice, [r], M2a, { seq: 3 });
+    add(
+      "commit-unknown-manifest",
+      "SPEC 7.2 manifest binding: a commit citing a validly signed state this host never received gets missing_parents; so does one citing seq 3 with the seq 2 manifestHash, since the pair names no held state.",
+      [genesis, M("M2", M2a, "ok"), C(a1, "missing_parents"), C(a2, "missing_parents")],
+      [r],
+      [],
+      M2a,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2a);
+    const tampered: Commit = { ...a1, ciphertext: flipFirst(a1.ciphertext) };
+    labels.set(tampered, "a1-tampered-ciphertext");
+    add(
+      "commit-id-mismatch",
+      "SPEC 7.1: a1 with one ciphertext byte flipped but its commitId and signature kept: the id does not recompute, bad_request; the untampered a1 is then accepted.",
+      [genesis, M("M2", M2a, "ok"), C(tampered, "bad_request"), C(a1, "ok")],
+      [a1],
+      [],
+      M2a,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2a);
+    const forged: Commit = { ...a1, authorSignature: ed25519Sign(importEd25519Private(bob.edSeed), commitSigMessage(a1.commitId)) };
+    labels.set(forged, "a1-signed-by-bob");
+    add(
+      "commit-bad-author-signature",
+      "SPEC 7.1: a1 whose authorSignature is bob's signature over a1's id: it does not verify under the author (alice), bad_request.",
+      [genesis, M("M2", M2a, "ok"), C(forged, "bad_request")],
+      [r],
+      [],
+      M2a,
+    );
+  }
+  {
+    const other = deriveRepoId(owner.edPub, Buffer.alloc(16, 0x02));
+    const a1 = cm("a1-other-repo", alice, [r], M2a, { repoId: other });
+    add(
+      "commit-wrong-repo-id",
+      "SPEC 7.1: a commit whose repoId is another repository's: bad_request.",
+      [genesis, M("M2", M2a, "ok"), C(a1, "bad_request")],
+      [r],
+      [],
+      M2a,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2a);
+    add(
+      "commit-repush-idempotent",
+      "SPEC 7, 12.3: a commit the host already holds is accepted again with no change, by push and by replication.",
+      [genesis, M("M2", M2a, "ok"), C(a1, "ok"), C(a1, "ok"), C(a1, "ok", "offer")],
+      [a1],
+      [],
+      M2a,
+    );
+  }
+  {
+    const M3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA], [bob, hostB]]);
+    const a1 = cm("a1-cites-seq-2", alice, [r], M2a);
+    add(
+      "commit-citing-older-state-ok",
+      "SPEC 7.2: after seq 3 adds bob, alice's commit citing seq 2 (where she is a member at epoch 0) is still valid.",
+      [genesis, M("M2", M2a, "ok"), M("M3", M3, "ok"), C(a1, "ok")],
+      [a1],
+      [],
+      M3,
+    );
+  }
+
+  // ── heads and the head bound (SPEC 7.4) ──
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    add(
+      "concurrent-commits-two-heads",
+      "SPEC 7.4: alice and bob each write a child of the root; both are accepted and both are heads.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok")],
+      [a1, b1],
+      [],
+      M2ab,
+    );
+    const mg = cm("merge", alice, [b1, a1], M2ab);
+    add(
+      "merge-collapses-heads",
+      "SPEC 7.4, 5: a merge commit naming both heads as parents is accepted and becomes the only head.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok"), C(mg, "ok")],
+      [mg],
+      [],
+      M2ab,
+    );
+  }
+  {
+    const hs = sixteen(M2a);
+    const mg = cm("merge-head-1-head-2", alice, [hs[0], hs[1]], M2a);
+    add(
+      "merge-at-head-bound",
+      "SPEC 7.4: sixteen children of the root give sixteen heads (the sixteenth push leaves exactly the bound, which is allowed); a merge of two of them would leave 16 - 2 + 1 = 15 heads and MUST be accepted at the bound.",
+      [genesis, M("M2", M2a, "ok"), ...hs.map((h) => C(h, "ok")), C(mg, "ok")],
+      [...hs.slice(2), mg],
+      [],
+      M2a,
+    );
+  }
+  {
+    const hs = sixteen(M2a);
+    const h17 = cm("head-17", alice, [r], M2a);
+    add(
+      "seventeenth-head-rejected",
+      "SPEC 7.4: with sixteen heads, a client push of a seventeenth child of the root would leave 17 heads, more than the bound: too_many_heads.",
+      [genesis, M("M2", M2a, "ok"), ...hs.map((h) => C(h, "ok")), C(h17, "too_many_heads")],
+      hs,
+      [],
+      M2a,
+    );
+  }
+  {
+    const hs = sixteen(M2a);
+    const h17 = cm("head-17", alice, [r], M2a);
+    const h18 = cm("head-18", alice, [r], M2a);
+    const mg = cm("merge-head-1-head-2", alice, [hs[0], hs[1]], M2a);
+    add(
+      "head-bound-exempt-for-replication",
+      "SPEC 7.4, 9.1: the head bound applies to client pushes only. With sixteen heads, head-17 by replication is accepted (17 heads); a push of head-18 would leave 18: too_many_heads; a merge of two heads would leave 17 - 2 + 1 = 16 and is accepted.",
+      [genesis, M("M2", M2a, "ok"), ...hs.map((h) => C(h, "ok")), C(h17, "ok", "offer"), C(h18, "too_many_heads"), C(mg, "ok")],
+      [...hs.slice(2), h17, mg],
+      [],
+      M2a,
+    );
+  }
+
+  // ── removal cutoff (SPEC 7.3, 8.3) ──
+  // Each starts: M2ab, a1 (alice) and b1 (bob) children of the root, then seq 3 removes bob at
+  // epoch 1 with the rotation commit merging the heads the owner saw.
+  const epoch1 = (prev: SignedManifest, frontier: Commit[], o: StOpts = {}) =>
+    state(3, prev, 1, [[owner, hostA], [alice, hostA]], { removals: [removal(bob, 3, frontier)], ...o });
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    const b2 = cm("b2", bob, [r], M2ab);
+    const M3 = epoch1(M2ab, [a1, b1, b2]);
+    const rot = cm("rot", owner, [a1, b1], M3);
+    add(
+      "removed-member-frontier-ok",
+      "SPEC 7.3, 8.3: seq 3 removes bob with frontier {a1, b1, b2}; the rotation commit merges a1 and b1. b2, bob's commit the owner saw but this host had not, then arrives by replication: its id is in the frontier, so it is accepted (citing seq 2 at epoch 0) and is a head beside the rotation commit.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok"), M("M3", M3, "ok", "push", rot), C(b2, "ok", "offer")],
+      [rot, b2],
+      [],
+      M3,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    const M3 = epoch1(M2ab, [a1, b1]);
+    const rot = cm("rot", owner, [a1, b1], M3);
+    const b3 = cm("b3-after-cutoff", bob, [r], M2ab);
+    const a2 = cm("a2-child-of-b3", alice, [b3], M3);
+    add(
+      "removed-member-after-cutoff",
+      "SPEC 7.3, 7.4: after seq 3 removes bob with frontier {a1, b1}, bob's b3 (a child of the root, citing seq 2 at epoch 0) is neither in the frontier nor an ancestor of a frontier commit: forbidden by replication and on push. alice's child of b3 then has a rejected parent: forbidden.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok"), M("M3", M3, "ok", "push", rot), C(b3, "forbidden", "offer"), C(b3, "forbidden"), C(a2, "forbidden")],
+      [rot],
+      [],
+      M3,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    const M3 = epoch1(M2ab, [a1, b1]);
+    const rot = cm("rot", owner, [a1, b1], M3);
+    const b4 = cm("b4-child-of-b1", bob, [b1], M2ab);
+    add(
+      "removed-member-backdated-child-of-frontier",
+      "SPEC 7.3: after bob's removal with frontier {a1, b1}, bob backdates b4 citing seq 2 at epoch 0 with parent b1, which is in the frontier. b4's own id is neither in the frontier nor an ancestor of a frontier commit, so it MUST be rejected: forbidden by replication and on push.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok"), M("M3", M3, "ok", "push", rot), C(b4, "forbidden", "offer"), C(b4, "forbidden")],
+      [rot],
+      [],
+      M3,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1", bob, [r], M2ab);
+    const b0 = cm("b0", bob, [r], M2ab);
+    const b2 = cm("b2-child-of-b0", bob, [b0], M2ab);
+    const M3 = epoch1(M2ab, [a1, b1, b2]);
+    const rot = cm("rot", owner, [a1, b1], M3);
+    add(
+      "removed-member-ancestor-of-frontier",
+      "SPEC 7.3: the frontier is {a1, b1, b2} and b2's parent is b0, both unseen here. b0 first: the host lacks frontier commit b2 and cannot decide, so missing_parents. b2: in the frontier but its parent b0 is unknown, missing_parents (its verified header now counts for ancestry). b0 again: an ancestor of frontier commit b2, accepted. b2 again: accepted.",
+      [
+        genesis,
+        M("M2", M2ab, "ok"),
+        C(a1, "ok"),
+        C(b1, "ok"),
+        M("M3", M3, "ok", "push", rot),
+        C(b0, "missing_parents", "offer"),
+        C(b2, "missing_parents", "offer"),
+        C(b0, "ok", "offer"),
+        C(b2, "ok", "offer"),
+      ],
+      [rot, b2],
+      [],
+      M3,
+    );
+  }
+  {
+    const a1 = cm("a1", alice, [r], M2ab);
+    const b1 = cm("b1-unseen-by-owner", bob, [r], M2ab);
+    const M3 = epoch1(M2ab, [a1]);
+    const rot = cm("rot", owner, [a1], M3);
+    const a2 = cm("a2-child-of-b1", alice, [b1], M3);
+    add(
+      "removed-member-dropped-on-removal",
+      "SPEC 7.3: this host holds bob's head b1, which never reached the owner; seq 3 removes bob with frontier {a1}. On accepting it the host re-checks bob's commits and drops b1 from the heads; alice's later child of b1 has a rejected parent: forbidden.",
+      [genesis, M("M2", M2ab, "ok"), C(a1, "ok"), C(b1, "ok"), M("M3", M3, "ok", "push", rot), C(a2, "forbidden")],
+      [rot],
+      [],
+      M3,
+    );
+  }
+
+  // ── rotation atomicity (SPEC 8.3) ──
+  {
+    const M3 = epoch1(M2ab, [r]);
+    const rot = cm("rot", owner, [r], M3);
+    add(
+      "rotation-without-commit",
+      "SPEC 8.3, 9.1: seq 3 removes bob and raises the epoch; without its rotation commit it is rejected with bad_request, by replication and on publish. Published with it, both are accepted.",
+      [genesis, M("M2", M2ab, "ok"), M("M3", M3, "bad_request", "offer"), M("M3", M3, "bad_request"), M("M3", M3, "ok", "push", rot)],
+      [rot],
+      [],
+      M3,
+    );
+  }
+  {
+    const M3 = epoch1(M2ab, [r]);
+    const byAlice = cm("rot-by-alice", alice, [r], M3);
+    add(
+      "rotation-commit-not-owner",
+      "SPEC 8.3: the rotation commit of an epoch-raising state MUST be authored by ownerKey; one by alice is bad_request and the state is not adopted either (atomic).",
+      [genesis, M("M2", M2ab, "ok"), M("M3", M3, "bad_request", "push", byAlice)],
+      [r],
+      [],
+      M2ab,
+    );
+  }
+  {
+    const M3 = epoch1(M2ab, [r]);
+    const atEpoch0 = cm("rot-epoch-0", owner, [r], M3, { epoch: 0 });
+    add(
+      "rotation-commit-wrong-epoch",
+      "SPEC 8.3: the rotation commit MUST be at the new epoch (1); one at epoch 0 is bad_request and the state is not adopted.",
+      [genesis, M("M2", M2ab, "ok"), M("M3", M3, "bad_request", "push", atEpoch0)],
+      [r],
+      [],
+      M2ab,
+    );
+  }
+  {
+    const x = cm("x", alice, [r], M2ab);
+    const M3 = epoch1(M2ab, [x]);
+    const rot = cm("rot", owner, [x], M3);
+    const a3 = cm("a3-cites-seq-3", alice, [r], M3);
+    add(
+      "rotation-commit-missing-parent",
+      "SPEC 8.3 atomicity, 7.2, 7.4: the rotation commit's parent x is unknown, so the pair answers missing_parents and neither is stored: alice's commit citing seq 3 then gets missing_parents too (unknown state). Once x is accepted, the pair and then alice's commit are accepted.",
+      [
+        genesis,
+        M("M2", M2ab, "ok"),
+        M("M3", M3, "missing_parents", "push", rot),
+        C(a3, "missing_parents"),
+        C(x, "ok"),
+        M("M3", M3, "ok", "push", rot),
+        C(a3, "ok"),
+      ],
+      [rot, a3],
+      [],
+      M3,
+    );
+  }
+
+  // ── diverged owner states (SPEC 6.5) ──
+  {
+    const X2 = state(2, G, 0, [[owner, hostA], [alice, hostA]]);
+    const Y2 = above((t) => state(2, G, 0, [[owner, hostA], [carol, hostB]], { tweak: t }), X2);
+    const a1 = cm("a1-cites-X2", alice, [r], X2);
+    const c1 = cm("c1-cites-Y2", carol, [r], Y2);
+    add(
+      "diverged-owner-lower-hash-wins",
+      "SPEC 6.5 tie rule: two owner-signed seq 2 states, X2 (adds alice) with the bytewise-lower manifestHash and Y2 (adds carol). The host holds Y2, then receives X2 and switches to it; Y2 offered again loses (manifest_conflict). alice is a member; carol, invited only on the losing chain, is not, so her push is forbidden.",
+      [genesis, M("Y2", Y2, "ok", "offer"), M("X2", X2, "ok", "offer"), M("Y2", Y2, "manifest_conflict", "offer"), C(a1, "ok"), C(c1, "forbidden")],
+      [a1],
+      [],
+      X2,
+    );
+  }
+  {
+    const X2 = state(2, G, 0, [[owner, hostA], [alice, hostA]]);
+    const Y2 = above((t) => state(2, G, 0, [[owner, hostA], [carol, hostB]], { tweak: t }), X2);
+    const c1 = cm("c1-cites-Y2", carol, [r], Y2);
+    add(
+      "diverged-owner-higher-hash-loses",
+      "SPEC 6.5, 7.2: holding X2 (lower hash), the host is offered Y2: it loses the tie rule, manifest_conflict, and is retained as a verified losing state. carol's commit citing Y2 then resolves (not missing_parents) and is re-checked: X2 does not list carol and the tip epoch has not passed hers, so it is held (forbidden).",
+      [genesis, M("X2", X2, "ok", "offer"), M("Y2", Y2, "manifest_conflict", "offer"), C(c1, "forbidden", "offer")],
+      [r],
+      [c1],
+      X2,
+    );
+  }
+  {
+    const L3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA], [carol, hostB]]);
+    const H3 = above((t) => state(3, M2a, 0, [[owner, hostA], [alice, hostA], [bob, hostB]], { tweak: t }), L3);
+    const a1 = cm("a1-cites-H3", alice, [r], H3);
+    const a2 = cm("a2-cites-H3", alice, [a1], H3);
+    add(
+      "diverged-owner-commit-rechecked-ok",
+      "SPEC 6.5: the host holds H3 (adds bob) and accepts alice's a1 citing it; then L3 (adds carol, lower hash) wins. a1 now cites a losing state and is re-checked against L3, which lists alice at the same epoch 0: it stays accepted. A new a2 citing H3 is accepted the same way.",
+      [genesis, M("M2", M2a, "ok"), M("H3", H3, "ok"), C(a1, "ok"), M("L3", L3, "ok", "offer"), C(a2, "ok")],
+      [a2],
+      [],
+      L3,
+    );
+  }
+  {
+    const W3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]]);
+    const L3 = above((t) => epoch1(M2ab, [r], { tweak: t }), W3);
+    const rotL = cm("rotL", owner, [r], L3);
+    const a1 = cm("a1-cites-L3", alice, [rotL], L3);
+    const a2 = cm("a2-cites-L3", alice, [r], L3);
+    add(
+      "diverged-owner-commit-held",
+      "SPEC 6.5: one owner device removes bob (L3, epoch 1, with rotation commit rotL), the other adds carol (W3, epoch 0, lower hash). The host accepts L3, rotL, and alice's a1 at epoch 1; then W3 wins. rotL and a1 cite a losing state, W3 does not list them at epoch 1, and the tip epoch (0) has not passed theirs: they are held (rotL kept with its state, SPEC 8.3) and leave the heads. A push of a1, or of a new a2 citing L3, answers forbidden.",
+      [genesis, M("M2", M2ab, "ok"), M("L3", L3, "ok", "push", rotL), C(a1, "ok"), M("W3", W3, "ok", "offer"), C(a1, "forbidden"), C(a2, "forbidden")],
+      [r],
+      [rotL, a1, a2],
+      W3,
+    );
+  }
+  {
+    const W3 = state(3, M2a, 0, [[owner, hostA], [alice, hostA]], { share: true });
+    const L3 = above((t) => state(3, M2a, 0, [[owner, hostA], [alice, hostA], [carol, hostB]], { tweak: t }), W3);
+    const c1 = cm("c1-cites-L3", carol, [r], L3);
+    const W4 = state(4, W3, 0, [[owner, hostA], [alice, hostA], [carol, hostB]], { share: true });
+    add(
+      "held-commit-accepted-after-reinvite",
+      "SPEC 6.5: carol is invited only on the losing L3; her c1 citing L3 is accepted while L3 is the tip, then held when W3 (policy flip, lower hash) wins; her push is forbidden while she is not a member. W4 re-invites carol at the same epoch 0: the held c1 is re-checked against W4 and accepted.",
+      [genesis, M("M2", M2a, "ok"), M("L3", L3, "ok", "offer"), C(c1, "ok"), M("W3", W3, "ok", "offer"), C(c1, "forbidden"), M("W4", W4, "ok")],
+      [c1],
+      [],
+      W4,
+    );
+  }
+  {
+    const W3 = state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB]], { share: true });
+    const L3 = above((t) => state(3, M2ab, 0, [[owner, hostA], [alice, hostA], [bob, hostB], [carol, hostB]], { tweak: t }), W3);
+    const c1 = cm("c1-cites-L3", carol, [r], L3);
+    const c2 = cm("c2-child-of-c1", carol, [c1], L3);
+    const W4 = state(4, W3, 1, [[owner, hostA], [alice, hostA]], { share: true, removals: [removal(bob, 4, [r])] });
+    const rot4 = cm("rot4", owner, [r], W4);
+    const c3 = cm("c3-cites-L3", carol, [r], L3);
+    add(
+      "held-commit-dropped-after-epoch",
+      "SPEC 6.5: carol's c1 and its child c2 cite the losing L3; when W3 (lower hash) wins they are held. W4 removes bob and raises the epoch to 1: re-checked against W4, c1 meets the drop test (tip epoch 1 exceeds its 0) and is dropped permanently, c2 with it. Offering c1 again is forbidden, and a new c3 citing L3 meets the drop test at its first classification: forbidden.",
+      [
+        genesis,
+        M("M2", M2ab, "ok"),
+        M("L3", L3, "ok", "offer"),
+        C(c1, "ok"),
+        C(c2, "ok"),
+        M("W3", W3, "ok", "offer"),
+        M("W4", W4, "ok", "push", rot4),
+        C(c1, "forbidden", "offer"),
+        C(c3, "forbidden", "offer"),
+      ],
+      [rot4],
+      [],
+      W4,
+    );
+  }
+
+  // ── leave (SPEC 8.4) ──
+  {
+    const at = ctx.t0 + 3_600_000;
+    const good = signLeave({ repoId, memberKey: alice.edPub, at }, alice.edSeed);
+    const forged: LeaveRequest = { ...good, signature: ed25519Sign(importEd25519Private(bob.edSeed), leaveSignMessage(good)) };
+    add(
+      "leave-bad-signature",
+      "SPEC 8.4: a leave request for alice whose signature is bob's: it does not verify under memberKey, bad_request.",
+      [genesis, M("M2", M2a, "ok"), L("alice-leave-signed-by-bob", forged, "bad_request")],
+      [r],
+      [],
+      M2a,
+    );
+    add(
+      "leave-ok",
+      "SPEC 8.4: alice, a member of the tip and not the owner, publishes a validly signed leave request: accepted.",
+      [genesis, M("M2", M2a, "ok"), L("alice-leave", good, "ok")],
+      [r],
+      [],
+      M2a,
+    );
+    add(
+      "leave-non-member",
+      "SPEC 8.4: carol, not a member of the tip, publishes a validly signed leave request: forbidden.",
+      [genesis, M("M2", M2a, "ok"), L("carol-leave", signLeave({ repoId, memberKey: carol.edPub, at }, carol.edSeed), "forbidden")],
+      [r],
+      [],
+      M2a,
+    );
+    add(
+      "leave-owner",
+      "SPEC 8.4: the owner cannot leave its own repository: forbidden.",
+      [genesis, M("M2", M2a, "ok"), L("owner-leave", signLeave({ repoId, memberKey: owner.edPub, at }, owner.edSeed), "forbidden")],
+      [r],
+      [],
+      M2a,
+    );
+  }
+
+  return {
+    description:
+      "Host acceptance scenarios (SPEC 6, 7, 8.3, 8.4, 9.1). Each scenario is one host's view of one repository: create a rules engine for `hostKey` (a.vault.example) " +
+      "with head bound `headBound`, apply `steps` in order, and each step's verdict MUST equal `expect` (\"ok\" or the SPEC 10.4 code). Then the accepted commits with no " +
+      "accepted child MUST be exactly `finalHeads`, the held commits (SPEC 6.5) exactly `finalHeld`, and the winning chain's tip manifestHash `finalTip` (null when no state " +
+      "was accepted). Steps: `op` is manifest, commit, or leave. A manifest step's `item` is `{ manifest: SignedManifest, commit?: Commit }`, the publishManifest body: the " +
+      "commit is the genesis commit (createRepo), the rotation commit of an epoch-raising state, or absent; the state and its commit are applied together or not at all " +
+      "(SPEC 8.2, 8.3). A commit step's `item` is a Commit; a leave step's `item` is a LeaveRequest. `via` is the path: \"push\" is a client write (push, createRepo, " +
+      "publishManifest, leave) whose authenticated caller is the commit author, the owner for a manifest, or memberKey for a leave, with the head bound applied; \"offer\" is " +
+      "replication from a peer host (SPEC 9.1): no caller check and no head bound. A held commit answers forbidden on either path. `label` names the item for reading only. " +
+      "Every expectation is written by hand from the SPEC rule each description cites. Keys, hosts, data keys, and wraps are those of manifest.json; each commit's payload " +
+      "is {\"v\":2,\"accounts\":{}} under AAD v2 with IV SHA-256(UTF8(\"avp/vectors/acceptance-iv/\" + label))[0..12]. Where two diverged states must hash in a set order, " +
+      "the losing one's wraps use the label \"<member>/g<i>\" for the first i that puts its manifestHash above the winner's. Generated by vectors/generate.ts.",
+    scenarios,
+  };
 }
 
 // ─── Negative ("MUST reject") bank, derived from the positive seeds ──────────────
@@ -455,7 +1503,120 @@ const flipFirst = (b: Buffer) => Buffer.concat([Buffer.from([b[0] ^ 0x01]), b.su
 const flipLast = (b: Buffer) => Buffer.concat([b.subarray(0, b.length - 1), Buffer.from([b[b.length - 1] ^ 0x01])]);
 const dropLast = (b: Buffer) => b.subarray(0, b.length - 1);
 
-function buildNegatives(): any {
+/**
+ * The 0.5 MUST-reject cases, from the manifest.json and commit.json items and the federation.json
+ * tokens. Each carries `base`, the fields that make it the valid construction it was mutated from,
+ * so a checker can confirm that the one mutation is what makes it fail.
+ */
+function buildNegatives05(ctx: Ctx, fed: FedItems): any[] {
+  const { owner, alice, carol, hostA, hostB, m1, m2, c1, c2, c3 } = ctx;
+  const neg = (name: string, op: string, mutation: string, fields: Record<string, unknown>, base: Record<string, unknown>) => ({
+    name,
+    op,
+    mutation,
+    expect: "reject",
+    ...fields,
+    base,
+  });
+  const wireM = signedManifestToWire;
+  const wireC = commitToWire;
+  const aliceSign = (msg: Buffer) => ed25519Sign(importEd25519Private(alice.edSeed), msg);
+  const aadOf = (repoId: string, keyEpoch: number, author: Buffer, parents: Buffer[]) => ({
+    repoId,
+    keyEpoch,
+    author: b64(author),
+    parents: parents.map(b64),
+  });
+  const goodAad = aadOf(c2.repoId, c2.keyEpoch, c2.author, c2.parents);
+  const payload = (name: string, mutation: string, aad: unknown) =>
+    neg(`payload/${name}`, "payload-decrypt", mutation, { dataKeyHex: hex(DATA_KEYS[0]), ivB64: b64(c2.iv), ciphertextB64: b64(c2.ciphertext), aad }, { aad: goodAad });
+  const wireGrant = { schemeId: fed.grantWrap.schemeId, ephemeralPublicKey: b64(fed.grantWrap.ephemeralPublicKey), iv: b64(fed.grantWrap.iv), ciphertext: b64(fed.grantWrap.ciphertext) };
+  const relinked = signManifest({ ...m2.state, prevManifestHash: flipFirst(m2.state.prevManifestHash) }, owner.edSeed);
+
+  return [
+    neg(
+      "manifest/bad-owner-signature",
+      "manifest-verify",
+      "flip the first byte of the ownerSignature of manifest.json add-members",
+      { signedManifest: wireM({ ...m2, ownerSignature: flipFirst(m2.ownerSignature) }) },
+      { signedManifest: wireM(m2) },
+    ),
+    neg(
+      "manifest/signed-by-other-key",
+      "manifest-verify",
+      "replace the ownerSignature of add-members with alice's signature over the same state bytes",
+      { signedManifest: wireM({ ...m2, ownerSignature: aliceSign(encodeManifestState(m2.state)) }) },
+      { signedManifest: wireM(m2) },
+    ),
+    neg(
+      "manifest/wrong-prev-hash",
+      "manifest-link",
+      "flip the first byte of add-members' prevManifestHash and re-sign it with the owner key, so only the link to genesis is wrong",
+      { prev: wireM(m1), next: wireM(relinked) },
+      { next: wireM(m2) },
+    ),
+    neg(
+      "commit/id-mismatch-tampered-ciphertext",
+      "commit-verify",
+      "flip the first ciphertext byte of commit.json single-parent, keeping commitId and authorSignature",
+      { commit: wireC({ ...c2, ciphertext: flipFirst(c2.ciphertext) }) },
+      { commit: wireC(c2) },
+    ),
+    neg(
+      "commit/id-mismatch-tampered-header",
+      "commit-verify",
+      "change single-parent's manifestSeq from 2 to 1, keeping commitId and authorSignature",
+      { commit: wireC({ ...c2, manifestSeq: 1 }) },
+      { commit: wireC(c2) },
+    ),
+    neg(
+      "commit/author-signed-other-id",
+      "commit-verify",
+      "replace single-parent's authorSignature with alice's valid signature over the three-parent-merge commit id",
+      { commit: wireC({ ...c2, authorSignature: aliceSign(commitSigMessage(c3.commitId)) }) },
+      { commit: wireC(c2) },
+    ),
+    payload("aad-v2-swapped-parent", "decrypt single-parent with the parent set {three-parent-merge id} in place of {root id}", aadOf(c2.repoId, 0, c2.author, [c3.commitId])),
+    payload("aad-v2-wrong-epoch", "decrypt single-parent with keyEpoch 1 in place of 0", aadOf(c2.repoId, 1, c2.author, c2.parents)),
+    payload("aad-v2-wrong-author", "decrypt single-parent with carol as the author in place of alice", aadOf(c2.repoId, 0, carol.edPub, c2.parents)),
+    payload(
+      "aad-v2-wrong-repo-id",
+      "decrypt single-parent under another repository's repoId (genesis nonce 0x02..02)",
+      aadOf(deriveRepoId(owner.edPub, Buffer.alloc(16, 0x02)), 0, c2.author, c2.parents),
+    ),
+    payload("aad-v2-dropped-parent", "decrypt single-parent with an empty parent set", aadOf(c2.repoId, 0, c2.author, [])),
+    neg(
+      "link-grant/unwrapped-with-rdk-wrap-label",
+      "wrap-unwrap",
+      "unwrap the federation.json link grant with info avp/rdk-wrap/v1 in place of avp/owner-link/v1",
+      { recipientPrivateKeyHex: hex(fed.linkEphemeralPriv), wrap: wireGrant, info: "avp/rdk-wrap/v1" },
+      { info: "avp/owner-link/v1" },
+    ),
+    neg(
+      "acceptance/verified-with-other-host-key",
+      "acceptance-verify",
+      "verify the federation.json acceptance (signed by b.vault.example) under a.vault.example's host key",
+      { acceptance: acceptanceToWire(fed.acceptance), verifyHostKey: b64(hostA.hostKey) },
+      { verifyHostKey: b64(hostB.hostKey) },
+    ),
+    neg(
+      "acceptance/tampered-expires-at",
+      "acceptance-verify",
+      "add 1 to the acceptance's expiresAt, keeping its signature",
+      { acceptance: acceptanceToWire({ ...fed.acceptance, expiresAt: fed.acceptance.expiresAt + 1 }), verifyHostKey: b64(hostB.hostKey) },
+      { acceptance: acceptanceToWire(fed.acceptance) },
+    ),
+    neg(
+      "leave/signed-by-other-key",
+      "leave-verify",
+      "replace the signature of federation.json alice-leaves with carol's signature over the same message",
+      { leave: leaveToWire({ ...fed.aliceLeave, signature: ed25519Sign(importEd25519Private(carol.edSeed), leaveSignMessage(fed.aliceLeave)) }) },
+      { leave: leaveToWire(fed.aliceLeave) },
+    ),
+  ];
+}
+
+function buildNegatives(extra: any[]): any {
   const kw = read("key-wrap.json").cases[0];
   const ed = read("ed25519.json").cases.find((c: any) => c.name === "rfc8032-test2");
   const edOther = read("ed25519.json").cases.find((c: any) => c.name === "rfc8032-test3");
@@ -496,7 +1657,7 @@ function buildNegatives(): any {
 
   return {
     description:
-      "MUST-reject vectors. Each case starts from a valid construction (the seeds of key-wrap.json and ed25519.json) and applies exactly one mutation; a conformant implementation MUST reject it. 'op' is the operation: 'key-unwrap' (X25519-HKDF-SHA256-AESGCM-v1) MUST fail authentication; 'ed25519-verify' MUST return false. Wire base64 strictness is implementation-specific and intentionally not tested here. Generated by vectors/generate.ts from the same seeds as the positive vectors.",
+      "MUST-reject vectors. Each case starts from a valid construction (the seeds of key-wrap.json and ed25519.json, and the items of manifest.json, commit.json, and federation.json) and applies exactly one mutation; a conformant implementation MUST reject it. 'op' is the operation: 'key-unwrap' (X25519-HKDF-SHA256-AESGCM-v1, info avp/rdk-wrap/v1) and 'wrap-unwrap' (the same scheme under the case's `info`) MUST fail authentication; 'ed25519-verify' MUST return false; 'manifest-verify' (ownerSignature over the state bytes S under ownerKey, SPEC 4.2) MUST fail; 'manifest-link' MUST find that `next` does not link to `prev` (manifestSeq + 1 and prevManifestHash = manifestHash(prev), SPEC 6.3) although `next` is validly signed; 'commit-verify' (commitId recomputes from the header and authorSignature verifies, SPEC 7.1) MUST fail; 'payload-decrypt' (AES-256-GCM under dataKeyHex with AAD v2 built from `aad`, SPEC 4.3) MUST fail authentication; 'acceptance-verify' (the signature under verifyHostKey, SPEC 11.3) and 'leave-verify' (the signature under memberKey, SPEC 11.4) MUST return false. Where a case has `base`, replacing its fields with `base` gives the valid construction, which MUST be accepted. Wire base64 strictness is implementation-specific and intentionally not tested here. Generated by vectors/generate.ts from the same seeds as the positive vectors.",
     cases: [
       wrap("flipped-tag", "flip the last byte of the wrap ciphertext (inside the GCM tag)", { ciphertextB64: b64(flipLast(kwCt)) }),
       wrap("tampered-body", "flip a bit in the first wrap-ciphertext byte", { ciphertextB64: b64(flipFirst(kwCt)) }),
@@ -507,6 +1668,7 @@ function buildNegatives(): any {
       verify("flipped-signature", "flip the first signature byte", { signatureHex: hex(flipFirst(sig)) }),
       verify("wrong-message", "verify the valid signature against a different message", { messageHex: "ff" }),
       verify("wrong-public-key", "verify the valid signature under a different public key", { publicKeyHex: edOther.publicKeyHex }),
+      ...extra,
     ],
   };
 }
@@ -517,13 +1679,19 @@ const write = process.argv.includes("--write");
 
 const positives = checkPositives();
 checkAnchors(positives);
-const negatives = buildNegatives();
 const generated = build05();
+const federation = buildFederation(generated.ctx);
+const negatives = buildNegatives(buildNegatives05(generated.ctx, federation.items));
 const owned: Array<[string, any]> = [
   ["bip39-owner.json", generated.bip39],
   ["manifest.json", generated.manifest],
   ["commit.json", generated.commit],
+  ["federation.json", federation.file],
+  ["merge.json", buildMerge(generated.ctx)],
+  ["acceptance.json", buildAcceptance(generated.ctx)],
 ];
+/** The number of items in a generated file, for the log line. */
+const itemCount = (content: any) => (content.cases ?? content.scenarios ?? content.tokens ?? []).length;
 
 // --write never rewrites anything while a positive or anchor check fails: a broken primitive, a
 // changed wordlist, or a Trezor anchor mismatch must not regenerate the owned files.
@@ -539,7 +1707,7 @@ if (write) {
   console.log(`Wrote negative.json (${negatives.cases.length} cases).`);
   for (const [file, content] of owned) {
     writeFileSync(join(dir, file), JSON.stringify(content, null, 2) + "\n");
-    console.log(`Wrote ${file} (${content.cases.length} cases).`);
+    console.log(`Wrote ${file} (${itemCount(content)} items).`);
   }
 } else {
   for (const [file, content] of owned) checkGenerated(file, content, positives);

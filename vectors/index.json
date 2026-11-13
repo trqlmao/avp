@@ -5,7 +5,9 @@
     "deterministic": "Pure byte/string construction with no key material; must match exactly.",
     "rfc-primitive": "A cryptographic primitive pinned to a published RFC test vector.",
     "composition": "Full AVP composition with fixed keys/IVs; reproduce byte-for-byte and round-trip (decrypt/unwrap/verify).",
-    "negative": "A valid construction with one mutation that a conformant implementation MUST reject."
+    "negative": "A valid construction with one mutation that a conformant implementation MUST reject.",
+    "data": "A plaintext data transformation with no key material (the payload merge and the HLC); the result must equal the expected JSON exactly.",
+    "scenario": "A sequence of signed items applied to one host's rules engine; each step's verdict and the final heads, held commits, and tip must match."
   },
   "vectors": [
     {
@@ -50,6 +52,25 @@
         "FIPS 180-4 SHA-256"
       ],
       "generatedBy": "vectors/generate.ts"
+    },
+    {
+      "id": "merge",
+      "file": "merge.json",
+      "kind": "data",
+      "specSection": "5",
+      "construction": "payload v2 merge: union of accounts, greatest (at, n, by) stamp per field and per ban server id, greatest deleted marker; deleted iff deleted is greater than every field and ban stamp; stripRefresh removes refreshToken and expiresAt with their stamps (5.1); HLC tick and observe",
+      "expects": "expected for every permutation of inputs, idempotence, associativity, expectedDeleted per account; each hlc step's state",
+      "generatedBy": "vectors/generate.ts (expected values hand-written from SPEC 5)"
+    },
+    {
+      "id": "acceptance",
+      "file": "acceptance.json",
+      "kind": "scenario",
+      "specSection": "6, 7, 8.3, 8.4",
+      "construction": "owner-signed manifest chains (including diverged states), signed commit graphs, and leave requests applied in order to one host's rules engine, by client push or replication offer",
+      "expects": "each step's verdict (ok or the SPEC 10.4 code); finalHeads, finalHeld, finalTip",
+      "shape": "uses a top-level `scenarios` array, not `cases`; see vectors/README.md for the step shape",
+      "generatedBy": "vectors/generate.ts (verdicts hand-written from the cited SPEC rule)"
     },
     {
       "id": "hkdf",
@@ -103,22 +124,24 @@
     {
       "id": "federation",
       "file": "federation.json",
-      "kind": "deterministic",
+      "kind": "composition",
       "specSection": "11",
-      "construction": "base64url (no padding) over compact JSON for the join-handshake tokens (InviteRequest, RepoLocator); avp://<host>/<repoId> for the repository URI",
-      "expects": "decoding base64url yields the object (decode oracle); canonical minified encoding round-trips; avp:// URIs parse to {host, repoId} and format back",
-      "shape": "uses top-level `tokens` and `uris` arrays, not `cases`",
+      "construction": "base64url-nopad over compact JSON for InviteToken (with the host-signed Acceptance), RepoLocator, LinkRequest, LinkGrant (owner entropy wrapped under avp/owner-link/v1); LeaveRequest signatures; link confirmation codes; member and owner fingerprints; avp://<hostLocator>/<repoId> locators",
+      "expects": "decoding base64url yields the object; canonical encoding round-trips; acceptance and leave signatures verify; link codes and fingerprints recompute; the link grant unwraps to the owner entropy; avp:// URIs parse and format back",
+      "shape": "uses top-level `tokens`, `leaves`, `linkCodes`, `fingerprints`, and `uris`, not `cases`",
       "anchors": [
-        "RFC 4648 §5 (base64url)"
-      ]
+        "RFC 4648 §5 (base64url)",
+        "RFC 8032 Ed25519"
+      ],
+      "generatedBy": "vectors/generate.ts"
     },
     {
       "id": "negative",
       "file": "negative.json",
       "kind": "negative",
       "specSection": "14",
-      "construction": "valid key-wrap / ed25519 constructions with one mutation each (flipped tag, bit flip, truncation, wrong recipient/ephemeral key, wrong message/public key)",
-      "expects": "each case MUST be rejected: key-unwrap fails authentication, ed25519-verify returns false",
+      "construction": "valid key-wrap / ed25519 constructions and 0.5 manifest, commit, payload, link grant, acceptance, and leave items with one mutation each (flipped tag or byte, truncation, wrong key, wrong owner signature, wrong previous hash, commit id that does not recompute, author signature over another id, AAD v2 with a wrong parent set, epoch, author, or repoId, wrong wrap label)",
+      "expects": "each case MUST be rejected: unwrap and decrypt fail authentication, verify returns false, the link check fails; each 0.5 case's `base` is accepted",
       "generatedBy": "vectors/generate.ts (from the same seeds as the positive vectors)"
     }
   ]

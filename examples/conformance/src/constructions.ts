@@ -3,15 +3,30 @@
  *
  *   - the canonical encoding (CE) writer (SPEC 4.1),
  *   - the manifest state bytes, owner signature, manifestHash, and repoId (SPEC 4.2),
- *   - the commit header, commitId, author signature message, and AAD v2 (SPEC 4.3).
+ *   - the commit header, commitId, author signature message, and AAD v2 (SPEC 4.3),
+ *   - the acceptance and leave signature messages, fingerprints, the link confirmation code, and the
+ *     out-of-band token encoding (SPEC 3.2, 11).
  *
- * They are checked byte-for-byte against `vectors/manifest.json` and `vectors/commit.json`. Binary
+ * They are checked byte-for-byte against `vectors/manifest.json`, `vectors/commit.json`, and
+ * `vectors/federation.json`. Binary
  * fields are raw bytes (`Buffer`); the wire base64 is decoded before it reaches these functions.
  *
  * Illustrative reference code, not production. SPDX-License-Identifier: MIT
  */
 
-import { ed25519Sign, importEd25519Private, sha256 } from "./crypto.ts";
+import {
+  aesGcmDecrypt,
+  ed25519Sign,
+  ed25519Verify,
+  hkdfSha256,
+  importEd25519Private,
+  importEd25519Public,
+  importX25519Private,
+  importX25519Public,
+  sha256,
+  WRAP_INFO,
+  x25519,
+} from "./crypto.ts";
 
 const U32_MAX = 0xffffffff;
 const I64_MIN = -(1n << 63n);
@@ -360,4 +375,331 @@ export function buildAadV2(repoId: string, keyEpoch: number, author: Buffer, par
   const w = new CeWriter().tag("avp/aad/v2").str(repoId).i64(keyEpoch).bytes(author).count(sorted.length);
   for (const p of sorted) w.bytes(p);
   return w.finish();
+}
+
+// ─── Signed messages: acceptance and leave (SPEC 11.3, 11.4) ────────────────────────
+
+/** Verifies an Ed25519 signature, mapping every malformed key or signature to `false`. */
+function safeVerify(publicKey: Buffer, message: Buffer, signature: Buffer): boolean {
+  try {
+    if (!Buffer.isBuffer(publicKey) || publicKey.length !== 32) return false;
+    if (!Buffer.isBuffer(signature) || signature.length !== 64) return false;
+    return ed25519Verify(importEd25519Public(publicKey), message, signature);
+  } catch {
+    return false;
+  }
+}
+
+/** A host's signed agreement to carry a repository for one joining member (SPEC 8.2, 11.3). */
+export interface Acceptance {
+  repoId: string;
+  memberKey: Buffer;
+  hostKey: Buffer;
+  expiresAt: number;
+  signature: Buffer;
+}
+
+/**
+ * The message a host signs for an acceptance (SPEC 11.3):
+ * `CE(tag "avp/accept/v1", str(repoId), bytes(memberKey), bytes(hostKey), i64(expiresAt))`.
+ */
+export function acceptanceSignMessage(a: Omit<Acceptance, "signature">): Buffer {
+  return new CeWriter().tag("avp/accept/v1").str(a.repoId).bytes(a.memberKey).bytes(a.hostKey).i64(a.expiresAt).finish();
+}
+
+/**
+ * Signs an acceptance with the host key.
+ *
+ * @param a - The acceptance fields; `a.hostKey` MUST be the public key of `hostSeed`.
+ * @param hostSeed - The host's 32-byte Ed25519 seed.
+ */
+export function signAcceptance(a: Omit<Acceptance, "signature">, hostSeed: Buffer): Acceptance {
+  return { ...a, signature: ed25519Sign(importEd25519Private(hostSeed), acceptanceSignMessage(a)) };
+}
+
+/**
+ * Whether `a.signature` verifies under `hostKey` over {@link acceptanceSignMessage}. Never throws.
+ *
+ * @param a - The acceptance.
+ * @param hostKey - The key to verify under (the owner client passes the acceptance's own hostKey,
+ *   after matching it to the invite token's homeHostKey).
+ */
+export function verifyAcceptance(a: Acceptance, hostKey: Buffer): boolean {
+  try {
+    return safeVerify(hostKey, acceptanceSignMessage(a), a.signature);
+  } catch {
+    return false;
+  }
+}
+
+/** A member's signed request to leave a repository (SPEC 8.4, 11.4). */
+export interface LeaveRequest {
+  repoId: string;
+  memberKey: Buffer;
+  at: number;
+  signature: Buffer;
+}
+
+/** The message a leaving member signs (SPEC 11.4): `CE(tag "avp/leave/v1", str(repoId), bytes(memberKey), i64(at))`. */
+export function leaveSignMessage(l: Omit<LeaveRequest, "signature">): Buffer {
+  return new CeWriter().tag("avp/leave/v1").str(l.repoId).bytes(l.memberKey).i64(l.at).finish();
+}
+
+/**
+ * Signs a leave request with the member key.
+ *
+ * @param l - The leave fields; `l.memberKey` MUST be the public key of `memberSeed`.
+ * @param memberSeed - The member's 32-byte Ed25519 seed.
+ */
+export function signLeave(l: Omit<LeaveRequest, "signature">, memberSeed: Buffer): LeaveRequest {
+  return { ...l, signature: ed25519Sign(importEd25519Private(memberSeed), leaveSignMessage(l)) };
+}
+
+/** Whether `l.signature` verifies under `l.memberKey` (SPEC 8.4). Never throws. */
+export function verifyLeave(l: LeaveRequest): boolean {
+  try {
+    return safeVerify(l.memberKey, leaveSignMessage(l), l.signature);
+  } catch {
+    return false;
+  }
+}
+
+// ─── Fingerprints and device linking (SPEC 3.2, 11.2, 11.6) ─────────────────────────
+
+/** The HKDF info and GCM AAD label of a link grant (SPEC 11.6). */
+export const OWNER_LINK_INFO = Buffer.from("avp/owner-link/v1", "utf8");
+
+/**
+ * The member key fingerprint (SPEC 3.2): `hex(SHA-256(ed25519 || x25519)[0..8])` as
+ * `xxxx-xxxx-xxxx-xxxx`.
+ */
+export function keyFingerprint(ed25519PublicKey: Buffer, x25519PublicKey: Buffer): string {
+  const h = sha256(ed25519PublicKey, x25519PublicKey).subarray(0, 8).toString("hex");
+  return [0, 4, 8, 12].map((i) => h.slice(i, i + 4)).join("-");
+}
+
+/** The owner fingerprint of a repo locator (SPEC 11.2): `hex(SHA-256(ownerKey)[0..8])`. */
+export function ownerFingerprint(ownerKey: Buffer): string {
+  return sha256(ownerKey).subarray(0, 8).toString("hex");
+}
+
+/**
+ * The link confirmation code (SPEC 11.6): the first 4 bytes of
+ * `SHA-256(CE(tag "avp/link-code/v1", bytes(ephemeralPublicKey)))` as `u32BE`, modulo 1 000 000,
+ * written as 6 decimal digits with leading zeros.
+ */
+export function linkConfirmationCode(ephemeralPublic: Buffer): string {
+  const d = sha256(new CeWriter().tag("avp/link-code/v1").bytes(ephemeralPublic).finish());
+  return String(d.readUInt32BE(0) % 1_000_000).padStart(6, "0");
+}
+
+/**
+ * Unwraps a secret wrapped with the default wrap scheme (SPEC 4.4) under the given label.
+ *
+ * @param recipientPrivRaw - The recipient's raw 32-byte X25519 private key.
+ * @param w - The wrapped key.
+ * @param info - The label, bound as both the HKDF info and the GCM AAD.
+ * @returns The secret.
+ * @throws If the wrap does not authenticate (wrong key, wrong label, or tampered bytes).
+ */
+export function unwrapSecret(recipientPrivRaw: Buffer, w: WrappedKey, info: Buffer = WRAP_INFO): Buffer {
+  const shared = x25519(importX25519Private(recipientPrivRaw), importX25519Public(w.ephemeralPublicKey));
+  const kek = hkdfSha256(shared, w.ephemeralPublicKey, info, 32);
+  return aesGcmDecrypt(kek, w.iv, info, w.ciphertext);
+}
+
+// ─── Out-of-band tokens (SPEC 11.1) ─────────────────────────────────────────────────
+
+/** Wire `Acceptance` (base64 binary). */
+export interface WireAcceptance {
+  repoId: string;
+  memberKey: string;
+  hostKey: string;
+  expiresAt: number;
+  signature: string;
+}
+
+/** Wire `WrappedKey` (base64 binary). */
+export interface WireWrappedKey {
+  schemeId: string;
+  ephemeralPublicKey: string;
+  iv: string;
+  ciphertext: string;
+}
+
+/** `InviteToken`, joiner to owner (SPEC 11.3). */
+export interface WireInviteToken {
+  v: 2;
+  ed25519PublicKey: string;
+  x25519PublicKey: string;
+  homeHostKey: string;
+  homeHostLocator: string;
+  acceptance: WireAcceptance;
+}
+
+/** `RepoLocator`, owner to joiner (SPEC 11.2). */
+export interface WireRepoLocator {
+  v: 2;
+  repoId: string;
+  hostKey: string;
+  hostLocator: string;
+  ownerFingerprint: string;
+}
+
+/** `LinkRequest`, new owner device (SPEC 11.6). */
+export interface WireLinkRequest {
+  v: 2;
+  ephemeralPublicKey: string;
+}
+
+/** `LinkGrant`, existing owner device (SPEC 11.6). */
+export interface WireLinkGrant {
+  v: 2;
+  wrap: WireWrappedKey;
+}
+
+/** The token kinds of SPEC 11, named as their schema `$defs`. */
+export type TokenKind = "InviteToken" | "RepoLocator" | "LinkRequest" | "LinkGrant";
+
+/** A token that failed to decode: not base64url-nopad, not a JSON object, `v` not 2, or a field missing or mistyped. */
+export class TokenError extends Error {}
+
+type FieldType = "string" | "base64" | "int" | { object: Spec };
+type Spec = ReadonlyArray<readonly [string, FieldType]>;
+
+const ACCEPTANCE_SPEC: Spec = [
+  ["repoId", "string"],
+  ["memberKey", "base64"],
+  ["hostKey", "base64"],
+  ["expiresAt", "int"],
+  ["signature", "base64"],
+];
+const WRAP_SPEC: Spec = [
+  ["schemeId", "string"],
+  ["ephemeralPublicKey", "base64"],
+  ["iv", "base64"],
+  ["ciphertext", "base64"],
+];
+/** Field order of each token as SPEC 11 lists it (the `v` is checked separately). */
+const TOKEN_SPECS: Record<TokenKind, Spec> = {
+  InviteToken: [
+    ["ed25519PublicKey", "base64"],
+    ["x25519PublicKey", "base64"],
+    ["homeHostKey", "base64"],
+    ["homeHostLocator", "string"],
+    ["acceptance", { object: ACCEPTANCE_SPEC }],
+  ],
+  RepoLocator: [
+    ["repoId", "string"],
+    ["hostKey", "base64"],
+    ["hostLocator", "string"],
+    ["ownerFingerprint", "string"],
+  ],
+  LinkRequest: [["ephemeralPublicKey", "base64"]],
+  LinkGrant: [["wrap", { object: WRAP_SPEC }]],
+};
+
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64URL_NOPAD = /^[A-Za-z0-9_-]*$/;
+
+/** Rebuilds `o` with exactly the fields of `spec`, in order, checking each type. */
+function shape(o: unknown, spec: Spec, where: string): Record<string, unknown> {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) throw new TokenError(`${where} is not a JSON object`);
+  const src = o as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [name, type] of spec) {
+    const v = src[name];
+    if (type === "string") {
+      if (typeof v !== "string") throw new TokenError(`${where}.${name} must be a string`);
+      out[name] = v;
+    } else if (type === "base64") {
+      if (typeof v !== "string" || !BASE64.test(v)) throw new TokenError(`${where}.${name} must be base64`);
+      out[name] = v;
+    } else if (type === "int") {
+      if (typeof v !== "number" || !Number.isSafeInteger(v)) throw new TokenError(`${where}.${name} must be an integer`);
+      out[name] = v;
+    } else {
+      out[name] = shape(v, type.object, `${where}.${name}`);
+    }
+  }
+  return out;
+}
+
+/** Validates a token object and returns it with its fields in the listed order, `v` first. */
+function normalizeToken(kind: TokenKind, o: unknown): Record<string, unknown> {
+  if (o === null || typeof o !== "object" || Array.isArray(o)) throw new TokenError(`${kind} is not a JSON object`);
+  if ((o as Record<string, unknown>).v !== 2) throw new TokenError(`${kind} v must be 2`);
+  return { v: 2, ...shape(o, TOKEN_SPECS[kind], kind) };
+}
+
+/**
+ * Encodes a token (SPEC 11.1): base64url-nopad over compact JSON with the fields in the listed order.
+ *
+ * @param kind - The token kind.
+ * @param token - The token object, fields in any order.
+ * @throws {TokenError} If the object is not a valid token of that kind.
+ */
+export function encodeToken(kind: TokenKind, token: object): string {
+  return Buffer.from(JSON.stringify(normalizeToken(kind, token)), "utf8").toString("base64url");
+}
+
+/**
+ * Decodes a token (SPEC 11.1). Accepts any field order and insignificant whitespace, ignores unknown
+ * fields, and rejects a token whose `v` is not `2`.
+ *
+ * @param kind - The expected token kind.
+ * @param s - The base64url-nopad text.
+ * @returns The token with its fields in the listed order.
+ * @throws {TokenError} If the text is not a valid token of that kind.
+ */
+export function decodeToken(kind: TokenKind, s: string): Record<string, unknown> {
+  if (typeof s !== "string" || !BASE64URL_NOPAD.test(s) || s.length % 4 === 1) throw new TokenError("not base64url-nopad");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
+  } catch {
+    throw new TokenError("not JSON");
+  }
+  return normalizeToken(kind, parsed);
+}
+
+/** Decodes an `InviteToken` (SPEC 11.3). @throws {TokenError} */
+export const decodeInviteToken = (s: string) => decodeToken("InviteToken", s) as unknown as WireInviteToken;
+/** Decodes a `RepoLocator` (SPEC 11.2). @throws {TokenError} */
+export const decodeRepoLocator = (s: string) => decodeToken("RepoLocator", s) as unknown as WireRepoLocator;
+/** Decodes a `LinkRequest` (SPEC 11.6). @throws {TokenError} */
+export const decodeLinkRequest = (s: string) => decodeToken("LinkRequest", s) as unknown as WireLinkRequest;
+/** Decodes a `LinkGrant` (SPEC 11.6). @throws {TokenError} */
+export const decodeLinkGrant = (s: string) => decodeToken("LinkGrant", s) as unknown as WireLinkGrant;
+
+/**
+ * The owner client's check of an invite token before it adds a member or a host (SPEC 8.2): the
+ * acceptance signature verifies under its hostKey, its repoId is the repository's, its memberKey is
+ * the token's ed25519PublicKey, its hostKey is the token's homeHostKey, and it has not expired.
+ * Never throws.
+ *
+ * @param t - The decoded invite token.
+ * @param repoId - The repository the owner is inviting to.
+ * @param nowMs - The owner client's current time.
+ */
+export function verifyInvite(t: WireInviteToken, repoId: string, nowMs: number): boolean {
+  try {
+    const a = t.acceptance;
+    const acc: Acceptance = {
+      repoId: a.repoId,
+      memberKey: Buffer.from(a.memberKey, "base64"),
+      hostKey: Buffer.from(a.hostKey, "base64"),
+      expiresAt: a.expiresAt,
+      signature: Buffer.from(a.signature, "base64"),
+    };
+    return (
+      verifyAcceptance(acc, acc.hostKey) &&
+      a.repoId === repoId &&
+      a.memberKey === t.ed25519PublicKey &&
+      a.hostKey === t.homeHostKey &&
+      a.expiresAt > nowMs
+    );
+  } catch {
+    return false;
+  }
 }

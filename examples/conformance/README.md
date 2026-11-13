@@ -25,6 +25,21 @@ schema/example/index/openapi consistency.
   bytes, `commitId`, the author signature, the AAD v2 bytes, and the
   AES-256-GCM ciphertext, for every parent order.
 
+- **Payload merge** (SPEC section 5, 5.1): for
+  [`vectors/merge.json`](../../vectors/merge.json) it merges every permutation
+  of each case's inputs and compares with the hand-written `expected`, checks
+  idempotence and associativity, the deletion rule, refresh-token stripping,
+  and the HLC.
+- **Host acceptance** (SPEC sections 6, 7, 8.3, 8.4): `src/rules.ts` is a
+  rules engine (`RepoView`) for one host's view of a repository; it replays
+  every scenario of [`vectors/acceptance.json`](../../vectors/acceptance.json)
+  and compares each verdict and the final heads, held commits, and tip.
+- **Tokens** (SPEC section 11): for
+  [`vectors/federation.json`](../../vectors/federation.json) it decodes and
+  re-encodes every token, verifies the acceptance and leave signatures with
+  `node:crypto` over hand-assembled messages, recomputes the link code and the
+  fingerprints by hand, and unwraps the link grant to the owner entropy.
+
 The manifest and commit tests also re-derive each case by a second, hand
 written assembly of the SPEC layout (raw `Buffer` concatenation, no
 `CeWriter`), since these constructions have no external anchor.
@@ -55,8 +70,10 @@ Ed25519 `sign`/`verify`). The primitive helpers live in
 ## Layout
 
 ```
-src/constructions.ts   CE writer, manifest state, commit header, AAD v2
+src/constructions.ts   CE writer, manifest state, commit header, AAD v2, tokens, signed messages
 src/bip39.ts           BIP39 mnemonic, seed, and owner keys
+src/merge.ts           payload v2 merge, deletion, refresh-token strip, HLC
+src/rules.ts           host acceptance rules engine (RepoView)
 src/crypto.ts          HKDF / PBKDF2 / SHA / X25519 / Ed25519 / AES-GCM / wrap helpers (node:crypto)
 src/vectors.ts         loads vectors/*.json relative to the repo root; wire JSON converters
 test/vectors.test.ts   the CE writer items
@@ -64,6 +81,9 @@ test/bip39.test.ts     owner identity
 test/manifest.test.ts  manifest state, signature, hash, repoId
 test/commit.test.ts    commit header, id, signature, AAD v2, payload AEAD
 test/crypto.test.ts    the RFC-anchored primitives and the key wrap
+test/merge.test.ts     payload merge and HLC
+test/acceptance.test.ts host acceptance scenarios
+test/federation.test.ts tokens, signatures, fingerprints, linking, avp:// locators
 test/negative.test.ts  the MUST-reject bank
 ```
 
