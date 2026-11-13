@@ -637,8 +637,8 @@ fn accepted(c: &Value) -> bool {
 fn negative() {
     let file = load("negative.json");
     let cases = arr(&file, "cases");
-    // 23 cases plus the five strict Ed25519 rejects of SPEC 2.
-    assert_eq!(cases.len(), 28);
+    // 23 cases plus the six strict Ed25519 rejects of SPEC 2.
+    assert_eq!(cases.len(), 29);
     let mut with_base = 0;
     for c in cases {
         let name = s(c, "name");

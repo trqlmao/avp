@@ -153,7 +153,8 @@ test("each 0.5 negative differs from a valid base by its one mutation (the base 
 /**
  * The strict Ed25519 cases (SPEC 2) are only meaningful if a verifier without the strict checks
  * accepts them: Node's OpenSSL verification is cofactorless and accepts the small-order forgeries
- * and the non-canonical key, and the S + L signature verifies once S is reduced modulo L.
+ * (including the order-8 key with its sign bit set, whose R is not the identity) and the
+ * non-canonical key, and the S + L signature verifies once S is reduced modulo L.
  */
 test("the strict ed25519 negatives are accepted by a cofactorless verifier", () => {
   const lenient = (c: any) =>
@@ -164,7 +165,14 @@ test("the strict ed25519 negatives are accepted by a cofactorless verifier", () 
       fromHex(c.signatureHex),
     );
   const byName = new Map((negative.cases as any[]).map((c) => [c.name, c]));
-  for (const n of ["ed25519/identity-key-forgery", "ed25519/order-8-key-forgery", "ed25519/identity-r", "ed25519/non-canonical-key"]) {
+  const forgeries = [
+    "ed25519/identity-key-forgery",
+    "ed25519/order-8-key-forgery",
+    "ed25519/identity-r",
+    "ed25519/non-canonical-key",
+    "ed25519/order-8-sign-bit-key-forgery",
+  ];
+  for (const n of forgeries) {
     const c = byName.get(n);
     assert.ok(c, `missing negative ${n}`);
     assert.equal(lenient(c), true, `${n}: a cofactorless verifier accepts it, so the strict check is what rejects it`);

@@ -783,8 +783,8 @@ public final class AvpVectors {
 
     private static void negative() throws Exception {
         List<Object> cases = l(m(load("negative.json")).get("cases"));
-        // 23 cases plus the five strict Ed25519 rejects of SPEC 2.
-        eq(28, cases.size(), "negative case count");
+        // 23 cases plus the six strict Ed25519 rejects of SPEC 2.
+        eq(29, cases.size(), "negative case count");
         int withBase = 0;
         for (Object o : cases) {
             Map<String, Object> c = m(o);
