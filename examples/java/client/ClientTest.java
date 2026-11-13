@@ -121,6 +121,7 @@ final class ClientTest {
                         "owner_and_member_pinned_on_a_losing_same_seq_state_recover",
                         ClientTest::ownerAndMemberPinnedOnALosingSameSeqStateRecover),
                 new Case("stale_pin_recovery_is_bounded", ClientTest::stalePinRecoveryIsBounded),
+                new Case("unchanged_pin_403_is_terminal", ClientTest::unchangedPin403IsTerminal),
                 new Case("worked_flow_one_host", ClientTest::workedFlowOneHost),
                 new Case("worked_flow_two_peered_hosts", ClientTest::workedFlowTwoPeeredHosts));
         List<String> wanted = List.of(args);
@@ -2383,6 +2384,40 @@ final class ClientTest {
         eq(countSince(proxy, mark, "/push"), 2L, "one push and one retry");
         eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
         eq(d.bob().tipHash(), d.y(), "the re-pull moved bob's pin to Y");
+    }
+
+    /**
+     * SPEC 6.4, 10.4: a {@code 403} whose re-pull leaves the pin unchanged is terminal. A member pinned on the
+     * true winning tip meets {@code 403 forbidden} on its push, re-pulls from seq 0, finds the same tip, and
+     * returns the {@code 403} without a retry.
+     */
+    private static void unchangedPin403IsTerminal(T t) throws Exception {
+        Node a = t.node();
+        Proxy proxy = t.proxy(a);
+        Vault owner = t.ownerVault(proxy.url()).vault();
+        String repo = owner.repoId();
+        Vault bob = t.inviteMember(owner, proxy.url());
+        await(bob.pull());
+        byte[] tip = owner.tipHash();
+        eq(tipHash(a, repo), Optional.of(b64(tip)), "the host's tip is the owner's tip");
+        eq(bob.tipHash(), tip, "bob is pinned on the winning tip");
+        List<String> heads = ids(a.heads(repo));
+
+        proxy.deny("/push", 403, "forbidden", 3);
+        int mark = proxy.requestCount();
+        String by = bob.member().id();
+        Vault.ClientException e = thrown(() -> await(bob.write((p, hlc) -> {
+            Map<String, Object> s = hlc.tick(Vault.nowMs(), by);
+            Vault.setField(p, U1, "username", "bob-after", s);
+        })));
+        eq(e.kind(), Vault.ClientException.Kind.HOST, "a host error");
+        eq(e.status(), 403, "the 403 is returned");
+        eq(e.code(), Optional.of("forbidden"), "forbidden");
+        eq(countSince(proxy, mark, "/push"), 1L, "one push, no retry");
+        eq(fullPullsSince(proxy, mark), 1L, "one re-pull from seq 0");
+        eq(bob.tipHash(), tip, "the re-pull left bob's pin unchanged");
+        eq(tipHash(a, repo), Optional.of(b64(tip)), "the host's tip is unchanged");
+        eq(ids(a.heads(repo)), heads, "nothing was pushed");
     }
 
     // ─── The worked flow ────────────────────────────────────────────────────────────────────
