@@ -60,7 +60,8 @@ hand-written assembly of the SPEC layout (raw byte concatenation, independent of
 - [`acceptance.json`](acceptance.json), the host rules of SPEC §6, §7, §8.3, and §8.4 as replayable
   scenarios. The Rust and Java rule engines run this file unchanged. Its expectations are written by hand
   from the SPEC rule each scenario's `description` cites; the signed items are built from the
-  `manifest.json` seeds.
+  `manifest.json` seeds, plus one extra data key for epoch 2 (32 bytes of `0x44`) that only the
+  `content-epoch-jump-2` scenario uses.
 
   ```
   { description, scenarios: [ {

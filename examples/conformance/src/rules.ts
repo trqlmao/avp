@@ -309,9 +309,20 @@ export class RepoView {
 
   private restore(snap: Store): void {
     // Verified headers stay known: ancestry uses them whether or not the commit was accepted (SPEC 7.3).
+    // The re-check that ran inside the failed operation was reverted with it, so run it again here
+    // over the restored state for any header the operation learned.
     const headers = this.st.headers;
     this.st = snap;
-    for (const [k, c] of headers) this.st.headers.set(k, c);
+    let learned = false;
+    for (const [k, c] of headers) {
+      if (this.st.headers.has(k)) continue;
+      this.st.headers.set(k, c);
+      learned = true;
+    }
+    if (learned) {
+      this.recheckCutoffs();
+      this.propagate();
+    }
   }
 
   private tipRec(): StateRec | undefined {
@@ -372,15 +383,17 @@ export class RepoView {
       // (SPEC 12.3). A retained losing state offered again is evaluated again below.
       return this.isWinning(known) && via === "offer" && commit === undefined ? OK : fail("manifest_conflict");
     }
-    // Rule 5, content.
-    if (!contentOk(s, prev.m.state)) return fail("bad_request");
-
+    const content = contentOk(s, prev.m.state);
     if (via === "push" && prev !== this.tipRec()) {
-      // A client publish is accepted only at tip + 1 linked to the tip (SPEC 6.3); the tie rule is for
-      // states that arrive by replication. A verifying state is still kept as a losing state (SPEC 6.5).
-      this.retainLosing(rec, prev, commit);
+      // Still rule 4: a client publish is accepted only at tip + 1 linked to the tip (SPEC 6.3), and it
+      // fails here before the content rule; the tie rule is for states that arrive by replication. A
+      // state that also passes rule 5 is kept as a verified losing state (SPEC 6.5).
+      if (content) this.retainLosing(rec, prev, commit);
       return fail("manifest_conflict");
     }
+    // Rule 5, content.
+    if (!content) return fail("bad_request");
+
     if (!this.isWinning(prev)) {
       // Extends a losing chain: verified and retained, never adopted (SPEC 6.5).
       this.retainLosing(rec, prev, commit);
@@ -403,9 +416,21 @@ export class RepoView {
     if (!raising || commit === undefined || !this.rotationShapeOk(rec, commit) || !this.headerOk(commit)) return;
     // The rotation commit of a losing epoch-raising state is kept with it, held (SPEC 8.3).
     const id = key(commit.commitId);
-    this.st.headers.set(id, commit);
     if (!this.st.commits.has(id)) this.st.commits.set(id, { c: commit, status: "held" });
     this.st.rotation.set(rec.key, id);
+    this.recordHeader(commit);
+  }
+
+  /**
+   * Records a verified commit header. A new one can complete the ancestry an undecided cutoff was
+   * waiting for (SPEC 7.3), so every path that learns a header re-runs the cutoff re-check.
+   */
+  private recordHeader(c: Commit): void {
+    const id = key(c.commitId);
+    if (this.st.headers.has(id)) return;
+    this.st.headers.set(id, c);
+    this.recheckCutoffs();
+    this.propagate();
   }
 
   /** SPEC 8.2 and 8.3: the commit published with a genesis or epoch-raising state. */
@@ -478,12 +503,7 @@ export class RepoView {
     if (tip === undefined) return fail("missing_parents");
     if (c.repoId !== tip.m.state.repoId || !this.headerOk(c)) return fail("bad_request");
     const id = key(c.commitId);
-    if (!this.st.headers.has(id)) {
-      this.st.headers.set(id, c);
-      // A new verified header can complete the ancestry an undecided cutoff was waiting for (SPEC 7.3).
-      this.recheckCutoffs();
-      this.propagate();
-    }
+    this.recordHeader(c);
 
     // Caller check on the client routes: the caller is the author (the owner for a carried commit)
     // and is a member of the tip.
@@ -640,8 +660,30 @@ export class RepoView {
       const cut = this.cutoff(r.c, tip);
       if (cut === "fail") this.setStatus(id, "rejected");
       else if (cut === "undecided" && r.status === "accepted") this.setStatus(id, "pending");
-      else if (cut === "ok" && r.status === "pending") this.setStatus(id, "accepted");
+      else if (cut === "ok" && r.status === "pending") this.setStatus(id, this.decidePending(r.c));
     }
+  }
+
+  /**
+   * The status of a pending commit whose own cutoff is now decided as covered. A commit citing a
+   * verified losing state goes through the rest of the SPEC 6.5 re-check (winning state at its seq,
+   * drop test, hold), as at its first classification; then its parents decide as in SPEC 7.4.
+   */
+  private decidePending(c: Commit): Status {
+    const tip = this.tipRec() as StateRec;
+    let status: Status = "accepted";
+    const bound = this.st.states.get(key(c.manifestHash));
+    if (bound !== undefined && !this.isWinning(bound)) {
+      const v = this.losingVerdict(c, tip);
+      if (v === "undecided") return "pending";
+      if (v === "rejected") return "rejected";
+      status = v;
+    }
+    const parents = c.parents.map((p) => this.st.commits.get(key(p))?.status);
+    if (parents.includes("rejected")) return "rejected";
+    if (parents.includes("pending") || parents.includes(undefined)) return "pending";
+    if (parents.includes("held")) return "held";
+    return status;
   }
 
   /**
@@ -689,9 +731,12 @@ export class RepoView {
           this.setStatus(id, "pending");
           changed = true;
         } else if (r.status === "pending" && !parents.includes("pending") && this.cutoffOk(r.c)) {
-          // Waiting only on its parent: accepted again once the parent is.
-          this.setStatus(id, parents.includes("held") ? "held" : "accepted");
-          changed = true;
+          // Waiting only on its parent: decided again, with the full re-check, once the parent is.
+          const next = this.decidePending(r.c);
+          if (next !== "pending") {
+            this.setStatus(id, next);
+            changed = true;
+          }
         }
       }
     }
