@@ -63,6 +63,21 @@ serves). A and B peer with each other; C peers with A and B (and they with C) bu
 repository's `hosts`. Without `--c` the `unlisted-host-refused` scenario is skipped with a printed note.
 Exit code is `0` only if every check passes; a failure names its scenario.
 
+[`run-hosts.sh`](run-hosts.sh) does that setup for the reference hosts. It builds and starts one to three
+of them (`rust` or `java`) on `http://127.0.0.1:19201`, `:19202` and `:19203` with fixed distinct seeds,
+every host peered with the others, waits for each to serve `/.well-known/avp`, runs a command from the
+repository root, and stops the hosts. CI and the Taskfile use it:
+
+```sh
+bash harness/run-hosts.sh rust java java -- bun harness/multihost.ts \
+  --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
+bash harness/run-hosts.sh java -- bun harness/conformance.ts --server http://127.0.0.1:19201
+```
+
+The command also gets `AVP_SERVER_URL` (host A) and, when started, `AVP_SERVER_URL_B` and
+`AVP_SERVER_URL_C`, the variables the reference clients read. `JAVA_HOME` picks the JDK; host logs go
+to `AVP_HOSTS_LOG_DIR` (default a new temporary directory) and are printed when a run fails.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `--converge-ms N` | `15000` | How long a convergence wait polls (every 250 ms). |
