@@ -1331,6 +1331,8 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 - **Tokens and addresses**: every token of §11 (with the acceptance and leave signatures, the link
   confirmation code, and the owner and member fingerprints), `avp://` locators, and the challenge
   transcript `challengeMessage` of §3.3 with its signature (`federation.json`).
+- **gRPC encodings** (`grpc.json`, §10.3): the proto3 bytes of one request and one reply body of every
+  `avp.Vault` RPC in the canonical encoding the file states, and the full-form JSON each decodes to.
 - **Negative cases**: `negative.json`, valid constructions with one mutation each that a conformant
   implementation MUST reject, including a manifest with a bad signature or a wrong previous hash, a commit
   whose id does not recompute or whose author signed another id, a payload whose AAD v2 has a swapped parent,
@@ -1342,9 +1344,11 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
   non-canonical public key, and a non-canonical `S`. Reproducing the positive vectors is necessary but not
   sufficient.
 
-Every committed vector is reproducible from documented seeds by [`vectors/generate.ts`](vectors/generate.ts)
-(`--check` re-derives and asserts them; it also owns `negative.json`). See
-[`vectors/README.md`](vectors/README.md).
+Every committed vector except `grpc.json` is reproducible from documented seeds by
+[`vectors/generate.ts`](vectors/generate.ts) (`--check` re-derives and asserts them; it also owns
+`negative.json`). `grpc.json` is reproducible by
+[`examples/conformance/scripts/grpc-vectors.ts`](examples/conformance/scripts/grpc-vectors.ts), whose
+`--check` the conformance runner runs. See [`vectors/README.md`](vectors/README.md).
 
 A **host** additionally proves conformance by passing the black-box harness in [`harness/`](harness/), which
 drives the client wire contract (the auth failure modes of §3.3, including a signature over the raw nonce

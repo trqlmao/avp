@@ -227,7 +227,28 @@ byte-for-byte as their third source.
   accepts a tampered input is not conformant. Wire base64 strictness is implementation-specific and is
   intentionally not tested here.
 
+## gRPC encoding vectors (generated)
+
+- [`grpc.json`](grpc.json), the gRPC client profile (SPEC §10.3): one case per request and reply message
+  of the `avp.Vault` service. Each case has `message` (the fully qualified proto name, for example
+  `avp.PushRequest`), `json` (the full form: every scalar field present with defaults included, repeated
+  fields as arrays, absent message fields omitted, in the camelCase names of the HTTP/JSON profile), and
+  `protoHex`, the proto3 binary bytes in the **canonical encoding**: fields in ascending field number,
+  scalars at their proto3 default and empty repeated fields omitted, absent message fields omitted, no
+  packed encoding (no packable fields exist). The bodies are the worked examples in
+  [`../examples`](../examples) and values from `manifest.json`, `commit.json`, and `federation.json`;
+  nothing is random. A checker decodes `json` into its message type, encodes it, and compares the bytes,
+  then decodes `protoHex` and compares the full form. Proto3 encoders differ on whether they write an
+  explicitly set default (protobufjs does), so build the message from the minimal form (defaults and empty
+  arrays dropped) when your encoder writes them. The Node runner (protobufjs) and the Rust reference host
+  (prost) reproduce every case independently.
+
 ## Regenerating the vectors
+
+`grpc.json` is not owned by `generate.ts`. It is derived from the proto and the files above by
+[`../examples/conformance/scripts/grpc-vectors.ts`](../examples/conformance/scripts/grpc-vectors.ts):
+`--write` regenerates it and `--check` asserts the committed file is current. The conformance runner's
+`grpc.test.ts` asserts the same, so `bun run test` fails on drift.
 
 [`generate.ts`](generate.ts) is the reproducible derivation of these files. It reuses the vector-tested
 reference crypto so it cannot drift from the runner.
