@@ -1,6 +1,6 @@
 # AVP conformance harness
 
-A black-box conformance suite for the AVP 0.5 HTTP/JSON profile. Point it at one running AVP host and it
+A black-box conformance suite for the AVP 0.5 HTTP/JSON and gRPC client profiles. Point it at one running AVP host and it
 drives the client wire contract end to end, asserting the normative MUSTs with the exact status and
 `code` of the SPEC 10.4 error table instead of just printing a transcript. It is the executable companion
 to the static [`../vectors/`](../vectors/): the vectors prove your crypto reproduces known-good bytes; this
@@ -16,6 +16,24 @@ AVP_SERVER_URL=http://127.0.0.1:19101 bun conformance.ts
 Exit code is `0` only if every check passes; each check prints `PASS`/`FAIL` with its SPEC section. The
 harness polls `GET /.well-known/avp` until the host answers, so it can be started together with the host.
 
+## Profiles
+
+`--profile http-json` (the default) drives the HTTP/JSON profile (SPEC §10.2). `--profile grpc` drives
+the same suite over the gRPC client profile (SPEC §10.3): `--server` is then `grpc://host:port`
+(plaintext) or `grpcs://host:port` (TLS), with `AVP_GRPC_URL` as the fallback. [`transport.ts`](transport.ts)
+maps each client route to its `avp.Vault` RPC (a pull gains `repoId` from the path), loads
+[`../proto/avp.proto`](../proto/avp.proto) at runtime, and turns a refused call back into the SPEC 10.4
+error object (the status message is the `code`, `detail` the `avp-error-detail` trailer); every
+expected error then also asserts the gRPC status of the §10.3 table. Discovery runs on `GetHostInfo`
+and must list `grpc`. The checks of HTTP framing have no gRPC form, because the repository is the
+body's, and print `SKIP (http-json only)`: the bad percent escape, the non-JSON body, and a push or
+leave naming another repository than the path. The gRPC profile needs `bun install` here
+(`@grpc/grpc-js`, `@grpc/proto-loader`); the HTTP/JSON profile still runs without an install.
+
+```sh
+bash harness/run-hosts.sh rust -- bun harness/conformance.ts --profile grpc --server grpc://127.0.0.1:19211
+```
+
 | Option | Default | Meaning |
 |---|---|---|
 | `--challenge-ttl-ms N` | `120000` | The host's challenge nonce lifetime (SPEC 3.3 RECOMMENDED maximum). The expired-nonce check redeems a nonce issued at start once this much time (plus 3 s) has passed, so a run takes about two minutes. |
@@ -27,7 +45,7 @@ harness polls `GET /.well-known/avp` until the host answers, so it can be starte
 
 | SPEC | Checks |
 |---|---|
-| §11.7 Discovery | `version` is `0.5`, `profiles` lists `http-json`, `hostKey` is a 32-byte key; every later host match uses that key. |
+| §11.7 Discovery | `version` is `0.5`, `profiles` lists `http-json` (`grpc` under `--profile grpc`, on `GetHostInfo`), `hostKey` is a 32-byte key; every later host match uses that key. |
 | §2, §3.3 Auth | a challenge returns a nonce of at least 32 bytes; a signature over the `avp/challenge/v1` transcript of the host key, the key, and the raw nonce yields a token; `401 unauthorized` for a reused nonce, an expired nonce, a nonce issued for another key, a nonce never issued, a signature by another key, a transcript over the base64 text, a signature over the raw nonce alone (the old construction), and a transcript built with another host key; strict Ed25519: no token for a forged signature under the small-order identity key or the non-canonical key `y = p + 1`, for an honest key's signature with `R` = identity, or for a valid signature with `L` added to `S`; `401` for a missing or unknown bearer token. |
 | §6.1, §6.2, §8.2 createRepo | `403 forbidden` when the caller is not the genesis `ownerKey`; `400 bad_request` for a `repoId` that does not recompute, a bad owner signature, a genesis with a second member, and a genesis at `keyEpoch` 1; `403 not_hosted` when `hosts` does not list the host; `400` for a first commit whose id does not recompute, after which the valid create still succeeds (nothing stored); the valid create returns the genesis it was sent; a repeat is `409 duplicate_repo`. |
 | §10.1, §10.4 Routing | `404 not_found` for pull and push on a repository the host does not hold; a bad percent escape in the path is `400` (status only); a body that is not JSON is `400 bad_request`. |
@@ -66,12 +84,18 @@ Exit code is `0` only if every check passes; a failure names its scenario.
 [`run-hosts.sh`](run-hosts.sh) does that setup for the reference hosts. It builds and starts one to three
 of them (`rust` or `java`) on `http://127.0.0.1:19201`, `:19202` and `:19203` with fixed distinct seeds,
 every host peered with the others, waits for each to serve `/.well-known/avp`, runs a command from the
-repository root, and stops the hosts. CI and the Taskfile use it:
+repository root, and stops the hosts. Every `rust` host also serves the gRPC client profile on
+`grpc://127.0.0.1:19211`, `:19212` and `:19213` (`AVP_GRPC_PORT`); the script waits for its
+`grpc on 127.0.0.1:<port>` startup line and exports `AVP_GRPC_URL`, `AVP_GRPC_URL_B`, and
+`AVP_GRPC_URL_C` for the rust hosts only (the java host is HTTP/JSON only). CI and the Taskfile use it:
 
 ```sh
 bash harness/run-hosts.sh rust java java -- bun harness/multihost.ts \
   --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
 bash harness/run-hosts.sh java -- bun harness/conformance.ts --server http://127.0.0.1:19201
+bash harness/run-hosts.sh rust rust rust -- bun harness/multihost.ts --profile grpc \
+  --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203 \
+  --a-grpc grpc://127.0.0.1:19211 --b-grpc grpc://127.0.0.1:19212 --c-grpc grpc://127.0.0.1:19213
 ```
 
 The command also gets `AVP_SERVER_URL` (host A) and, when started, `AVP_SERVER_URL_B` and
@@ -80,6 +104,7 @@ to `AVP_HOSTS_LOG_DIR` (default a new temporary directory) and are printed when 
 
 | Option | Default | Meaning |
 |---|---|---|
+| `--profile P` | `http-json` | `grpc` sends every client operation to `--a-grpc`, `--b-grpc`, `--c-grpc` (`grpc://host:port`; env `AVP_GRPC_URL`, `AVP_GRPC_URL_B`, `AVP_GRPC_URL_C`); `--a`, `--b`, `--c` stay HTTP for the test control and the host routes, which are not client operations. Each host must list `grpc` and answer the same host key on both fronts. |
 | `--converge-ms N` | `15000` | How long a convergence wait polls (every 250 ms). |
 | `--quiet-ms N` | `6000` | How long a "nothing arrives" check waits: one 5 s sweep (SPEC §9.3) plus a margin. |
 | `--startup-timeout-ms N` | `30000` | How long to wait for each host's discovery. |
@@ -108,9 +133,10 @@ the vector-tested conformance runner in [`../examples/conformance/src`](../examp
 the CE writer, manifest and commit constructions, AAD v2, the wrap scheme, BIP39 owner keys, and strict
 Ed25519. Every body is built from real keys and real signatures, so the harness itself stays a thin wire
 driver; [`common.ts`](common.ts) holds the parties and constructions both harnesses share. It runs
-under [Bun](https://bun.sh) with no install step (only Node's built-in `crypto` and
-global `fetch`). `bun install && bun run typecheck` runs `tsc` over it.
+under [Bun](https://bun.sh) with no install step for the HTTP/JSON profile (only Node's built-in
+`crypto` and global `fetch`); the gRPC profile imports its libraries on first use. `bun install && bun
+run typecheck` runs `tsc` over it.
 
 A pass certifies the surface this harness covers; it supplements, and does not replace, reproducing the
 [`../vectors/`](../vectors/) in your implementation language. CI runs it against the Rust and Java
-reference hosts (`.github/workflows/conformance.yml`).
+reference hosts, and over the gRPC profile against the Rust host (`.github/workflows/conformance.yml`).

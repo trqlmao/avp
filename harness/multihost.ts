@@ -25,6 +25,11 @@
  *
  *   bun multihost.ts --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
  *
+ * With `--profile grpc` (default `http-json`) every client operation goes over the gRPC client
+ * profile (SPEC 10.3) to `--a-grpc`, `--b-grpc`, and `--c-grpc` (`grpc://host:port`; env
+ * `AVP_GRPC_URL`, `AVP_GRPC_URL_B`, `AVP_GRPC_URL_C`). `--a`, `--b`, and `--c` stay HTTP: the test
+ * control and the host routes are not client operations.
+ *
  * Options: `--converge-ms N` (how long a convergence wait polls, default 15000), `--quiet-ms N` (how
  * long a "nothing arrives" check waits, default 6000: one SPEC 9.3 sweep interval of 5 s plus a
  * margin), `--startup-timeout-ms N` (default 30000), `--request-timeout-ms N` (default 30000).
@@ -70,6 +75,7 @@ import {
   wireM,
   type Party,
 } from "./common.ts";
+import { GRPC_CODE, grpcTransport, httpTransport, profileFlag, type Resp, type Transport } from "./transport.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────────────
 
@@ -90,6 +96,10 @@ const trim = (u: string | undefined) => (u === undefined ? undefined : u.replace
 const URL_A = trim(flag("--a"));
 const URL_B = trim(flag("--b"));
 const URL_C = trim(flag("--c"));
+const PROFILE = profileFlag(process.argv);
+const GRPC_A = trim(flag("--a-grpc") ?? process.env.AVP_GRPC_URL);
+const GRPC_B = trim(flag("--b-grpc") ?? process.env.AVP_GRPC_URL_B);
+const GRPC_C = trim(flag("--c-grpc") ?? process.env.AVP_GRPC_URL_C);
 /** The brief: convergence waits poll up to 15 s. */
 const CONVERGE_MS = numberFlag("--converge-ms", 15_000);
 /** One SPEC 9.3 sweep interval (5 s) plus a margin: long enough for a host that would send, to send. */
@@ -133,38 +143,34 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface Host {
   name: string;
+  /** The HTTP base URL: the test control and the host routes, and every call under http-json. */
   url: string;
   key: Buffer;
-}
-
-interface Resp {
-  status: number;
-  body: any;
-  text: string;
+  /** The client operations' transport: HTTP/JSON at `url`, or gRPC at the host's gRPC target. */
+  client: Transport;
 }
 
 /** Every response text a host sent, scanned for the plaintext marker at the end (SPEC 13). */
 const seen: string[] = [];
 
-async function req(h: Host | string, method: string, path: string, body?: unknown, token?: string): Promise<Resp> {
-  const base = typeof h === "string" ? h : h.url;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${base}${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  const text = await res.text();
-  seen.push(text);
-  let parsed: any = undefined;
-  try {
-    parsed = text ? JSON.parse(text) : undefined;
-  } catch {
-    parsed = undefined;
+const httpByUrl = new Map<string, Transport>();
+const httpAt = (url: string): Transport => {
+  let t = httpByUrl.get(url);
+  if (t === undefined) {
+    t = httpTransport(url, REQUEST_TIMEOUT_MS);
+    httpByUrl.set(url, t);
   }
-  return { status: res.status, body: parsed, text };
+  return t;
+};
+
+/** The test control and the host routes are not client operations: they always go over HTTP. */
+const httpOnlyPath = (path: string) => path.startsWith("/v1/test/") || path.startsWith("/v1/host/");
+
+async function req(h: Host | Transport, method: string, path: string, body?: unknown, token?: string): Promise<Resp> {
+  const t = "client" in h ? (httpOnlyPath(path) ? httpAt(h.url) : h.client) : h;
+  const r = method === "GET" && path === "/.well-known/avp" ? await t.discovery() : await t.req(method, path, body, token);
+  seen.push(r.text);
+  return r;
 }
 
 const repoPath = (repoId: string, op: string) => `/v1/repos/${encodeURIComponent(repoId)}/${op}`;
@@ -172,16 +178,18 @@ const show = (r: Resp) => `got ${r.status} ${r.text.slice(0, 200)}`;
 
 /** Asserts a SPEC 10.4 error: the exact status and machine `code`. */
 function expectError(section: string, name: string, r: Resp, status: number, code: string): void {
-  const ok = r.status === status && typeof r.body?.error === "string" && r.body?.code === code;
-  check(section, name, ok, `want ${status} ${code}, ${show(r)}`);
+  const grpcOk = PROFILE !== "grpc" || r.grpcCode === GRPC_CODE[code];
+  const ok = r.status === status && typeof r.body?.error === "string" && r.body?.code === code && grpcOk;
+  const grpcWant = PROFILE === "grpc" ? ` (gRPC status ${GRPC_CODE[code]}, got ${r.grpcCode})` : "";
+  check(section, name, ok, `want ${status} ${code}${grpcWant}, ${show(r)}`);
 }
 
-async function waitForHost(url: string): Promise<Resp> {
+async function waitForHost(url: string, client: Transport): Promise<Resp> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   let last = "";
   while (Date.now() < deadline) {
     try {
-      const r = await req(url, "GET", "/.well-known/avp");
+      const r = await req(client, "GET", "/.well-known/avp");
       if (r.status === 200) return r;
       last = show(r);
     } catch (err) {
@@ -192,11 +200,26 @@ async function waitForHost(url: string): Promise<Resp> {
   throw new Error(`no host answered GET ${url}/.well-known/avp within ${STARTUP_TIMEOUT_MS} ms (${last})`);
 }
 
-async function discover(name: string, url: string): Promise<Host> {
-  const d = await waitForHost(url);
+async function discover(name: string, url: string, grpcTarget: string | undefined): Promise<Host> {
+  let client = httpAt(url);
+  if (PROFILE === "grpc") {
+    if (grpcTarget === undefined) throw new Error(`--profile grpc needs --${name.toLowerCase()}-grpc for host ${name}`);
+    client = await grpcTransport(grpcTarget, REQUEST_TIMEOUT_MS);
+  }
+  const where = PROFILE === "grpc" ? grpcTarget : url;
+  const d = await waitForHost(where ?? url, client);
   const key = Buffer.from(String(d.body?.hostKey ?? ""), "base64");
-  if (d.body?.version !== "0.5" || key.length !== 32) throw new Error(`${name} (${url}) is not an AVP 0.5 host: ${show(d)}`);
-  return { name, url, key };
+  if (d.body?.version !== "0.5" || key.length !== 32) throw new Error(`${name} (${where}) is not an AVP 0.5 host: ${show(d)}`);
+  const profiles: unknown = d.body?.profiles;
+  if (PROFILE === "grpc" && !(Array.isArray(profiles) && profiles.includes("grpc"))) {
+    throw new Error(`${name} (${where}) does not list the grpc profile: ${show(d)}`);
+  }
+  // The test control goes to the HTTP front, so both fronts must be one host: the same host key.
+  if (PROFILE === "grpc") {
+    const http = await waitForHost(url, httpAt(url));
+    if (http.body?.hostKey !== d.body?.hostKey) throw new Error(`${name}: ${url} and ${where} are different hosts`);
+  }
+  return { name, url, key, client };
 }
 
 /** The test control of SPEC 9.3: pause or resume all host traffic of `h`. */
@@ -591,12 +614,12 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  console.log(`AVP 0.5 multi-host harness → A ${URL_A}, B ${URL_B}${URL_C ? `, C ${URL_C}` : ""}\n`);
+  console.log(`AVP 0.5 multi-host harness (${PROFILE}) → A ${URL_A}, B ${URL_B}${URL_C ? `, C ${URL_C}` : ""}\n`);
   let world: World;
   try {
-    const a = await discover("A", URL_A);
-    const b = await discover("B", URL_B);
-    const c = URL_C === undefined ? undefined : await discover("C", URL_C);
+    const a = await discover("A", URL_A, GRPC_A);
+    const b = await discover("B", URL_B, GRPC_B);
+    const c = URL_C === undefined ? undefined : await discover("C", URL_C, GRPC_C);
     const keys = [a, b, c].filter((h): h is Host => h !== undefined).map((h) => b64(h.key));
     if (new Set(keys).size !== keys.length) throw new Error("the hosts must have distinct host keys (distinct AVP_HOST_SEED)");
     world = { a, b, c, alice: newOwner("alice"), bob: newParty("bob"), carol: newParty("carol") };
@@ -639,6 +662,8 @@ async function main(): Promise<void> {
   current = "zero-knowledge";
   console.log(`== ${current}`);
   check("§13", `the plaintext marker appears in none of the ${seen.length} responses`, !seen.some((t) => t.includes(MARKER)));
+
+  for (const h of [world.a, world.b, world.c]) h?.client.close();
 
   const passed = results.filter((r) => r.ok).length;
   const failedScenarios = [...new Set(results.filter((r) => !r.ok).map((r) => r.scenario))];

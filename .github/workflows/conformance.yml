@@ -3,8 +3,10 @@ name: conformance
 # Executable conformance:
 #   - vectors: reproduce vectors/ and check schema/example/index/openapi consistency (examples/conformance)
 #   - openapi: lint openapi.yaml with Spectral
-#   - black-box: drive the full wire contract against the Rust and Java reference hosts (harness/conformance.ts)
-#   - multihost: replication and convergence across three hosts per language pairing (harness/multihost.ts)
+#   - black-box: drive the full wire contract against the Rust and Java reference hosts (harness/conformance.ts),
+#     and over the gRPC client profile (SPEC 10.3) against the Rust host
+#   - multihost: replication and convergence across three hosts per language pairing (harness/multihost.ts),
+#     and over the gRPC client profile on three Rust hosts
 #
 # Both harness jobs start the hosts with harness/run-hosts.sh (build, start on 127.0.0.1, poll
 # /.well-known/avp, stop), the same launcher the Taskfile uses.
@@ -62,21 +64,30 @@ jobs:
         run: bunx @stoplight/spectral-cli@6 lint openapi.yaml --ruleset .spectral.yaml --fail-severity error
 
   black-box:
-    name: black-box (${{ matrix.server }} host)
+    name: black-box (${{ matrix.label }})
     runs-on: ubuntu-latest
     # Build plus one harness run (about 2 min: it waits out the 120 s challenge TTL).
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        server: [rust, java]
+        # The gRPC client profile (SPEC 10.3) is served by the Rust host only (AVP_GRPC_PORT).
+        include:
+          - { label: rust host, server: rust, profile: http-json, target: "http://127.0.0.1:19201" }
+          - { label: java host, server: java, profile: http-json, target: "http://127.0.0.1:19201" }
+          - { label: rust (grpc), server: rust, profile: grpc, target: "grpc://127.0.0.1:19211" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The harness runs under Bun (no install: only node:crypto + global fetch).
+      # The harness runs under Bun. The HTTP/JSON profile needs no install (node:crypto + global
+      # fetch); the gRPC profile loads @grpc/grpc-js and @grpc/proto-loader from harness/.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.10"
+
+      - name: Install the gRPC harness dependencies
+        if: matrix.profile == 'grpc'
+        run: bun install --frozen-lockfile --cwd harness
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05
         if: matrix.server == 'rust'
@@ -89,10 +100,12 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Run the harness against the ${{ matrix.server }} reference host
+      - name: Run the harness against the ${{ matrix.label }} reference host
         env:
           SERVER: ${{ matrix.server }}
-        run: bash harness/run-hosts.sh "$SERVER" -- bun harness/conformance.ts --server http://127.0.0.1:19201
+          PROFILE: ${{ matrix.profile }}
+          TARGET: ${{ matrix.target }}
+        run: bash harness/run-hosts.sh "$SERVER" -- bun harness/conformance.ts --profile "$PROFILE" --server "$TARGET"
 
   multihost:
     name: multihost (${{ matrix.pair }})
@@ -103,13 +116,18 @@ jobs:
       fail-fast: false
       matrix:
         # Hosts A, B, C: rust-rust is rust x3, java-java is java x3, rust-java is A rust, B and C java.
-        pair: [rust-rust, java-java, rust-java]
+        # rust rust rust (grpc) drives every client operation over the gRPC client profile.
+        pair: [rust-rust, java-java, rust-java, "rust rust rust (grpc)"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.10"
+
+      - name: Install the gRPC harness dependencies
+        if: contains(matrix.pair, 'grpc')
+        run: bun install --frozen-lockfile --cwd harness
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05
         if: contains(matrix.pair, 'rust')
@@ -126,10 +144,16 @@ jobs:
         env:
           PAIR: ${{ matrix.pair }}
         run: |
+          GRPC=""
           case "$PAIR" in
             rust-rust) KINDS="rust rust rust" ;;
             java-java) KINDS="java java java" ;;
             rust-java) KINDS="rust java java" ;;
+            "rust rust rust (grpc)")
+              KINDS="rust rust rust"
+              GRPC="--profile grpc --a-grpc grpc://127.0.0.1:19211 --b-grpc grpc://127.0.0.1:19212 --c-grpc grpc://127.0.0.1:19213"
+              ;;
             *) echo "unknown pair $PAIR"; exit 1 ;;
           esac
-          bash harness/run-hosts.sh $KINDS -- bun harness/multihost.ts             --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
+          bash harness/run-hosts.sh $KINDS -- bun harness/multihost.ts $GRPC \
+            --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203

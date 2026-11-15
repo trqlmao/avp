@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["common.ts", "conformance.ts", "crypto.ts", "multihost.ts"]
+  "include": ["common.ts", "conformance.ts", "crypto.ts", "multihost.ts", "transport.ts"]
 }
