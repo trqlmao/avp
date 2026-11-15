@@ -3,7 +3,8 @@
 An in-memory reference host for [AVP 0.5](../../../SPEC.md), HTTP/JSON profile. It serves the
 client-facing API of SPEC section 10 (host-issued authentication, `createRepo`, `pull`, `push`,
 `publishManifest`, `leave`, `prepareJoin`, and discovery) and replicates repositories with its peer
-hosts over the reference host-to-host profile of SPEC section 9.3 (signed HTTP/JSON).
+hosts over the reference host-to-host profile of SPEC section 9.3 (signed HTTP/JSON). With
+`AVP_GRPC_PORT` set it also serves the gRPC client profile of SPEC section 10.3 (below).
 
 The host is a thin HTTP/JSON layer over the shared [`avp`](../avp/) crate. The crate's
 `rules::RepoView` runs every manifest chain and commit rule (SPEC sections 6 and 7); the host only
@@ -27,11 +28,12 @@ PORT=9000 cargo run                         # another port
 AVP_BIND=127.0.0.1 cargo run                # loopback only
 AVP_HOST_SEED=<64 hex digits> cargo run     # a fixed host key
 AVP_PEERS="<base64 key>@http://b.vault.example:8787" cargo run   # peer with another host
+AVP_BIND=127.0.0.1 AVP_GRPC_PORT=8788 cargo run   # also serve the gRPC client profile on :8788
 ```
 
 ```sh
 cargo build --release   # optimized binary at target/release/avp-reference-server
-cargo test              # the API and replication suites (tests/api.rs, tests/replication.rs)
+cargo test              # the API, replication, and gRPC suites (tests/api.rs, tests/replication.rs, tests/grpc.rs)
 ```
 
 | Variable | Meaning |
@@ -40,9 +42,10 @@ cargo test              # the API and replication suites (tests/api.rs, tests/re
 | `AVP_BIND` | Listen address, an IPv4 or IPv6 literal. Default `0.0.0.0` (every interface, as containers and CI need). Set `127.0.0.1` to listen on loopback only. |
 | `AVP_HOST_SEED` | The 32-byte Ed25519 seed of the host key, as 64 hex digits. Without it the host key is random for each start. |
 | `AVP_PEERS` | The static peer list, `<base64 hostKey>@<http base url>,...` (SPEC 9.3). Only these keys may call the host routes. Unset or empty means no peers. Plain `http://` only. |
+| `AVP_GRPC_PORT` | Also serve the gRPC client profile (SPEC 10.3) on `AVP_BIND:AVP_GRPC_PORT`. Unset: off. With it on, discovery lists `profiles: ["http-json", "grpc"]` and the binary prints `grpc on <addr>` once the listener is bound. |
 | `AVP_TEST_CONTROL` | `1` enables `POST /v1/test/replication` (below). Never set it in production; without it the route does not exist (`404`). |
 
-A bad `PORT`, `AVP_BIND`, `AVP_HOST_SEED`, or `AVP_PEERS` value exits with code 1 and a message naming it.
+A bad `PORT`, `AVP_GRPC_PORT`, `AVP_BIND`, `AVP_HOST_SEED`, or `AVP_PEERS` value exits with code 1 and a message naming it.
 
 The binary prints the bound address and the host key (base64) at start. A client checks that key
 against `GET /.well-known/avp` and against the manifest's `hosts` (SPEC 3.3, 11.7).
@@ -56,7 +59,7 @@ Bodies are JSON with the proto field names in `camelCase` and binary values as b
 
 | Route | Body and response | Caller must be |
 |---|---|---|
-| `GET /.well-known/avp` | `{ version: "0.5", profiles: ["http-json"], hostKey }` | anyone |
+| `GET /.well-known/avp` | `{ version: "0.5", profiles: ["http-json"], hostKey }` (`["http-json", "grpc"]` with `AVP_GRPC_PORT`) | anyone |
 | `POST /api/auth/keypair/challenge` | `{ ed25519PublicKey }` to `{ nonce }` | anyone |
 | `POST /api/auth/keypair/token` | `{ ed25519PublicKey, nonce, signature }` to `{ token, expiresAt }` | anyone |
 | `POST /v1/repos` | `{ manifest, commit }` to `SignedManifest` | the genesis `ownerKey` |
@@ -255,6 +258,22 @@ the [Rust reference client](../client/); the integration tests in [`tests/api.rs
 curl -s localhost:8787/.well-known/avp
 ```
 
+## gRPC client profile (SPEC 10.3)
+
+With `AVP_GRPC_PORT` the host serves the `avp.Vault` service of
+[`proto/avp.proto`](../../../proto/avp.proto) (plaintext HTTP/2, no TLS) over the same state as the
+HTTP routes. Each RPC transcodes: the request message becomes the exact JSON body of its HTTP route,
+the same operation runs, and the JSON answer becomes the reply. So a token minted over one profile
+works over the other, and an item written over one pulls over the other with the same values. The
+repository is the one the body names (`PullRequest.repoId` for a pull); a malformed `repoId` is
+`bad_request`, and so is an absent required message field (`CreateRepoRequest.manifest` or `commit`,
+`PushRequest.commit`, `PublishManifestRequest.manifest`, a `SignedManifest` without `state`). A refusal
+ends with the SPEC 10.3 status, its message the SPEC 10.4 `code`, with `detail` in the
+`avp-error-detail` trailer and `Retry-After` in `retry-after`. The decoding limit is the body limit.
+`build.rs` compiles the proto with a vendored `protoc`, so no system `protoc` is needed;
+`tests/grpc.rs` also reproduces every case of [`vectors/grpc.json`](../../../vectors/grpc.json) with
+prost. The host-to-host `Replication` service is not served (replication stays signed HTTP/JSON).
+
 ## Dependencies
 
 Pinned exactly in [`Cargo.toml`](Cargo.toml):
@@ -266,6 +285,8 @@ Pinned exactly in [`Cargo.toml`](Cargo.toml):
 | `ureq` | a small blocking HTTP/1.1 client for the host-to-host calls; default features off (no TLS, no compression) |
 | `serde`, `serde_json` | request and response bodies |
 | `ed25519-dalek` | the host key type and host request signatures |
+| `tonic`, `tonic-prost`, `prost`, `tokio` | the gRPC client profile; the 0.14.5 tonic family keeps Rust 1.85 |
+| `tonic-prost-build`, `protoc-bin-vendored` (build) | code generation from `proto/avp.proto` with a bundled `protoc` (MIT; the `protoc` binary is BSD-3-Clause) |
 
 ## License
 
