@@ -42,8 +42,9 @@ The same messages are defined for two interchangeable encodings, so you can pick
 stack:
 
 - **gRPC profile.** [`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are
-  stable. It also defines the `Replication` service for host-to-host sync over gRPC. The gRPC example
-  stopped at 0.4; see the `v0.4` tag.
+  stable. The `Vault` service carries every client operation, discovery and authentication included
+  (SPEC section 10.3), with the bearer token in `authorization` metadata. It also defines the
+  `Replication` service for host-to-host sync over gRPC.
 - **HTTP/JSON profile.** One HTTP path per operation, JSON bodies whose field names are the proto field
   names in `camelCase`, and a Bearer token in `Authorization`. Message shapes are
   [`schema/avp.schema.json`](schema/avp.schema.json); the full route surface (paths, status codes, error

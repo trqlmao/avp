@@ -102,6 +102,23 @@ specified. `SPEC.md` was rewritten; the section numbers below are 0.5's.
   against the Rust and Java hosts, the multi-host suite in every language pairing, and each client
   against the other language's host.
 
+### gRPC client profile
+
+- **Section 10.3 is normative**: the `avp.Vault` service carries every client operation of section 10.1.
+  It gains `GetHostInfo` (discovery, answering what `GET /.well-known/avp` answers), `Challenge`, and
+  `Token` as RPCs, and the messages `HostInfoRequest` and `HostInfo { version, profiles, hostKey }`.
+  Additive: no field is renumbered or renamed and base64 strings stay the binary encoding.
+- `PullRequest` gains `repo_id = 3`, a gRPC-only addressing field (the HTTP/JSON path carries the
+  repository, so the JSON schema does not list it). Before it, a gRPC pull could not name its repository.
+- The bearer token travels in the `authorization` metadata, and a token is host-local, not
+  profile-local. A request names its repository in its body. An absent required sub-message is
+  `bad_request`.
+- Errors: the status message is the section 10.4 `code`, `detail` travels in the `avp-error-detail`
+  trailer and `Retry-After` in `retry-after`; `policy_denied` maps to `PERMISSION_DENIED` and
+  `too_large` to `RESOURCE_EXHAUSTED`.
+- Discovery (section 11.7): `profiles` lists `grpc` on a host that serves it; a locator names the
+  HTTP/JSON address, and a gRPC address elsewhere is stated out of band.
+
 ### Removed
 
 - The Go, Python, TypeScript, and TypeScript gRPC reference examples. They stopped at 0.4; see the

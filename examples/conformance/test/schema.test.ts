@@ -7,7 +7,8 @@
  *
  *   - proto/avp.proto declares exactly the 0.5 services, rpcs, messages, and field numbers;
  *   - every proto message has a same-named schema `$def` with the same field set in camelCase, in
- *     both directions, and the schema-only `$defs` are exactly the listed ones;
+ *     both directions, except the listed gRPC-only messages and fields (SPEC 10.3), and the
+ *     schema-only `$defs` are exactly the listed ones;
  *   - every example body in examples/*-request.json and *-response.json validates against its
  *     `$def`, and deliberately wrong bodies fail;
  *   - openapi.yaml has exactly the 0.5 routes, each with its listed status set, bodies, and tags;
@@ -53,6 +54,9 @@ const EXPECTED_SERVICES: Record<string, Record<string, readonly [string, string]
     PublishManifest: ["PublishManifestRequest", "SignedManifest"],
     Leave: ["LeaveRequest", "LeaveResponse"],
     PrepareJoin: ["PrepareJoinRequest", "Acceptance"],
+    GetHostInfo: ["HostInfoRequest", "HostInfo"],
+    Challenge: ["ChallengeRequest", "AuthChallenge"],
+    Token: ["TokenRequest", "AuthToken"],
   },
   Replication: {
     Heads: ["HeadsRequest", "HeadsResponse"],
@@ -98,7 +102,7 @@ const EXPECTED_FIELDS: Record<string, Record<string, number>> = {
   LeaveResponse: {},
   Acceptance: { repo_id: 1, member_key: 2, host_key: 3, expires_at: 4, signature: 5 },
   CreateRepoRequest: { manifest: 1, commit: 2 },
-  PullRequest: { since_manifest_seq: 1, known_heads: 2 },
+  PullRequest: { since_manifest_seq: 1, known_heads: 2, repo_id: 3 },
   PullResponse: { manifests: 1, heads: 2, leaves: 3 },
   PushRequest: { commit: 1 },
   PushResponse: { accepted: 1, heads: 2 },
@@ -116,7 +120,16 @@ const EXPECTED_FIELDS: Record<string, Record<string, number>> = {
   AuthChallenge: { nonce: 1 },
   TokenRequest: { ed25519_public_key: 1, nonce: 2, signature: 3 },
   AuthToken: { token: 1, expires_at: 2 },
+  HostInfoRequest: {},
+  HostInfo: { version: 1, profiles: 2, host_key: 3 },
 };
+
+// Proto messages with no schema `$def`: the gRPC discovery pair (SPEC 10.3). Over HTTP/JSON discovery is
+// GET /.well-known/avp, whose document is an inline OpenAPI component.
+const EXPECTED_PROTO_ONLY = ["HostInfo", "HostInfoRequest"];
+
+// gRPC-only addressing fields (SPEC 10.3): in the proto, never in an HTTP/JSON body or the schema.
+const GRPC_ONLY_FIELDS: Record<string, readonly string[]> = { PullRequest: ["repo_id"] };
 
 // `$defs` that exist only in the JSON schema (no proto message): the error body, the payload
 // plaintext (inside commit ciphertext), the out-of-band tokens (SPEC section 11), and a helper.
@@ -302,7 +315,7 @@ const EXPECTED_TYPES: Record<string, Record<string, string>> = {
   LeaveResponse: {},
   Acceptance: { repo_id: "S", member_key: "B", host_key: "B", expires_at: "I", signature: "B" },
   CreateRepoRequest: { manifest: "M:SignedManifest", commit: "M:Commit" },
-  PullRequest: { since_manifest_seq: "I", known_heads: "[]B" },
+  PullRequest: { since_manifest_seq: "I", known_heads: "[]B", repo_id: "S" },
   PullResponse: { manifests: "[]M:SignedManifest", heads: "[]M:Commit", leaves: "[]M:LeaveRequest" },
   PushRequest: { commit: "M:Commit" },
   PushResponse: { accepted: "T", heads: "[]B" },
@@ -325,6 +338,8 @@ const EXPECTED_TYPES: Record<string, Record<string, string>> = {
   AuthChallenge: { nonce: "B" },
   TokenRequest: { ed25519_public_key: "B", nonce: "B", signature: "B" },
   AuthToken: { token: "S", expires_at: "I" },
+  HostInfoRequest: {},
+  HostInfo: { version: "S", profiles: "[]S", host_key: "B" },
 };
 
 // The only proto fields declared optional. In the schema the only fields not in required are these
@@ -525,18 +540,24 @@ test("the proto header documents that 0.5 is breaking and removes the 0.4 envelo
 // ---------------------------------------------------------------------------------------------
 
 test("schema $defs are exactly the proto messages plus the listed schema-only defs", () => {
-  const expected = [...proto.messages.keys(), ...EXPECTED_SCHEMA_ONLY_DEFS].sort();
+  const mirrored = [...proto.messages.keys()].filter((m) => !EXPECTED_PROTO_ONLY.includes(m));
+  const expected = [...mirrored, ...EXPECTED_SCHEMA_ONLY_DEFS].sort();
   assert.deepEqual(Object.keys(defs).sort(), expected);
   for (const gone of REMOVED_0_4_NAMES) assert.ok(!(gone in defs), `${gone} must be gone from the schema`);
 });
 
-for (const name of Object.keys(EXPECTED_FIELDS)) {
+function schemaFieldsOf(name: string): Map<string, ProtoField> {
+  const grpcOnly = GRPC_ONLY_FIELDS[name] ?? [];
+  return new Map([...proto.messages.get(name)!.fields].filter(([f]) => !grpcOnly.includes(f)));
+}
+
+for (const name of Object.keys(EXPECTED_FIELDS).filter((n) => !EXPECTED_PROTO_ONLY.includes(n))) {
   test(`schema $defs/${name} has the same field set as proto message ${name}, in camelCase`, () => {
     const def = defs[name];
     assert.ok(def, `schema is missing $def ${name}`);
     assert.equal(def.type, "object");
     assert.equal(def.additionalProperties, false, `${name} must forbid unknown properties`);
-    const protoFields = [...proto.messages.get(name)!.fields.keys()].map(camel).sort();
+    const protoFields = [...schemaFieldsOf(name).keys()].map(camel).sort();
     const schemaFields = Object.keys(def.properties ?? {}).sort();
     assert.deepEqual(schemaFields, protoFields, `${name}: proto vs schema fields`);
     // every required field is a declared property, and every non-optional proto field is required
@@ -552,7 +573,7 @@ for (const name of Object.keys(EXPECTED_FIELDS)) {
 
   test(`schema $defs/${name} agrees with proto on message-typed and repeated fields`, () => {
     const def = defs[name];
-    for (const [fname, f] of proto.messages.get(name)!.fields) {
+    for (const [fname, f] of schemaFieldsOf(name)) {
       const prop = def.properties[camel(fname)];
       const isMessage = proto.messages.has(f.type);
       if (f.repeated) {
@@ -585,6 +606,10 @@ for (const [name, types] of Object.entries(EXPECTED_TYPES)) {
       const protoType = { I: "int64", T: "bool", S: "string", B: "string" }[base] ?? base.replace(/^M:/, "");
       assert.equal(pf.type, protoType, `proto type of ${where}`);
       assert.equal(pf.repeated, repeated, `proto repeated of ${where}`);
+      if (EXPECTED_PROTO_ONLY.includes(name) || (GRPC_ONLY_FIELDS[name] ?? []).includes(fname)) {
+        assert.equal(defs[name]?.properties?.[camel(fname)], undefined, `${where} is gRPC only`);
+        continue;
+      }
 
       // schema side
       const prop = defs[name].properties[camel(fname)];

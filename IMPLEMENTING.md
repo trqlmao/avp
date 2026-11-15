@@ -28,6 +28,13 @@ The **HTTP/JSON profile** (one `POST` per operation, proto field names in `camel
 `Authorization: Bearer <token>`) is the most portable starting point. The gRPC profile in
 [`proto/avp.proto`](proto/avp.proto) carries the same messages; pick one.
 
+Over gRPC (SPEC §10.3) every client operation is an RPC on `avp.Vault`, discovery included
+(`GetHostInfo`), and the token rides the `authorization` metadata as `Bearer <token>`. There is no path:
+the repository is the one the body names (`PullRequest.repoId` exists for that and is gRPC only). A refused
+call's status message is the §10.4 `code`, with `detail` in the `avp-error-detail` trailer. Leave no
+required sub-message unset: a request without one is `bad_request`. A token you mint over one profile works
+over the other at the same host, and an item you write over one pulls over the other with the same values.
+
 Conformance means three things (SPEC §14, [§6 below](#6-conformance-checklist)):
 
 1. Reproduce the vectors in [`vectors/`](vectors/) byte for byte, and reject every case in

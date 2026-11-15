@@ -1,8 +1,9 @@
 // Alt Vault Protocol (AVP) 0.5, canonical gRPC schema.
 //
-// This is the source of truth for the gRPC transport profile. Field numbers and
-// names are stable. The HTTP/JSON profile uses the same field names in camelCase
-// (see ../schema/avp.schema.json). See ../SPEC.md for semantics.
+// This is the source of truth for the gRPC transport profile (SPEC 10.3). Field
+// numbers and names are stable. The HTTP/JSON profile uses the same field names in
+// camelCase (see ../schema/avp.schema.json), except the gRPC-only HostInfoRequest,
+// HostInfo, and PullRequest.repo_id. See ../SPEC.md for semantics.
 //
 // BREAKING (0.5): this file is not wire-compatible with 0.4. The 0.4 messages
 // EncryptedEnvelope and VaultManifest are deleted. Commit and SignedManifest
@@ -23,9 +24,11 @@ package avp;
 
 // The client-facing zero-knowledge vault service. A host stores and serves only
 // ciphertext, wrapped keys, public keys, and opaque signatures. It can decrypt
-// nothing. Authentication (challenge/token) is host-issued (SPEC 3.3) and yields
-// a bearer token carried in transport metadata; it MAY be offered over gRPC using
-// the auth messages below.
+// nothing. This service carries every client operation of SPEC 10.1, discovery
+// included; SPEC 10.3 is the gRPC client profile. Authentication (challenge/token)
+// is host-issued (SPEC 3.3) and yields a bearer token carried in the
+// `authorization` metadata as `Bearer <token>`. A request names its repository in
+// its body, never in a path.
 service Vault {
   // Create a repository from an owner-signed genesis state and its first commit.
   rpc CreateRepo(CreateRepoRequest) returns (SignedManifest);
@@ -40,6 +43,12 @@ service Vault {
   rpc Leave(LeaveRequest) returns (LeaveResponse);
   // Ask the caller's home host to carry a repository; returns its acceptance.
   rpc PrepareJoin(PrepareJoinRequest) returns (Acceptance);
+  // The discovery document of SPEC 11.7, the answer GET /.well-known/avp gives.
+  rpc GetHostInfo(HostInfoRequest) returns (HostInfo);
+  // Ask for a single-use challenge nonce for a client key (SPEC 3.3).
+  rpc Challenge(ChallengeRequest) returns (AuthChallenge);
+  // Exchange a signed challenge for a host-issued bearer token (SPEC 3.3).
+  rpc Token(TokenRequest) returns (AuthToken);
 }
 
 // Host-to-host replication (SPEC 9). A deployment whose host-to-host profile is
@@ -154,6 +163,9 @@ message CreateRepoRequest {
 message PullRequest {
   int64 since_manifest_seq = 1;
   repeated string known_heads = 2; // base64 commit ids the client already has
+  // The repository to pull. gRPC only: in HTTP/JSON the path carries it and a
+  // pull body never does (SPEC 10.3).
+  string repo_id = 3;
 }
 
 message PullResponse {
@@ -224,6 +236,18 @@ message RejectedItem {
 message OfferResponse {
   repeated string accepted = 1;    // base64 manifest hashes and commit ids
   repeated RejectedItem rejected = 2;
+}
+
+// --- Discovery (SPEC 11.7). ---
+
+// The empty request of GetHostInfo.
+message HostInfoRequest {}
+
+// The discovery document: the same fields GET /.well-known/avp answers.
+message HostInfo {
+  string version = 1;              // the protocol version, "0.5"
+  repeated string profiles = 2;    // "http-json", "grpc"
+  string host_key = 3;             // base64 raw 32-byte Ed25519 host key
 }
 
 // --- Authentication (challenge -> token). Host-issued (SPEC 3.3). ---
