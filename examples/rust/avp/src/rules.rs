@@ -257,10 +257,7 @@ fn content_ok(s: &ManifestState, prev: Option<&ManifestState>) -> bool {
             return false;
         }
     }
-    if !added.is_empty() && !is_next(prev.key_epoch, s.key_epoch) {
-        return false;
-    }
-    true
+    added.is_empty() || is_next(prev.key_epoch, s.key_epoch)
 }
 
 /// One host's view of one repository.
