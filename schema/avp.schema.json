@@ -1,61 +1,594 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/trqlmao/avp/schema/avp.schema.json",
-  "title": "Alt Vault Protocol: HTTP/JSON profile",
-  "description": "JSON message shapes for the AVP HTTP/JSON transport profile. Field names match the proto field names in camelCase. Binary values are base64 strings. See ../SPEC.md.",
+  "title": "Alt Vault Protocol 0.5: HTTP/JSON profile",
+  "description": "JSON message shapes for the AVP 0.5 HTTP/JSON transport profile. Field names match the proto field names in camelCase. Binary values are base64 strings with padding (the Base64 def). See ../SPEC.md.",
   "$defs": {
+    "Base64": {
+      "type": "string",
+      "description": "base64 (standard alphabet, with padding) of a binary value; the empty string is the empty value",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
     "WrappedKey": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schemeId", "ephemeralPublicKey", "iv", "ciphertext"],
       "properties": {
-        "schemeId": { "type": "string" },
-        "ephemeralPublicKey": { "type": "string", "description": "base64 ephemeral X25519 public key" },
-        "iv": { "type": "string", "description": "base64" },
-        "ciphertext": { "type": "string", "description": "base64" }
+        "schemeId": {
+          "type": "string"
+        },
+        "ephemeralPublicKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 ephemeral X25519 public key"
+        },
+        "iv": {
+          "$ref": "#/$defs/Base64"
+        },
+        "ciphertext": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "HostRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostKey", "locator"],
+      "properties": {
+        "hostKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 raw 32-byte Ed25519 host key"
+        },
+        "locator": {
+          "type": "string",
+          "description": "dialing hint, host or host:port"
+        }
       }
     },
     "MemberEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ed25519PublicKey", "x25519PublicKey", "wrappedDataKey", "keyEpoch"],
+      "required": ["ed25519PublicKey", "x25519PublicKey", "wrappedDataKey", "keyEpoch", "homeHostKey"],
       "properties": {
-        "ed25519PublicKey": { "type": "string", "description": "base64 raw 32 bytes; the member id" },
-        "x25519PublicKey": { "type": "string", "description": "base64 raw 32 bytes" },
-        "wrappedDataKey": { "$ref": "#/$defs/WrappedKey" },
-        "keyEpoch": { "type": "integer" },
-        "keyBindingSig": {
-          "type": ["string", "null"],
-          "description": "optional base64 issuer signature over the two public keys"
+        "ed25519PublicKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 raw 32 bytes; the member id"
+        },
+        "x25519PublicKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 raw 32 bytes"
+        },
+        "wrappedDataKey": {
+          "$ref": "#/$defs/WrappedKey"
+        },
+        "keyEpoch": {
+          "type": "integer"
+        },
+        "homeHostKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 host key of the member's home host"
         }
       }
     },
-    "EncryptedEnvelope": {
+    "Removal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repoId", "payloadVersion", "keyEpoch", "iv", "ciphertext"],
+      "required": ["memberKey", "removedAtSeq", "frontier"],
       "properties": {
-        "repoId": { "type": "string" },
-        "payloadVersion": { "type": "integer" },
-        "keyEpoch": { "type": "integer" },
-        "iv": { "type": "string", "description": "base64" },
-        "ciphertext": { "type": "string", "description": "base64" }
+        "memberKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "removedAtSeq": {
+          "type": "integer"
+        },
+        "frontier": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          },
+          "description": "commit ids of the signed removal cutoff (SPEC 7.3)"
+        }
       }
     },
-    "VaultManifest": {
+    "ManifestState": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repoId", "schemeId", "keyEpoch", "payloadVersion", "members"],
+      "required": ["repoId", "manifestSeq", "prevManifestHash", "ownerKey", "genesisNonce", "schemeId", "keyEpoch", "hosts", "members", "removals"],
       "properties": {
-        "repoId": { "type": "string" },
-        "schemeId": { "type": "string" },
-        "keyEpoch": { "type": "integer" },
-        "payloadVersion": { "type": "integer" },
-        "members": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } },
+        "repoId": {
+          "type": "string"
+        },
+        "manifestSeq": {
+          "type": "integer"
+        },
+        "prevManifestHash": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64; empty at seq 1"
+        },
+        "ownerKey": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 raw 32-byte Ed25519 owner key"
+        },
+        "genesisNonce": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 16 bytes at seq 1; empty after"
+        },
+        "schemeId": {
+          "type": "string"
+        },
+        "keyEpoch": {
+          "type": "integer"
+        },
         "shareRefreshTokens": {
           "type": "boolean",
           "default": false,
-          "description": "optional repository policy (SPEC 5.1): may members share AltAccount.refreshToken through this repository? Absent means false (withhold). A server MUST persist this and return it in every manifest it serves; dropping it silently disables sharing for every member."
+          "description": "repository policy (SPEC 5.1): may members share refreshToken through this repository? Absent means false (withhold). Covered by the owner signature; a host MUST store and serve it unchanged."
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostRef"
+          }
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemberEntry"
+          }
+        },
+        "removals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Removal"
+          }
+        }
+      }
+    },
+    "SignedManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "ownerSignature"],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ManifestState"
+        },
+        "ownerSignature": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 Ed25519 signature by ownerKey over the canonical state bytes (SPEC 4.2)"
+        }
+      }
+    },
+    "Commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "commitId", "parents", "manifestSeq", "manifestHash", "keyEpoch", "author", "iv", "ciphertext", "authorSignature"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "commitId": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 SHA-256 of the commit header (SPEC 4.3)"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          }
+        },
+        "manifestSeq": {
+          "type": "integer"
+        },
+        "manifestHash": {
+          "$ref": "#/$defs/Base64"
+        },
+        "keyEpoch": {
+          "type": "integer"
+        },
+        "author": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 member Ed25519 public key"
+        },
+        "iv": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64, 12 bytes"
+        },
+        "ciphertext": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 payload ciphertext with the 16-byte tag appended"
+        },
+        "authorSignature": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 Ed25519 signature by author over the commit id"
+        }
+      }
+    },
+    "LeaveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "memberKey", "at", "signature"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "memberKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "at": {
+          "type": "integer",
+          "description": "epoch milliseconds"
+        },
+        "signature": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "LeaveResponse": {
+      "description": "The empty object.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "Acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "memberKey", "hostKey", "expiresAt", "signature"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "memberKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "hostKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "expiresAt": {
+          "type": "integer",
+          "description": "epoch milliseconds"
+        },
+        "signature": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "CreateRepoRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "commit"],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/SignedManifest"
+        },
+        "commit": {
+          "$ref": "#/$defs/Commit"
+        }
+      }
+    },
+    "PullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sinceManifestSeq", "knownHeads"],
+      "properties": {
+        "sinceManifestSeq": {
+          "type": "integer"
+        },
+        "knownHeads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          }
+        }
+      }
+    },
+    "PullResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifests", "heads", "leaves"],
+      "properties": {
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignedManifest"
+          }
+        },
+        "heads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Commit"
+          }
+        },
+        "leaves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeaveRequest"
+          }
+        }
+      }
+    },
+    "PushRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit"],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Commit"
+        }
+      }
+    },
+    "PushResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "heads"],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "heads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          }
+        }
+      }
+    },
+    "PublishManifestRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest"],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/SignedManifest"
+        },
+        "commit": {
+          "$ref": "#/$defs/Commit",
+          "description": "required when the state raises keyEpoch (SPEC 8.3)"
+        }
+      }
+    },
+    "PrepareJoinRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "memberKey"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "memberKey": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "ManifestTip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifestSeq", "manifestHash"],
+      "properties": {
+        "manifestSeq": {
+          "type": "integer"
+        },
+        "manifestHash": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "HeadsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        }
+      }
+    },
+    "HeadsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifestTip", "heads"],
+      "properties": {
+        "manifestTip": {
+          "$ref": "#/$defs/ManifestTip"
+        },
+        "heads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          }
+        }
+      }
+    },
+    "FetchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "ids"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          },
+          "description": "commit ids or manifest hashes"
+        }
+      }
+    },
+    "FetchResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifests", "commits", "leaves"],
+      "properties": {
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignedManifest"
+          }
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Commit"
+          }
+        },
+        "leaves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeaveRequest"
+          }
+        }
+      }
+    },
+    "OfferRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repoId", "manifests", "commits", "leaves"],
+      "properties": {
+        "repoId": {
+          "type": "string"
+        },
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignedManifest"
+          }
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Commit"
+          }
+        },
+        "leaves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeaveRequest"
+          }
+        }
+      }
+    },
+    "RejectedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "code"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Base64"
+        },
+        "code": {
+          "type": "string",
+          "description": "an error code of SPEC 10.4"
+        }
+      }
+    },
+    "OfferResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "rejected"],
+      "properties": {
+        "accepted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Base64"
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RejectedItem"
+          }
+        }
+      }
+    },
+    "ChallengeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ed25519PublicKey"],
+      "properties": {
+        "ed25519PublicKey": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "AuthChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nonce"],
+      "properties": {
+        "nonce": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64, single-use, short TTL"
+        }
+      }
+    },
+    "TokenRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ed25519PublicKey", "nonce", "signature"],
+      "properties": {
+        "ed25519PublicKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "nonce": {
+          "$ref": "#/$defs/Base64"
+        },
+        "signature": {
+          "$ref": "#/$defs/Base64",
+          "description": "base64 Ed25519 signature over the avp/challenge/v1 transcript (SPEC 3.3)"
+        }
+      }
+    },
+    "AuthToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "expiresAt"],
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "host-defined opaque bearer token"
+        },
+        "expiresAt": {
+          "type": "integer"
+        }
+      }
+    },
+    "Stamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "n", "by"],
+      "properties": {
+        "at": {
+          "type": "integer",
+          "description": "epoch milliseconds"
+        },
+        "n": {
+          "type": "integer",
+          "description": "HLC counter"
+        },
+        "by": {
+          "type": "string",
+          "description": "member id"
+        }
+      }
+    },
+    "Field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "at", "n", "by"],
+      "properties": {
+        "value": {
+          "description": "any JSON value"
+        },
+        "at": {
+          "type": "integer"
+        },
+        "n": {
+          "type": "integer"
+        },
+        "by": {
+          "type": "string",
+          "description": "member id"
         }
       }
     },
@@ -64,207 +597,191 @@
       "additionalProperties": false,
       "required": ["banned", "observedAt", "source", "detail"],
       "properties": {
-        "banned": { "type": "boolean" },
-        "observedAt": { "type": "integer" },
-        "source": { "type": "string" },
-        "detail": { "type": "string" },
-        "observedBy": { "type": ["string", "null"], "description": "member id or null" }
-      }
-    },
-    "AltAccount": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["uuid", "username", "accessToken", "type", "lastUsed"],
-      "properties": {
-        "uuid": { "type": "string" },
-        "username": { "type": "string" },
-        "accessToken": { "type": "string" },
-        "refreshToken": {
+        "banned": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "observedBy": {
           "type": ["string", "null"],
-          "description": "optional durable credential that can mint a fresh accessToken; present only when the repository's shareRefreshTokens is true (SPEC 5.1)"
-        },
-        "expiresAt": {
-          "type": "integer",
-          "description": "optional epoch-millis expiry of accessToken; absent or 0 means unknown"
-        },
-        "type": { "type": "string", "enum": ["MICROSOFT", "COOKIE", "SESSION", "OFFLINE"] },
-        "lastUsed": { "type": "integer" },
-        "lastUsedBy": { "type": ["string", "null"], "description": "member id or null" },
-        "bans": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": { "$ref": "#/$defs/BanInfo" },
-              "description": "ban records keyed by server id"
-            },
-            { "type": "null" }
-          ]
-        },
-        "sourceClient": { "type": ["string", "null"], "description": "client an alt was added from" },
-        "sourceUser": { "type": ["string", "null"], "description": "user within sourceClient" }
-      }
-    },
-    "VaultPayload": {
-      "type": "object",
-      "description": "Plaintext encrypted into EncryptedEnvelope.ciphertext.",
-      "additionalProperties": false,
-      "required": ["alts", "payloadVersion"],
-      "properties": {
-        "alts": { "type": "array", "items": { "$ref": "#/$defs/AltAccount" } },
-        "payloadVersion": { "type": "integer" }
-      }
-    },
-    "CreateRepoRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["manifest", "initialEnvelope"],
-      "properties": {
-        "manifest": { "$ref": "#/$defs/VaultManifest" },
-        "initialEnvelope": { "$ref": "#/$defs/EncryptedEnvelope" }
-      }
-    },
-    "PullRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["repoId", "knownPayloadVersion"],
-      "properties": {
-        "repoId": { "type": "string" },
-        "knownPayloadVersion": { "type": "integer" }
-      }
-    },
-    "PullResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["manifest", "unchanged"],
-      "properties": {
-        "manifest": { "$ref": "#/$defs/VaultManifest" },
-        "envelope": { "oneOf": [{ "$ref": "#/$defs/EncryptedEnvelope" }, { "type": "null" }] },
-        "unchanged": { "type": "boolean" }
-      }
-    },
-    "PushRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["repoId", "envelope", "expectedPayloadVersion"],
-      "properties": {
-        "repoId": { "type": "string" },
-        "envelope": { "$ref": "#/$defs/EncryptedEnvelope" },
-        "expectedPayloadVersion": { "type": "integer" },
-        "rotatedMembers": {
-          "type": ["array", "null"],
-          "items": { "$ref": "#/$defs/MemberEntry" }
+          "description": "member id or null"
         }
       }
     },
-    "PushResponse": {
+    "Account": {
+      "description": "One account in the payload (SPEC 5). Deleted iff deleted is greater than every field and ban stamp.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["accepted", "payloadVersion", "keyEpoch", "conflict"],
+      "required": ["fields", "bans"],
       "properties": {
-        "accepted": { "type": "boolean" },
-        "payloadVersion": { "type": "integer" },
-        "keyEpoch": { "type": "integer" },
-        "conflict": { "type": "boolean" }
+        "deleted": {
+          "$ref": "#/$defs/Stamp"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "$ref": "#/$defs/Field"
+            },
+            "accessToken": {
+              "$ref": "#/$defs/Field"
+            },
+            "refreshToken": {
+              "$ref": "#/$defs/Field"
+            },
+            "expiresAt": {
+              "$ref": "#/$defs/Field"
+            },
+            "type": {
+              "$ref": "#/$defs/Field"
+            },
+            "lastUsed": {
+              "$ref": "#/$defs/Field"
+            },
+            "lastUsedBy": {
+              "$ref": "#/$defs/Field"
+            },
+            "sourceClient": {
+              "$ref": "#/$defs/Field"
+            },
+            "sourceUser": {
+              "$ref": "#/$defs/Field"
+            }
+          },
+          "description": "per-field last-writer-wins registers"
+        },
+        "bans": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Field"
+          },
+          "description": "Field per server id; its value is a BanInfo or null"
+        }
       }
     },
-    "MemberAddRequest": {
+    "VaultPayload": {
+      "description": "Plaintext encrypted into Commit.ciphertext (SPEC 5).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["repoId", "member"],
+      "required": ["v", "accounts"],
       "properties": {
-        "repoId": { "type": "string" },
-        "member": { "$ref": "#/$defs/MemberEntry" }
+        "v": {
+          "const": 2
+        },
+        "accounts": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Account"
+          },
+          "description": "keyed by player UUID"
+        }
       }
     },
-    "MemberRemoveRequest": {
+    "InviteToken": {
+      "description": "Sent by a joiner to the owner (SPEC 11.3). Travels base64url-encoded, out of band.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["repoId", "removedMemberId", "rotatedEnvelope", "rewrappedMembers", "newKeyEpoch"],
+      "required": ["v", "ed25519PublicKey", "x25519PublicKey", "homeHostKey", "homeHostLocator", "acceptance"],
       "properties": {
-        "repoId": { "type": "string" },
-        "removedMemberId": { "type": "string" },
-        "rotatedEnvelope": { "$ref": "#/$defs/EncryptedEnvelope" },
-        "rewrappedMembers": { "type": "array", "items": { "$ref": "#/$defs/MemberEntry" } },
-        "newKeyEpoch": { "type": "integer" }
-      }
-    },
-    "ChallengeRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["ed25519PublicKey"],
-      "properties": { "ed25519PublicKey": { "type": "string" } }
-    },
-    "AuthChallenge": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["nonce"],
-      "properties": { "nonce": { "type": "string", "description": "base64, single-use, short TTL" } }
-    },
-    "TokenRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["ed25519PublicKey", "nonce", "signature"],
-      "properties": {
-        "ed25519PublicKey": { "type": "string" },
-        "nonce": { "type": "string" },
-        "signature": { "type": "string", "description": "base64 Ed25519 signature over the raw nonce bytes" }
-      }
-    },
-    "AuthToken": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["token", "expiresAt"],
-      "properties": {
-        "token": { "type": "string" },
-        "expiresAt": { "type": "integer" }
-      }
-    },
-    "InviteRequest": {
-      "type": "object",
-      "description": "Federation join handshake, step 1 (base64url-encoded JSON). See SPEC §8.1.",
-      "additionalProperties": false,
-      "required": ["v", "ed25519PublicKey", "x25519PublicKey"],
-      "properties": {
-        "v": { "type": "integer" },
-        "ed25519PublicKey": { "type": "string" },
-        "x25519PublicKey": { "type": "string" }
+        "v": {
+          "const": 2
+        },
+        "ed25519PublicKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "x25519PublicKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "homeHostKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "homeHostLocator": {
+          "type": "string"
+        },
+        "acceptance": {
+          "$ref": "#/$defs/Acceptance"
+        }
       }
     },
     "RepoLocator": {
+      "description": "Sent by the owner to a joiner (SPEC 11.2). Travels base64url-encoded, out of band.",
       "type": "object",
-      "description": "Federation join handshake, step 2 (base64url-encoded JSON). See SPEC §8.1.",
       "additionalProperties": false,
-      "required": ["v", "host", "repoId"],
+      "required": ["v", "repoId", "hostKey", "hostLocator", "ownerFingerprint"],
       "properties": {
-        "v": { "type": "integer" },
-        "host": { "type": "string" },
-        "repoId": { "type": "string" },
-        "schemeId": { "type": ["string", "null"] },
-        "keyEpoch": { "type": ["integer", "null"] },
-        "issuerJwksUrl": { "type": ["string", "null"] }
+        "v": {
+          "const": 2
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "hostKey": {
+          "$ref": "#/$defs/Base64"
+        },
+        "hostLocator": {
+          "type": "string"
+        },
+        "ownerFingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$",
+          "description": "hex(SHA-256(ownerKey)[0..8])"
+        }
+      }
+    },
+    "LinkRequest": {
+      "description": "Owner device linking, new device (SPEC 11.6).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "ephemeralPublicKey"],
+      "properties": {
+        "v": {
+          "const": 2
+        },
+        "ephemeralPublicKey": {
+          "$ref": "#/$defs/Base64"
+        }
+      }
+    },
+    "LinkGrant": {
+      "description": "Owner device linking, existing device (SPEC 11.6).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "wrap"],
+      "properties": {
+        "v": {
+          "const": 2
+        },
+        "wrap": {
+          "$ref": "#/$defs/WrappedKey"
+        }
       }
     },
     "Error": {
       "type": "object",
-      "description": "Error response body for the HTTP/JSON profile (SPEC §6). Returned with any non-2xx status. A stale-version push is NOT an error: it is a 200 PushResponse with conflict=true.",
+      "description": "Error response body for the HTTP/JSON profile (SPEC 10.4). Returned with any non-2xx status. Every error except 422 missing_parents is terminal for that request.",
       "required": ["error"],
       "properties": {
-        "error": { "type": "string", "description": "human-readable message; not machine-parsed" },
+        "error": {
+          "type": "string",
+          "description": "human-readable message; not machine-parsed"
+        },
         "code": {
           "type": "string",
           "description": "stable machine-readable code; absence means unspecified",
-          "enum": [
-            "unauthorized",
-            "forbidden",
-            "not_found",
-            "duplicate_repo",
-            "quota_exceeded",
-            "too_large",
-            "policy_denied",
-            "bad_request"
-          ]
+          "enum": ["bad_request", "unauthorized", "forbidden", "not_hosted", "not_found", "duplicate_repo", "too_many_heads", "manifest_conflict", "missing_parents", "quota_exceeded", "too_large", "policy_denied"]
         },
-        "detail": { "type": "string", "description": "optional extra context, e.g. a parse error" }
+        "detail": {
+          "type": "string",
+          "description": "optional extra context; for missing_parents, the ids (commit ids or a manifest hash)"
+        }
       }
     }
   }

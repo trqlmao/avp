@@ -5,12 +5,11 @@
  *   - RFC 5869 HKDF-SHA256  -> vectors/hkdf.json
  *   - RFC 7748 X25519       -> vectors/x25519.json
  *   - RFC 8032 Ed25519      -> vectors/ed25519.json
- *   - SPEC section 4 AEAD   -> vectors/payload-aead.json
- *   - SPEC section 4 wrap   -> vectors/key-wrap.json
+ *   - SPEC section 4.4 wrap -> vectors/key-wrap.json
  *
  * The RFC cases (hkdf/x25519/ed25519) reproduce published outputs byte-for-byte.
- * The composition cases additionally round-trip (decrypt/unwrap and assert
- * recovery) and the AEAD case asserts that a tampered AAD epoch is rejected.
+ * The key-wrap composition additionally round-trips (unwrap and assert
+ * recovery). The payload AEAD under AAD v2 is covered by test/commit.test.ts.
  * The same vectors are independently cross-checked against the Java reference
  * implementation; see vectors/README.md.
  *
@@ -22,12 +21,12 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { buildAad } from "../src/constructions.ts";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
   ed25519PublicRaw,
   ed25519Sign,
+  ed25519StrictInputsOk,
   ed25519Verify,
   hkdfSha256,
   importEd25519Private,
@@ -44,7 +43,6 @@ import {
   loadEd25519Vectors,
   loadHkdfVectors,
   loadKeyWrapVectors,
-  loadPayloadAeadVectors,
   loadX25519Vectors,
 } from "../src/vectors.ts";
 
@@ -104,36 +102,6 @@ test("Ed25519 (RFC 8032) reproduces vectors/ed25519.json", async (t) => {
   }
 });
 
-// ---- AES-256-GCM payload AEAD (SPEC section 4) ----
-test("payload AEAD (SPEC section 4) reproduces and round-trips vectors/payload-aead.json", async (t) => {
-  const vector = loadPayloadAeadVectors();
-  assert.ok(vector.cases.length > 0, "expected at least one payload-aead case");
-
-  for (const c of vector.cases) {
-    await t.test(c.name, () => {
-      const key = fromB64(c.keyB64);
-      const iv = fromB64(c.ivB64);
-      const aad = buildAad(c.repoId, c.payloadVersion, c.keyEpoch);
-      const plaintext = Buffer.from(c.plaintextUtf8, "utf8");
-
-      // AAD matches the committed hex (and the aad.json layout).
-      assert.equal(hex(aad), c.aadHex, "AAD layout");
-
-      // re-encrypt is deterministic given key+iv+aad and matches the committed ciphertext.
-      const ct = aesGcmEncrypt(key, iv, aad, plaintext);
-      assert.equal(b64(ct), c.ciphertextB64, "ciphertext||tag");
-
-      // decrypt recovers the plaintext.
-      const recovered = aesGcmDecrypt(key, iv, aad, fromB64(c.ciphertextB64));
-      assert.equal(recovered.toString("utf8"), c.plaintextUtf8, "decrypt round-trip");
-
-      // a tampered AAD epoch is rejected (replay/rollback protection).
-      const tampered = buildAad(c.repoId, c.payloadVersion, c.tamperEpoch);
-      assert.throws(() => aesGcmDecrypt(key, iv, tampered, fromB64(c.ciphertextB64)), "tampered-epoch must fail");
-    });
-  }
-});
-
 // ---- Default wrap scheme X25519-HKDF-SHA256-AESGCM-v1 (SPEC section 4) ----
 test("key wrap (SPEC section 4) reproduces and round-trips vectors/key-wrap.json", async (t) => {
   const vector = loadKeyWrapVectors();
@@ -167,4 +135,61 @@ test("key wrap (SPEC section 4) reproduces and round-trips vectors/key-wrap.json
       assert.equal(b64(recovered), c.dataKeyB64, "unwrapped data key");
     });
   }
+});
+
+// ---- Strict Ed25519 pre-checks (SPEC section 2) ----
+
+/** The seven small-order encodings SPEC 2 lists (sign bit cleared), little-endian hex. */
+const SPEC_SMALL_ORDER = [
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+];
+/** The group order L of SPEC 2. */
+const SPEC_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+/** Writes x as 32 little-endian bytes. */
+const le32 = (x: bigint): Buffer => Buffer.from(Array.from({ length: 32 }, (_, i) => Number((x >> BigInt(8 * i)) & 0xffn)));
+/** The encoding with the sign bit (top bit of the last byte) set. */
+const withSignBit = (b: Buffer): Buffer => {
+  const out = Buffer.from(b);
+  out[31] |= 0x80;
+  return out;
+};
+
+test("ed25519StrictInputsOk applies the SPEC 2 pre-checks", async (t) => {
+  const c = loadEd25519Vectors().cases[0];
+  const pub = fromHex(c.publicKeyHex);
+  const sig = fromHex(c.signatureHex);
+  const honestR = sig.subarray(0, 32);
+  const honestS = sig.subarray(32, 64);
+
+  await t.test("an RFC 8032 signature passes", () => {
+    assert.equal(ed25519StrictInputsOk(pub, sig), true);
+  });
+
+  for (const h of SPEC_SMALL_ORDER) {
+    for (const [label, enc] of [["sign bit clear", fromHex(h)], ["sign bit set", withSignBit(fromHex(h))]] as const) {
+      await t.test(`small-order ${h.slice(0, 8)}..${hex(enc.subarray(31))} (${label}) is rejected as A and as R`, () => {
+        assert.equal(ed25519StrictInputsOk(enc, sig), false, "as the public key A");
+        assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([enc, honestS])), false, "as R");
+      });
+    }
+  }
+
+  await t.test("y = p + 2 (non-canonical, not on the blocklist) is rejected as A and as R", () => {
+    const pPlus2 = fromHex("ef" + "ff".repeat(30) + "7f");
+    for (const enc of [pPlus2, withSignBit(pPlus2)]) {
+      assert.equal(ed25519StrictInputsOk(enc, sig), false, "as the public key A");
+      assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([enc, honestS])), false, "as R");
+    }
+  });
+
+  await t.test("S = L is rejected and S = L - 1 passes", () => {
+    assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([honestR, le32(SPEC_L)])), false, "S = L");
+    assert.equal(ed25519StrictInputsOk(pub, Buffer.concat([honestR, le32(SPEC_L - 1n)])), true, "S = L - 1");
+  });
 });

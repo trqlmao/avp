@@ -4,93 +4,144 @@
   "kinds": {
     "deterministic": "Pure byte/string construction with no key material; must match exactly.",
     "rfc-primitive": "A cryptographic primitive pinned to a published RFC test vector.",
-    "composition": "Full AVP envelope composition with fixed keys/IVs; reproduce and round-trip (decrypt/unwrap), including the documented failure assertion.",
-    "negative": "A valid construction with one mutation that a conformant implementation MUST reject."
+    "composition": "Full AVP composition with fixed keys/IVs; reproduce byte-for-byte and round-trip (decrypt/unwrap/verify).",
+    "negative": "A valid construction with one mutation that a conformant implementation MUST reject.",
+    "data": "A plaintext data transformation with no key material (the payload merge and the HLC); the result must equal the expected JSON exactly.",
+    "scenario": "A sequence of signed items applied to one host's rules engine; each step's verdict and the final heads, held commits, and tip must match."
   },
   "vectors": [
     {
-      "id": "aad",
-      "file": "aad.json",
-      "kind": "deterministic",
-      "specSection": "4",
-      "construction": "UTF8(repoId) || 0x1F || int64BE(payloadVersion) || int64BE(keyEpoch)",
-      "expects": "AAD bytes as lowercase hex",
-      "anchors": []
+      "id": "bip39-owner",
+      "file": "bip39-owner.json",
+      "kind": "composition",
+      "specSection": "3.1",
+      "construction": "24-word BIP39 English mnemonic of 32-byte entropy (wordlist bip39-english.txt); seed = PBKDF2-HMAC-SHA512(NFKD(mnemonic), \"mnemonic\" || NFKD(passphrase), 2048, 64); ed25519Seed / x25519Private = HKDF-SHA256(seed, empty, \"avp/owner/ed25519/v1\" / \"avp/owner/x25519/v1\", 32)",
+      "expects": "mnemonic, seed, owner Ed25519 seed and public key, owner X25519 private and public key; the Trezor anchors reproduce with passphrase TREZOR",
+      "anchors": [
+        "BIP39 (bitcoin/bips bip-0039, English wordlist SHA-256 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda)",
+        "trezor/python-mnemonic vectors.json english[8], [11], [14]",
+        "RFC 8018 PBKDF2",
+        "RFC 5869 HKDF"
+      ],
+      "generatedBy": "vectors/generate.ts"
     },
     {
-      "id": "key-binding-message",
-      "file": "key-binding-message.json",
-      "kind": "deterministic",
-      "specSection": "9",
-      "construction": "utf8(ed25519PublicKey + \"|\" + x25519PublicKey)",
-      "expects": "the canonical message as a UTF-8 string",
-      "anchors": []
+      "id": "manifest",
+      "file": "manifest.json",
+      "kind": "composition",
+      "specSection": "4.2",
+      "construction": "S = CE(tag \"avp/manifest/v1\", ...) with sorted hosts, members, removals, frontier; ownerSignature = Ed25519(ownerKey, S); manifestHash = SHA-256(S || ownerSignature); repoId = base64url-nopad(SHA-256(CE(tag \"avp/repo-id/v1\", bytes(ownerKey), bytes(genesisNonce)))[0..16])",
+      "expects": "stateHex, ownerSignature, manifestHashHex, and repoId at seq 1, independent of list input order",
+      "anchors": [
+        "RFC 8032 Ed25519",
+        "FIPS 180-4 SHA-256",
+        "RFC 4648 §5 (base64url)"
+      ],
+      "generatedBy": "vectors/generate.ts"
+    },
+    {
+      "id": "commit",
+      "file": "commit.json",
+      "kind": "composition",
+      "specSection": "4.3",
+      "construction": "H = CE(tag \"avp/commit/v1\", ...) with sorted parents; commitId = SHA-256(H); authorSignature = Ed25519(author, CE(tag \"avp/commit-sig/v1\", bytes(commitId))); AAD v2 = CE(tag \"avp/aad/v2\", str(repoId), i64(keyEpoch), bytes(author), sorted parents); AES-256-GCM, 12-byte IV, 16-byte tag appended",
+      "expects": "headerHex, commitIdHex, authorSignature, aadHex, and ciphertext, independent of parent order; decrypt recovers plaintextUtf8",
+      "anchors": [
+        "RFC 5116 AES-256-GCM",
+        "RFC 8032 Ed25519",
+        "FIPS 180-4 SHA-256"
+      ],
+      "generatedBy": "vectors/generate.ts"
+    },
+    {
+      "id": "merge",
+      "file": "merge.json",
+      "kind": "data",
+      "specSection": "5",
+      "construction": "payload v2 merge: union of accounts, greatest (at, n, by) stamp per field and per ban server id, greatest deleted marker; deleted iff deleted is greater than every field and ban stamp; stripRefresh removes refreshToken and expiresAt with their stamps (5.1); HLC tick and observe",
+      "expects": "expected for every permutation of inputs, idempotence, associativity, expectedDeleted per account; each hlc step's state",
+      "generatedBy": "vectors/generate.ts (expected values hand-written from SPEC 5)"
+    },
+    {
+      "id": "acceptance",
+      "file": "acceptance.json",
+      "kind": "scenario",
+      "specSection": "6, 7, 8.3, 8.4",
+      "construction": "owner-signed manifest chains (including diverged states), signed commit graphs, and leave requests applied in order to one host's rules engine, by client push or replication offer",
+      "expects": "each step's verdict (ok or the SPEC 10.4 code); finalHeads, finalHeld, finalTip",
+      "shape": "uses a top-level `scenarios` array, not `cases`; see vectors/README.md for the step shape",
+      "generatedBy": "vectors/generate.ts (verdicts hand-written from the cited SPEC rule)"
     },
     {
       "id": "hkdf",
       "file": "hkdf.json",
       "kind": "rfc-primitive",
       "primitive": "HKDF-SHA256",
-      "specSection": "4",
+      "specSection": "4.4",
       "expects": "prkHex (extract) and okmHex (expand)",
-      "anchors": ["RFC 5869 Appendix A.1", "RFC 5869 Appendix A.3 (zero-length salt)"]
+      "anchors": [
+        "RFC 5869 Appendix A.1",
+        "RFC 5869 Appendix A.3 (zero-length salt)"
+      ]
     },
     {
       "id": "x25519",
       "file": "x25519.json",
       "kind": "rfc-primitive",
       "primitive": "X25519",
-      "specSection": "4",
+      "specSection": "4.4",
       "expects": "raw 32-byte little-endian shared secret, unhashed",
-      "anchors": ["RFC 7748 §5.2", "RFC 7748 §6.1 (reused by key-wrap)"]
+      "anchors": [
+        "RFC 7748 §5.2",
+        "RFC 7748 §6.1 (reused by key-wrap)"
+      ]
     },
     {
       "id": "ed25519",
       "file": "ed25519.json",
       "kind": "rfc-primitive",
       "primitive": "Ed25519",
-      "specSection": "3",
+      "specSection": "3.3",
       "expects": "public key derived from seed; deterministic signature reproduced and verified",
-      "anchors": ["RFC 8032 §7.1 TEST 2", "RFC 8032 §7.1 TEST 3"],
-      "note": "Anchors the challenge -> token signature: signing the raw nonce bytes is this primitive."
-    },
-    {
-      "id": "payload-aead",
-      "file": "payload-aead.json",
-      "kind": "composition",
-      "specSection": "4",
-      "construction": "AES-256-GCM, 12-byte IV, 16-byte tag appended; AAD = aad construction",
-      "expects": "re-encrypt equals committed ciphertext; decrypt recovers plaintext",
-      "failureAssertion": "decryption MUST fail when the AAD keyEpoch is changed (rollback/replay protection; anchors rotation correctness, SPEC §10)",
-      "anchors": ["RFC 5116 AES-256-GCM"]
+      "anchors": [
+        "RFC 8032 §7.1 TEST 2",
+        "RFC 8032 §7.1 TEST 3"
+      ],
+      "note": "The primitive under every AVP signature. The challenge -> token signature is over the avp/challenge/v1 transcript (SPEC 3.3), pinned in federation.json `challenges`."
     },
     {
       "id": "key-wrap",
       "file": "key-wrap.json",
       "kind": "composition",
-      "specSection": "4",
+      "specSection": "4.4",
       "construction": "X25519-HKDF-SHA256-AESGCM-v1: KEK = HKDF-SHA256(ikm=X25519(eph,recip), salt=ephPubRaw, info=UTF8(\"avp/rdk-wrap/v1\")); AES-256-GCM(KEK, iv, aad=UTF8(\"avp/rdk-wrap/v1\"), dataKey)",
       "expects": "recompute shared secret + KEK; re-wrap equals committed ciphertext; unwrap recovers the data key",
       "note": "recipientPrivateKeyB64, sharedSecretHex, kekHex are checker aids, NOT part of the wire WrappedKey",
-      "anchors": ["RFC 7748 §6.1 (recipient = Alice, ephemeral = Bob)"]
+      "anchors": [
+        "RFC 7748 §6.1 (recipient = Alice, ephemeral = Bob)"
+      ]
     },
     {
       "id": "federation",
       "file": "federation.json",
-      "kind": "deterministic",
-      "specSection": "8",
-      "construction": "base64url (no padding) over compact JSON for the join-handshake tokens (InviteRequest, RepoLocator); avp://<host>/<repoId> for the repository URI",
-      "expects": "decoding base64url yields the object (decode oracle); canonical minified encoding round-trips; avp:// URIs parse to {host, repoId} and format back",
-      "shape": "uses top-level `tokens` and `uris` arrays, not `cases`",
-      "anchors": ["RFC 4648 §5 (base64url)"]
+      "kind": "composition",
+      "specSection": "3.3, 11",
+      "construction": "base64url-nopad over compact JSON for InviteToken (with the host-signed Acceptance), RepoLocator, LinkRequest, LinkGrant (owner entropy wrapped under avp/owner-link/v1); LeaveRequest signatures; link confirmation codes; member and owner fingerprints; avp://<hostLocator>/<repoId> locators; challenge transcripts CE(tag \"avp/challenge/v1\", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce)) and their signatures",
+      "expects": "decoding base64url yields the object; canonical encoding round-trips; acceptance and leave signatures verify; link codes and fingerprints recompute; the link grant unwraps to the owner entropy; avp:// URIs parse and format back; each challenge messageHex recomputes and its signature verifies under the named hostKey only",
+      "shape": "uses top-level `tokens`, `leaves`, `linkCodes`, `fingerprints`, `uris`, and `challenges`, not `cases`",
+      "anchors": [
+        "RFC 4648 §5 (base64url)",
+        "RFC 8032 Ed25519"
+      ],
+      "generatedBy": "vectors/generate.ts"
     },
     {
       "id": "negative",
       "file": "negative.json",
       "kind": "negative",
-      "specSection": "4",
-      "construction": "valid payload-aead / key-wrap / ed25519 constructions with one mutation each (flipped tag, bit flip, truncation, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral key, wrong message/public key)",
-      "expects": "each case MUST be rejected: payload-decrypt and key-unwrap fail authentication, ed25519-verify returns false",
+      "specSection": "14",
+      "construction": "valid key-wrap / ed25519 constructions and 0.5 manifest, commit, payload, link grant, acceptance, and leave items with one mutation each (flipped tag or byte, truncation, wrong key, wrong owner signature, wrong previous hash, commit id that does not recompute, author signature over another id, AAD v2 with a wrong parent set, epoch, author, or repoId, wrong wrap label), and challenge domain separation cases (a challenge signature presented as a commit author signature and the reverse, a challenge signature for another host key, a signature over the raw nonce)",
+      "expects": "each case MUST be rejected: unwrap and decrypt fail authentication, verify returns false, the link check fails; each 0.5 case's `base` is accepted",
       "generatedBy": "vectors/generate.ts (from the same seeds as the positive vectors)"
     }
   ]

@@ -8,7 +8,16 @@ This is the **specification** for AVP (the Alt Vault Protocol), an open,
 vendor-neutral, zero-knowledge, federated protocol for sharing Minecraft alt
 accounts across clients. It is the wire contract, not a product. There is no
 application to run here. The deliverables are documents, a proto schema, a JSON
-schema, conformance vectors, and small illustrative examples.
+schema, conformance vectors, a black-box host harness, and small illustrative
+examples.
+
+AVP 0.5 (draft) in one breath: a repository lives on several hosts that
+replicate it; an owner holding a BIP39 phrase signs a hash-linked manifest
+chain (members, wrapped data keys, key epoch, refresh-token policy, hosts);
+members sign commits carrying the full encrypted payload; concurrent heads
+merge per field; removal rotates the key and signs a cutoff; each host issues
+its own tokens. Every signed or hashed structure uses the canonical encoding
+(CE) of SPEC §4.
 
 The live site (GitHub Pages, custom domain `avp.trq.lol`) is rendered from this
 repo with Jekyll. The README is the home page.
@@ -25,34 +34,56 @@ repo with Jekyll. The README is the home page.
 - `openapi.yaml` is the OpenAPI 3.1 description of the HTTP/JSON profile (paths,
   methods, status codes, error responses). It does not redefine message shapes:
   it `$ref`s them from `schema/avp.schema.json`, which stays the single source of
-  truth. Keep its routes and status set aligned with SPEC §6.
-- `vectors/` are conformance test vectors, RFC-anchored and three-way verified
-  (published RFCs + a reference implementation + the Node runner all agree
-  byte-for-byte). **Never edit a vector value without re-verifying all three.**
-  `vectors/index.json` is a machine-readable index of the files (kind, spec
-  section, RFC anchors); keep it in sync when adding or removing a vector. See
-  `vectors/README.md`. `vectors/federation.json` is the exception to the crypto
-  pattern: base64url join-handshake tokens and `avp://` URI vectors (SPEC §8),
-  deterministic encoding rather than crypto, using `tokens`/`uris` arrays not
-  `cases`. `vectors/negative.json` is the MUST-reject bank (tampered/truncated/
-  wrong-key/wrong-AAD cases that decryption, unwrap, or verify MUST reject).
-  `vectors/generate.ts` re-derives every vector from documented seeds:
-  `bun vectors/generate.ts --check` is the provenance/drift gate (CI runs it; it
-  also owns `negative.json` via `--write`) and does not rewrite the reviewed
-  positive files.
-- `examples/` are illustrative reference clients and servers (Go, TypeScript,
-  Rust, Python, Java) for the HTTP/JSON profile, plus `examples/grpc/` (a
-  TypeScript client and server that load the canonical proto for the gRPC
-  profile) and a Node conformance runner that also checks
-  schema/example/index/openapi consistency. They are not production code.
-- `harness/` is the black-box conformance suite: point it at any running server
-  (`bun harness/conformance.ts --server URL`) and it drives the full wire
-  contract, asserting the SPEC §3/§6/§10 MUSTs (auth failure modes,
-  optimistic-concurrency conflict, membership authorization, key rotation,
-  zero-knowledge). It reuses the vector-tested example crypto; it is the
-  executable check for a *server*, the vectors are the check for the *crypto*.
+  truth. Keep its routes and status set aligned with SPEC §10 (client and
+  host-to-host routes, the §10.4 error table).
+- `vectors/` are conformance test vectors, indexed by `vectors/index.json`
+  (kind, spec section, anchors; keep it in sync when adding or removing a
+  vector). See `vectors/README.md`. **Never edit a vector value without
+  re-verifying it three ways** (RFC or published anchor, a reference
+  implementation, and the Node runner agree byte for byte).
+  - RFC-anchored primitives: `hkdf.json`, `x25519.json`, `ed25519.json`, and
+    the wrap composition `key-wrap.json`.
+  - 0.5 constructions, generated from documented seeds: `bip39-owner.json`
+    (over the pinned wordlist `bip39-english.txt`), `manifest.json`,
+    `commit.json`, and `federation.json` (out-of-band tokens, leave
+    signatures, link codes, fingerprints, `avp://` locators; it uses
+    `tokens`/`leaves`/`linkCodes`/`fingerprints`/`uris`, not `cases`).
+  - Hand-written expectations: `merge.json` (payload merge and HLC) and
+    `acceptance.json` (host rule scenarios with a top-level `scenarios`
+    array; the Rust and Java rules engines replay it unchanged).
+  - `negative.json`, the MUST-reject bank, including the strict Ed25519
+    rejects of SPEC §2.
+  `vectors/generate.ts` is the generator. `bun vectors/generate.ts --check`
+  is the provenance and drift gate (CI runs it); `--write` regenerates only
+  the files the generator owns (`negative.json`, `bip39-owner.json`,
+  `manifest.json`, `commit.json`, `federation.json`, `merge.json`,
+  `acceptance.json`) and never rewrites the RFC-anchored files.
+- `examples/` holds the illustrative Rust and Java references for the
+  HTTP/JSON profile. Each language has one shared library that both its host
+  and its client use: the `avp` crate (`examples/rust/avp`) and
+  `examples/java/avp` (JDK only, default package). Hosts are in
+  `examples/<lang>/server`, clients in `examples/<lang>/client`. Hosts read
+  `PORT`, `AVP_BIND` (default `0.0.0.0`; use `127.0.0.1` locally),
+  `AVP_HOST_SEED`, `AVP_PEERS`, and `AVP_TEST_CONTROL`, and replicate over
+  signed HTTP/JSON (SPEC §9.3); the proto still defines the `Replication`
+  service for a gRPC profile. `examples/conformance` is the Node/Bun runner
+  that reproduces every vector and checks schema/example/index/openapi
+  consistency. None of it is production code. The Go, Python, TypeScript
+  and gRPC examples stopped at 0.4 (see the `v0.4` tag).
+- `harness/` is the black-box host suite. `harness/conformance.ts` drives one
+  host's client wire contract (`bun harness/conformance.ts --server URL`):
+  auth failure modes, `createRepo`, the pulled chain, forks and merges, the
+  head bound, `manifest_conflict`, the removal cutoff, leave, `prepareJoin`,
+  not hosted, zero-knowledge. `harness/multihost.ts` drives replication
+  between two or three hosts (convergence, concurrent writes, removal on
+  every host, unlisted hosts, old-epoch heads, leave replication, diverged
+  owner states). `harness/run-hosts.sh` builds and starts the reference hosts
+  on `127.0.0.1` and runs a command against them; `harness/common.ts` holds
+  the shared helpers and `harness/crypto.ts` the vector-tested crypto. The
+  harness is the executable check for a *host*; the vectors are the check for
+  the *constructions*.
 - `THREATMODEL.md` is the adversary model (what AVP defends, what it does not, the
-  residual risks). Keep it consistent with SPEC §10 invariants and §12 open items
+  residual risks). Keep it consistent with SPEC §13 invariants and §15 open items
   when the security posture changes.
 
 When you change one of `SPEC.md` / `proto/avp.proto` / `schema/avp.schema.json` /
@@ -69,12 +100,14 @@ one protocol.
    neutral client/user name for provenance values. Provenance fields
    (`sourceClient`, `sourceUser`) carry such names only at runtime, set by each
    implementer, never baked into spec text, examples, or tests.
-2. **Zero-knowledge is the whole point.** Never let the server see a plaintext
-   alt, a passphrase, an identity seed, or the data key. The server stores only
-   ciphertext, wrapped keys, public keys, counters, and opaque signatures.
-3. **Fixed byte constructions are exact.** The AAD layout (SPEC §4) and the
-   key-binding message (SPEC §9) are byte-for-byte. Reproduce the deterministic
-   vectors before trusting any encoder you write.
+2. **Zero-knowledge is the whole point.** Never let a host see a plaintext
+   alt, the owner phrase, its entropy or seed, a private key, or a data key. A
+   host stores only ciphertext, wrapped keys, public keys, counters, ids, and
+   signatures.
+3. **Fixed byte constructions are exact.** The canonical encoding (SPEC §4.1)
+   and every layout built on it (manifest state, commit header, AAD v2,
+   acceptance, leave, link code, host request) are byte-for-byte. Reproduce
+   the vectors before trusting any encoder you write.
 4. **No em dashes** in prose (house style). Use commas, colons, semicolons,
    periods, or parentheses.
 
@@ -91,14 +124,24 @@ AI). The committer is the responsible author.
 
 - Conformance runner (vectors + schema/example/index/openapi consistency):
   `cd examples/conformance && bun install && bun run test`.
-- Black-box a server: start one, then `bun harness/conformance.ts --server http://localhost:PORT`.
-- One-command local run: `Taskfile.yml` (go-task). `task test` runs the conformance
-  runner and every language's example tests; `task harness` / `task openapi-lint` run
-  the server harness and the Spectral lint. Each target mirrors a CI job.
-- CI workflows in `.github/workflows/`: per-language `examples-{go,node,rust,java,python}.yml`,
-  the cross-language `examples-interop.yml`, and `conformance.yml` (vector runner +
+- Vector drift gate: `bun vectors/generate.ts --check`.
+- Black-box a host: start one with `AVP_BIND=127.0.0.1`, then
+  `bun harness/conformance.ts --server http://127.0.0.1:PORT`; or let
+  `bash harness/run-hosts.sh rust -- bun harness/conformance.ts --server http://127.0.0.1:19201`
+  build and start it.
+- One-command local run: `Taskfile.yml` (go-task). `task test` runs the
+  conformance runner, the vector drift gate, and the Rust and Java tests;
+  `task harness`, `task multihost`, `task interop`, and `task openapi-lint` run
+  the host harness, the multi-host harness, cross-language interop, and the
+  Spectral lint. Each target mirrors a CI job.
+- `llms-full.txt` is generated from `IMPLEMENTING.md`, `SPEC.md`, and
+  `THREATMODEL.md`: after editing any of them run
+  `node scripts/build-llms-full.mjs --write` (`docs.yml` runs `--check`).
+- CI workflows in `.github/workflows/`: per-language `examples-{node,rust,java}.yml`,
+  the cross-language `examples-interop.yml`, `conformance.yml` (vector runner +
   Spectral lint of `openapi.yaml` + schema-consistency + the black-box harness against
-  the Go and TypeScript reference servers). `no-leak.yml` is the vendor-neutrality gate.
+  the Rust and Java reference hosts + the multi-host harness per language pairing),
+  and `docs.yml` (llms-full sync). `no-leak.yml` is the vendor-neutrality gate.
 - The Pages site builds on push (no local step required). If you want to preview
   it locally and have Ruby, `bundle exec jekyll serve` renders `_layouts/default.html`
   with `assets/css/style.css`.

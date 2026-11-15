@@ -4,7 +4,113 @@ Notable changes to the Alt Vault Protocol (AVP) and this repository. The format 
 [Keep a Changelog](https://keepachangelog.com/). The protocol version is independent of any
 implementation's version.
 
-## [Unreleased]
+## [0.5] - 2026-11-13
+
+Multi-host repositories. A repository now lives on several hosts that replicate it with each other, an
+owner holding a BIP39 recovery phrase signs every membership, policy, and host change, every write is a
+member-signed commit, and concurrent writes merge per field instead of conflicting. 0.5 is a **breaking**
+version: it is not wire compatible with 0.4 servers, payloads, or vectors, and no migration path is
+specified. `SPEC.md` was rewritten; the section numbers below are 0.5's.
+
+### Specification
+
+- **Strict Ed25519** (section 2): every verified signature rejects small-order and non-canonical `A` and
+  `R` and `S >= L` before any other check, then uses the cofactorless equation `[S]B = R + [k]A` with `R`
+  compared by encoding, so every conformant implementation accepts exactly the same signatures.
+- **Owner identity** (section 3.1): a 24-word BIP39 phrase (256-bit entropy, English wordlist, empty
+  passphrase) derives the owner Ed25519 and X25519 keys by HKDF-SHA256 with the labels
+  `avp/owner/ed25519/v1` and `avp/owner/x25519/v1`. The phrase is the identity; it never reaches a host.
+- **Host keys and host-issued authentication** (section 3.3): each host has an Ed25519 host key, every
+  host match compares keys, and each host mints its own host-local bearer tokens for any key that signs
+  its challenge. There is no external identity provider. The client signs the transcript
+  `CE(tag "avp/challenge/v1", bytes(hostKey), bytes(ed25519PublicKey), bytes(nonce))`, not the raw nonce
+  as in 0.4, so a host cannot pick a nonce that is another construction's message, and every signed
+  construction has its own tag (section 4.1).
+- **Canonical encoding** (section 4.1): one deterministic byte writer (`tag`, `bytes`, `str`, `i64`,
+  `bool`, `count`, sorted lists) for every signed or hashed structure; no JSON canonicalization anywhere.
+- **Manifest chain** (sections 4.2, 6): owner-signed, hash-linked states carrying the members, wrapped
+  data keys, key epoch, `shareRefreshTokens` (now covered by the owner signature, closing 0.4's manifest
+  authentication open item), the hosts, and cumulative removals. `repoId` is derived from the owner key
+  and a genesis nonce and never encodes a host. Clients pin the highest verified state (rollback
+  protection); diverged owner states resolve by the bytewise-lower `manifestHash`, with commits citing a
+  losing state re-checked, accepted, or held until the owner decides.
+- **Commit graph and AAD v2** (sections 4.3, 7): commits name their parents, cite their manifest state by
+  seq and hash, and are signed by their author over a `commitId` that covers the ciphertext. AAD v2 binds
+  `repoId`, `keyEpoch`, `author`, and the sorted parents. Hosts keep every head, bound them (RECOMMENDED
+  16, new code `too_many_heads`), and answer unknown parents with `422 missing_parents`.
+- **Removal cutoff** (sections 7.3, 8.3): removing a member rotates the data key and signs a frontier;
+  afterwards a commit by the removed member is accepted only if it is in the frontier or an ancestor of
+  it, which closes backdating. A commit the cutoff dropped counts as rejected, so its children are
+  rejected too. An epoch-raising state and its rotation commit are adopted atomically.
+- **Payload v2 and merge** (section 5): every account field and ban carries an `(at, n, by)` stamp from a
+  hybrid logical clock; heads merge per field and per ban server id, deletion is a stamped marker that a
+  later edit revives, and refresh-token stripping removes the fields with their stamps.
+- **Membership operations** (section 8): invites go through `prepareJoin` and a host-signed acceptance in
+  the invite token, so an owner adds a host only with that host's consent; members can leave with a
+  signed leave request; policy and host-set changes are owner-signed states; a dropped host stops serving
+  the repository.
+- **Replication between hosts** (section 9): `heads`, `fetch`, and `offer`, with every received item
+  validated by the client-write rules and the hosted check applied to the received tip. The reference
+  profile is signed HTTP/JSON (`AVP-Host-Key`, `AVP-Host-Time`, `AVP-Host-Signature`, 60 s skew), and a
+  host on it MUST send host requests for a repository only to the peers its tip lists. The proto adds a
+  `Replication` service for a gRPC profile.
+- **Transport and errors** (section 10): new routes `POST /v1/repos/{repoId}/manifest`, `.../leave`,
+  `POST /v1/prepare-join`, and the three `/v1/host/repos/{repoId}/...` routes; `pull` and `push` take and
+  return commits and heads; discovery adds `hostKey`. New error codes `not_hosted`, `too_many_heads`,
+  `manifest_conflict`, and `missing_parents`. A request target that cannot be parsed as a path MAY get a
+  bare `400` without the error body.
+- **Tokens and device linking** (section 11): `RepoLocator`, `InviteToken` with `Acceptance`,
+  `LeaveRequest`, and owner device linking (`LinkRequest`, a 6-digit confirmation code, and a `LinkGrant`
+  wrapping the phrase entropy under `avp/owner-link/v1`), all `"v": 2`. Member and owner fingerprints.
+- **Invariants, conformance, open items** (sections 13 to 15): owner authority, chain and commit
+  integrity, rotation atomicity, no lost writes, and hosts matched by key are invariants. Open items are
+  algorithm negotiation, ownership transfer, deletion-marker GC and commit pruning, and host freshness
+  against a withholding host. `THREATMODEL.md` was rewritten to match (stolen owner phrase, diverged owner
+  devices, replication).
+- `proto/avp.proto`, `schema/avp.schema.json`, and `openapi.yaml` describe the 0.5 messages and routes;
+  `openapi.yaml` `info.version` is `0.5`.
+
+### Vectors
+
+- Added `bip39-english.txt` (the pinned BIP39 English wordlist) and `bip39-owner.json` (entropy to
+  mnemonic, seed, and owner keys, anchored to the Trezor BIP39 reference vectors).
+- Added `manifest.json` (CE bytes, owner signature, `manifestHash`, `repoId`) and `commit.json` (header
+  bytes, `commitId`, author signature, AAD v2, ciphertext), both independent of list input order.
+- Added `merge.json` (every input order, idempotence, associativity, the HLC, deletion and revival,
+  per-server bans, stripping after the policy is turned off) and `acceptance.json` (replayable host
+  rule scenarios with each step's verdict and the final heads, held commits, tip, and leaves).
+- Rewrote `federation.json` for the 0.5 tokens, leave signatures, link codes, fingerprints, and locators,
+  and `negative.json` with 0.5 manifest, commit, AAD v2, link grant, acceptance, and leave cases plus the
+  strict Ed25519 rejects.
+- `vectors/generate.ts` derives every 0.5 file from documented seeds; `--check` is the drift gate.
+  `hkdf.json`, `x25519.json`, `ed25519.json`, and `key-wrap.json` are unchanged.
+
+### Examples
+
+- Rebuilt the Rust and Java references around one shared library per language (`examples/rust/avp`,
+  `examples/java/avp`) used by both the host and the client, each reproducing every vector and replaying
+  `acceptance.json`.
+- The reference hosts replicate with each other over signed HTTP/JSON and read `PORT`, `AVP_BIND`,
+  `AVP_HOST_SEED`, `AVP_PEERS`, and `AVP_TEST_CONTROL`. The reference clients run the whole flow (owner
+  phrase, create, invite with `prepareJoin`, merge, remove with a cutoff, leave, device linking) against
+  one or two hosts.
+- Rewrote the worked flow and example bodies (`create-repo-request.json`, `publish-manifest-request.json`,
+  `push-request.json`, `pull-response.json`, `offer-request.json`), `IMPLEMENTING.md`, and the README for
+  0.5.
+- The black-box harness checks the 0.5 single-host contract (`harness/conformance.ts`) and adds
+  multi-host scenarios (`harness/multihost.ts`) plus a launcher (`harness/run-hosts.sh`). CI runs both
+  against the Rust and Java hosts, the multi-host suite in every language pairing, and each client
+  against the other language's host.
+
+### Removed
+
+- The Go, Python, TypeScript, and TypeScript gRPC reference examples. They stopped at 0.4; see the
+  `v0.4` tag.
+- The 0.4 vectors `aad.json`, `key-binding-message.json`, and `payload-aead.json`, replaced by
+  `commit.json`.
+- From the protocol: optimistic concurrency on a payload version (`conflict`), the `addMember`,
+  `removeMember`, and member-key routes, the identity-provider key binding (`keyBindingSig`,
+  `issuerJwksUrl`), and the 0.4 AAD layout.
 
 ## [0.4] - 2026-07-28
 

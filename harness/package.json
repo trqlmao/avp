@@ -2,11 +2,12 @@
   "name": "avp-conformance-harness",
   "version": "0.0.0",
   "private": true,
-  "description": "Black-box conformance harness: drives the full AVP HTTP/JSON wire contract against a running server and asserts the SPEC MUSTs (auth, optimistic concurrency, authorization, rotation, zero-knowledge).",
+  "description": "Black-box conformance harness: drives the AVP 0.5 HTTP/JSON client contract against one running host and asserts the SPEC MUSTs (auth, createRepo, the manifest chain, forks and merges, the head bound, the removal cutoff, leave, prepareJoin, zero-knowledge).",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "conformance": "bun conformance.ts",
+    "multihost": "bun multihost.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

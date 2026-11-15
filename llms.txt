@@ -1,49 +1,52 @@
 # AVP (Alt Vault Protocol)
 
-> An open, vendor-neutral protocol for sharing Minecraft alt accounts across clients through a zero-knowledge, federated sync server. Members are identified by an Ed25519 keypair; the alt payload is encrypted on the client, so the server stores only ciphertext, wrapped keys, public keys, and version counters, and can decrypt nothing.
+> An open, vendor-neutral protocol for sharing Minecraft alt accounts across clients through zero-knowledge, federated hosts. A repository lives on several hosts that replicate it with each other. The owner holds a BIP39 recovery phrase and signs a hash-linked manifest chain (members, wrapped data keys, key epoch, refresh-token policy, hosts); members sign commits carrying the encrypted payload. Hosts store only ciphertext, wrapped keys, public keys, counters, ids, and signatures, and can decrypt nothing.
 
-This repository is the specification, not an implementation. It defines the wire contract so any client or server can interoperate. The same messages are available in two interchangeable transport profiles, gRPC and HTTP/JSON. Repositories are addressed `avp://host/repoId` and reachable across independently hosted servers with one portable keypair identity.
+This repository is the specification, not an implementation. It defines the wire contract so any client or host can interoperate. The same messages are available in two interchangeable transport profiles, gRPC and HTTP/JSON; the reference hosts replicate with each other over signed HTTP/JSON. Version 0.5 is a breaking draft, not wire compatible with 0.4.
 
-Notes for implementers: field names are normative; do not rename or renumber them. The additional-authenticated-data layout and the canonical key-binding message are fixed byte constructions with deterministic test vectors. The server must never receive plaintext alts, passphrases, identity seeds, or the data key. Provenance fields carry implementer-defined values at runtime and are never part of the spec text.
+Notes for implementers: field names are normative; do not rename or renumber them. Every signed or hashed structure (manifest state, commit header, AAD, acceptance, leave request, host request) is built by a fixed canonical encoding with deterministic test vectors. Ed25519 verification is strict (small-order and non-canonical points and S >= L rejected, cofactorless equation). A host must never receive the owner phrase, a seed, a private key, a data key, or a plaintext alt. Provenance fields carry implementer-defined values at runtime and are never part of the spec text.
 
 For a single fetch with the full text of the guide, specification, and threat model inline, see [llms-full.txt](https://raw.githubusercontent.com/trqlmao/avp/main/llms-full.txt).
 
 ## Implementer guide
 
-- [Implementing AVP (IMPLEMENTING.md)](https://raw.githubusercontent.com/trqlmao/avp/main/IMPLEMENTING.md): The entry point for building a conformant client and server. Covers identity and auth, the full cryptographic envelope (AAD, payload AEAD, HKDF, key wrap), the wire contract, and the conformance checklist. Start here.
+- [Implementing AVP (IMPLEMENTING.md)](https://raw.githubusercontent.com/trqlmao/avp/main/IMPLEMENTING.md): The entry point for building a conformant client and host. Covers the owner phrase and keys, host-issued tokens, the canonical encoding, manifest states, commits and AAD v2, the payload merge, the flows (create, pull and merge, invite with prepareJoin, remove with a cutoff, leave, device linking, replication), the error table, and the conformance checklist. Start here.
 
 ## Specification
 
-- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identity and authentication, the cryptographic envelope, payload and provenance, the transport surface, operational limits and retries, federation, anti-MITM key binding, invariants, conformance, and security considerations.
-- [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names.
+- [Specification (SPEC.md)](https://raw.githubusercontent.com/trqlmao/avp/main/SPEC.md): The normative protocol: identities and host-issued authentication, the canonical encoding, payload v2 and merge, manifest chain rules, commit acceptance rules, membership operations, replication between hosts, the transport surface and errors, tokens and device linking, operational limits, invariants, conformance, and security considerations.
+- [Protobuf schema (avp.proto)](https://raw.githubusercontent.com/trqlmao/avp/main/proto/avp.proto): Canonical gRPC schema with stable field numbers and names, including the host-to-host Replication service.
 - [JSON Schema (avp.schema.json)](https://raw.githubusercontent.com/trqlmao/avp/main/schema/avp.schema.json): Message shapes for the HTTP/JSON transport profile, including the error body (`$defs/Error`).
-- [OpenAPI (openapi.yaml)](https://raw.githubusercontent.com/trqlmao/avp/main/openapi.yaml): OpenAPI 3.1 route description of the HTTP/JSON profile: paths, methods, status codes, and error responses, referencing the JSON Schema shapes.
+- [OpenAPI (openapi.yaml)](https://raw.githubusercontent.com/trqlmao/avp/main/openapi.yaml): OpenAPI 3.1 route description of the HTTP/JSON profile: client and host-to-host paths, methods, status codes, and error responses, referencing the JSON Schema shapes.
 
 ## Examples
 
-- [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): An end-to-end walkthrough (create, invite, join, pull, push, rotate) with representative request and response JSON.
-- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): Five runnable reference implementations (Go, TypeScript, Rust, Python, Java), each with a client and in-memory HTTP/JSON server, all implementing the real envelope and key-wrap crypto verified against the conformance vectors. Cross-language wire compatibility is tested by the examples-interop workflow.
-- [gRPC reference example](https://raw.githubusercontent.com/trqlmao/avp/main/examples/grpc/README.md): A runnable client and server for the gRPC profile that load the canonical proto/avp.proto directly and exercise all six Vault RPCs (plus a challenge/token Auth service); run end to end by the examples-grpc workflow.
-- [Conformance harness](https://raw.githubusercontent.com/trqlmao/avp/main/harness/README.md): A black-box conformance suite: point it at any running server and it drives the full wire contract, asserting the normative MUSTs (auth failure modes, optimistic-concurrency conflict, membership authorization, key rotation, zero-knowledge).
+- [Worked flow and message bodies](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): An end-to-end walkthrough (create, invite, join, write, merge, remove, replicate) with representative request and response JSON.
+- [Reference implementations](https://raw.githubusercontent.com/trqlmao/avp/main/examples/README.md): Rust and Java, each with a shared avp library, an in-memory HTTP/JSON host that replicates with its peers, and a client, verified against every conformance vector. Cross-language wire compatibility and replication are tested by the examples-interop workflow and the multi-host harness.
+- [Conformance harness](https://raw.githubusercontent.com/trqlmao/avp/main/harness/README.md): A black-box conformance suite: conformance.ts drives one host's client wire contract and asserts the normative MUSTs; multihost.ts drives replication, convergence, and diverged owner states across two or three hosts.
 
 ## Conformance vectors
 
 - [Vectors index (index.json)](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/index.json): Machine-readable index of every vector file (kind, spec section, and RFC anchors) for a harness to enumerate.
-- [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/README.md): How the vectors are organized and which are deterministic versus generated.
-- [AAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/aad.json): Deterministic additional-authenticated-data construction (SPEC section 4).
-- [Key-binding message vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-binding-message.json): Deterministic canonical key-binding message (SPEC section 9).
+- [Vectors overview](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/README.md): How the vectors are organized, their shapes, and how they are generated and verified.
+- [BIP39 English wordlist](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/bip39-english.txt): The pinned 2048-word list for the owner recovery phrase (SPEC section 3.1).
+- [Owner identity vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/bip39-owner.json): Entropy to 24-word mnemonic, PBKDF2 seed, and the HKDF owner Ed25519 and X25519 keys, anchored to the Trezor BIP39 vectors (SPEC section 3.1).
+- [Manifest vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/manifest.json): Canonical-encoding bytes, owner signature, manifestHash, and repoId of an owner-signed chain (SPEC sections 4.1, 4.2).
+- [Commit vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/commit.json): Commit header bytes, commitId, author signature, AAD v2, and AES-256-GCM ciphertext (SPEC section 4.3).
+- [Merge vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/merge.json): Payload v2 merge over every input order, idempotence, the hybrid logical clock, deletion and revival, per-server bans, and refresh-token stripping (SPEC section 5).
+- [Acceptance scenarios](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/acceptance.json): Replayable manifest chains and commit graphs with the expected host verdict of each step and the final heads, held commits, and tip (SPEC sections 6, 7, 8.3, 8.4).
 - [HKDF vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/hkdf.json): RFC 5869 HKDF-SHA256 test cases anchoring the key-derivation primitive.
 - [X25519 vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/x25519.json): RFC 7748 X25519 ECDH vectors anchoring the key-agreement primitive.
 - [Ed25519 vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/ed25519.json): RFC 8032 Ed25519 vectors anchoring the signature primitive.
-- [Payload AEAD vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/payload-aead.json): AES-256-GCM payload encryption with the AVP AAD composition.
 - [Key-wrap vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/key-wrap.json): Full X25519-HKDF-SHA256-AESGCM-v1 wrap composition anchored to RFC 7748.
-- [Federation vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/federation.json): Base64url join-handshake tokens (invite request, repo locator) and avp:// repository URIs (SPEC section 8); decode oracle plus canonical-encode and URI parse/format.
-- [Negative vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/negative.json): MUST-reject bank (flipped tag, truncation, wrong AAD repoId/version/epoch, wrong key, wrong recipient/ephemeral key, wrong message/public key); a conformant implementation rejects every case.
+- [Federation vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/federation.json): Base64url out-of-band tokens (invite token with host acceptance, repo locator, link request and grant), leave request signatures, link confirmation codes, fingerprints, and avp:// locators (SPEC section 11).
+- [Negative vectors](https://raw.githubusercontent.com/trqlmao/avp/main/vectors/negative.json): MUST-reject bank: tampered wraps and signatures, manifests with a bad signature or wrong previous hash, commits whose id does not recompute, AAD v2 mismatches, wrong wrap labels, foreign acceptances and leaves, and the strict Ed25519 rejects; a conformant implementation rejects every case.
 
 ## Project
 
 - [README](https://raw.githubusercontent.com/trqlmao/avp/main/README.md): Overview, implementer guide, and ways to help.
-- [Threat model](https://raw.githubusercontent.com/trqlmao/avp/main/THREATMODEL.md): What AVP defends against, the adversary model (network, honest-but-curious and malicious server, insider, removed member, compromised IdP, stolen token/key), cryptographic assumptions, non-goals, and residual risks.
+- [Threat model](https://raw.githubusercontent.com/trqlmao/avp/main/THREATMODEL.md): What AVP defends against, the adversary model (network, honest-but-curious and malicious host, insider, removed member, stolen owner phrase, stolen token or key, diverged owner devices, replication), cryptographic assumptions, non-goals, and residual risks.
+- [Changelog](https://raw.githubusercontent.com/trqlmao/avp/main/CHANGELOG.md): What changed in each protocol version.
 - [Contributing guide](https://raw.githubusercontent.com/trqlmao/avp/main/CONTRIBUTING.md): How to propose changes and the vendor-neutrality rule.
 - [Security policy](https://raw.githubusercontent.com/trqlmao/avp/main/SECURITY.md): How to report a vulnerability privately.
 

@@ -1,18 +1,18 @@
 name: examples-node
 
-# Typecheck (and test) the TypeScript examples + conformance runner with Bun so
+# Typecheck (and test) the conformance runner and the harness with Bun so
 # they cannot drift from the spec. Bun installs from a committed frozen lockfile.
 
 on:
   push:
     paths:
-      - "examples/typescript/**"
       - "examples/conformance/**"
+      - "harness/**"
       - ".github/workflows/examples-node.yml"
   pull_request:
     paths:
-      - "examples/typescript/**"
       - "examples/conformance/**"
+      - "harness/**"
 
 permissions:
   contents: read
@@ -23,9 +23,8 @@ jobs:
     strategy:
       matrix:
         project:
-          - examples/typescript/server
-          - examples/typescript/client
           - examples/conformance
+          - harness
     defaults:
       run:
         working-directory: ${{ matrix.project }}

@@ -10,43 +10,17 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import type { Acceptance, Commit, LeaveRequest, ManifestState, SignedManifest, WireAcceptance } from "./constructions.ts";
+
 const here = dirname(fileURLToPath(import.meta.url));
 // examples/conformance/src -> repo root (three levels up: src -> conformance -> examples -> root).
 const vectorsDir = join(here, "..", "..", "..", "vectors");
 
 /**
- * One case from `vectors/aad.json`: the inputs to the AAD construction (SPEC
- * section 4) paired with the expected lowercase-hex output.
- */
-export interface AadCase {
-  /** Repository id whose UTF-8 bytes form the AAD prefix. */
-  repoId: string;
-  /** Payload version counter encoded as the first `int64BE` field. */
-  payloadVersion: number;
-  /** Key-rotation epoch counter encoded as the second `int64BE` field. */
-  keyEpoch: number;
-  /** Expected AAD bytes, lowercase-hex encoded. */
-  expectedAadHex: string;
-}
-
-/**
- * One case from `vectors/key-binding-message.json`: the two member public keys
- * paired with the expected canonical binding message (SPEC section 9).
- */
-export interface KeyBindingMessageCase {
-  /** Member's base64-encoded Ed25519 public key (its member id). */
-  ed25519PublicKey: string;
-  /** Member's base64-encoded X25519 public key. */
-  x25519PublicKey: string;
-  /** Expected binding message: `ed25519PublicKey + "|" + x25519PublicKey`. */
-  expectedMessageUtf8: string;
-}
-
-/**
  * Shape shared by every vector file under `vectors/`: a human-readable
  * `description` plus an array of `cases`.
  *
- * @typeParam C - The per-case type (e.g. {@link AadCase}).
+ * @typeParam C - The per-case type (e.g. {@link HkdfCase}).
  */
 interface VectorFile<C> {
   /** Human-readable description of what the file's cases cover. */
@@ -59,34 +33,13 @@ interface VectorFile<C> {
  * Reads and parses a vector file from the repository's `vectors/` directory.
  *
  * @typeParam C - The per-case type the file's `cases` array is parsed into.
- * @param name - The vector file name relative to `vectors/` (e.g. `"aad.json"`).
+ * @param name - The vector file name relative to `vectors/` (e.g. `"hkdf.json"`).
  * @returns The parsed {@link VectorFile}.
  * @throws If the file cannot be read or its contents are not valid JSON.
  */
 function loadVector<C>(name: string): VectorFile<C> {
   const raw = readFileSync(join(vectorsDir, name), "utf8");
   return JSON.parse(raw) as VectorFile<C>;
-}
-
-/**
- * Loads the AAD-layout vectors (SPEC section 4) from `vectors/aad.json`.
- *
- * @returns The parsed vector file of {@link AadCase} entries.
- * @throws If `vectors/aad.json` is missing or not valid JSON.
- */
-export function loadAadVectors(): VectorFile<AadCase> {
-  return loadVector<AadCase>("aad.json");
-}
-
-/**
- * Loads the key-binding-message vectors (SPEC section 9) from
- * `vectors/key-binding-message.json`.
- *
- * @returns The parsed vector file of {@link KeyBindingMessageCase} entries.
- * @throws If `vectors/key-binding-message.json` is missing or not valid JSON.
- */
-export function loadKeyBindingMessageVectors(): VectorFile<KeyBindingMessageCase> {
-  return loadVector<KeyBindingMessageCase>("key-binding-message.json");
 }
 
 /**
@@ -148,35 +101,6 @@ export interface Ed25519Case {
   messageHex: string;
   /** Expected 64-byte signature, lowercase hex. */
   signatureHex: string;
-}
-
-/**
- * One case from `vectors/payload-aead.json`: an AES-256-GCM payload vector with
- * the AVP AAD (SPEC section 4).
- */
-export interface PayloadAeadCase {
-  /** Case label. */
-  name: string;
-  /** Provenance note. */
-  source: string;
-  /** 32-byte AES data key, base64. */
-  keyB64: string;
-  /** 12-byte IV, base64. */
-  ivB64: string;
-  /** Repository id whose UTF-8 bytes form the AAD prefix. */
-  repoId: string;
-  /** Payload version bound into the AAD. */
-  payloadVersion: number;
-  /** Key epoch bound into the AAD. */
-  keyEpoch: number;
-  /** Expected AAD, lowercase hex (cross-reference with aad.json). */
-  aadHex: string;
-  /** Plaintext as a UTF-8 string. */
-  plaintextUtf8: string;
-  /** `ciphertext || tag` (16-byte GCM tag appended), base64. */
-  ciphertextB64: string;
-  /** A differing epoch; decrypting under this epoch's AAD MUST fail. */
-  tamperEpoch: number;
 }
 
 /**
@@ -247,20 +171,315 @@ export function loadEd25519Vectors(): VectorFile<Ed25519Case> {
 }
 
 /**
- * Loads the payload AEAD vectors (SPEC section 4) from
- * `vectors/payload-aead.json`.
- *
- * @returns The parsed vector file of {@link PayloadAeadCase} entries.
- */
-export function loadPayloadAeadVectors(): VectorFile<PayloadAeadCase> {
-  return loadVector<PayloadAeadCase>("payload-aead.json");
-}
-
-/**
  * Loads the key-wrap vectors (SPEC section 4) from `vectors/key-wrap.json`.
  *
  * @returns The parsed vector file of {@link KeyWrapCase} entries.
  */
 export function loadKeyWrapVectors(): VectorFile<KeyWrapCase> {
   return loadVector<KeyWrapCase>("key-wrap.json");
+}
+
+// ─── AVP 0.5 wire shapes (HTTP/JSON profile: base64 binary, camelCase proto names) ───
+
+/** Wire `HostRef`. */
+export interface WireHostRef {
+  hostKey: string;
+  locator: string;
+}
+
+/** Wire `MemberEntry`. */
+export interface WireMemberEntry {
+  ed25519PublicKey: string;
+  x25519PublicKey: string;
+  wrappedDataKey: WrappedKeyBlob;
+  keyEpoch: number;
+  homeHostKey: string;
+}
+
+/** Wire `Removal`. */
+export interface WireRemoval {
+  memberKey: string;
+  removedAtSeq: number;
+  frontier: string[];
+}
+
+/** Wire `ManifestState`. */
+export interface WireManifestState {
+  repoId: string;
+  manifestSeq: number;
+  prevManifestHash: string;
+  ownerKey: string;
+  genesisNonce: string;
+  schemeId: string;
+  keyEpoch: number;
+  shareRefreshTokens: boolean;
+  hosts: WireHostRef[];
+  members: WireMemberEntry[];
+  removals: WireRemoval[];
+}
+
+/** Wire `SignedManifest`. */
+export interface WireSignedManifest {
+  state: WireManifestState;
+  ownerSignature: string;
+}
+
+/** Wire `Commit`. */
+export interface WireCommit {
+  repoId: string;
+  commitId: string;
+  parents: string[];
+  manifestSeq: number;
+  manifestHash: string;
+  keyEpoch: number;
+  author: string;
+  iv: string;
+  ciphertext: string;
+  authorSignature: string;
+}
+
+const b64d = (s: string) => Buffer.from(s, "base64");
+const b64e = (b: Buffer) => b.toString("base64");
+
+/**
+ * Decodes a wire `SignedManifest` into raw bytes, keeping list order as given.
+ *
+ * @param w - The wire object.
+ * @returns The decoded signed manifest.
+ */
+export function signedManifestFromWire(w: WireSignedManifest): SignedManifest {
+  const s = w.state;
+  const state: ManifestState = {
+    repoId: s.repoId,
+    manifestSeq: s.manifestSeq,
+    prevManifestHash: b64d(s.prevManifestHash),
+    ownerKey: b64d(s.ownerKey),
+    genesisNonce: b64d(s.genesisNonce),
+    schemeId: s.schemeId,
+    keyEpoch: s.keyEpoch,
+    shareRefreshTokens: s.shareRefreshTokens,
+    hosts: s.hosts.map((h) => ({ hostKey: b64d(h.hostKey), locator: h.locator })),
+    members: s.members.map((m) => ({
+      ed25519PublicKey: b64d(m.ed25519PublicKey),
+      x25519PublicKey: b64d(m.x25519PublicKey),
+      wrappedDataKey: {
+        schemeId: m.wrappedDataKey.schemeId,
+        ephemeralPublicKey: b64d(m.wrappedDataKey.ephemeralPublicKey),
+        iv: b64d(m.wrappedDataKey.iv),
+        ciphertext: b64d(m.wrappedDataKey.ciphertext),
+      },
+      keyEpoch: m.keyEpoch,
+      homeHostKey: b64d(m.homeHostKey),
+    })),
+    removals: s.removals.map((r) => ({
+      memberKey: b64d(r.memberKey),
+      removedAtSeq: r.removedAtSeq,
+      frontier: r.frontier.map(b64d),
+    })),
+  };
+  return { state, ownerSignature: b64d(w.ownerSignature) };
+}
+
+/**
+ * Encodes a signed manifest as its wire JSON, keeping list order as given.
+ *
+ * @param m - The signed manifest.
+ * @returns The wire object.
+ */
+export function signedManifestToWire(m: SignedManifest): WireSignedManifest {
+  const s = m.state;
+  return {
+    state: {
+      repoId: s.repoId,
+      manifestSeq: s.manifestSeq,
+      prevManifestHash: b64e(s.prevManifestHash),
+      ownerKey: b64e(s.ownerKey),
+      genesisNonce: b64e(s.genesisNonce),
+      schemeId: s.schemeId,
+      keyEpoch: s.keyEpoch,
+      shareRefreshTokens: s.shareRefreshTokens,
+      hosts: s.hosts.map((h) => ({ hostKey: b64e(h.hostKey), locator: h.locator })),
+      members: s.members.map((x) => ({
+        ed25519PublicKey: b64e(x.ed25519PublicKey),
+        x25519PublicKey: b64e(x.x25519PublicKey),
+        wrappedDataKey: {
+          schemeId: x.wrappedDataKey.schemeId,
+          ephemeralPublicKey: b64e(x.wrappedDataKey.ephemeralPublicKey),
+          iv: b64e(x.wrappedDataKey.iv),
+          ciphertext: b64e(x.wrappedDataKey.ciphertext),
+        },
+        keyEpoch: x.keyEpoch,
+        homeHostKey: b64e(x.homeHostKey),
+      })),
+      removals: s.removals.map((r) => ({
+        memberKey: b64e(r.memberKey),
+        removedAtSeq: r.removedAtSeq,
+        frontier: r.frontier.map(b64e),
+      })),
+    },
+    ownerSignature: b64e(m.ownerSignature),
+  };
+}
+
+/**
+ * Decodes a wire `Commit` into raw bytes, keeping parent order as given.
+ *
+ * @param w - The wire object.
+ * @returns The decoded commit.
+ */
+export function commitFromWire(w: WireCommit): Commit {
+  return {
+    repoId: w.repoId,
+    commitId: b64d(w.commitId),
+    parents: w.parents.map(b64d),
+    manifestSeq: w.manifestSeq,
+    manifestHash: b64d(w.manifestHash),
+    keyEpoch: w.keyEpoch,
+    author: b64d(w.author),
+    iv: b64d(w.iv),
+    ciphertext: b64d(w.ciphertext),
+    authorSignature: b64d(w.authorSignature),
+  };
+}
+
+/**
+ * Encodes a commit as its wire JSON, keeping parent order as given.
+ *
+ * @param c - The commit.
+ * @returns The wire object.
+ */
+export function commitToWire(c: Commit): WireCommit {
+  return {
+    repoId: c.repoId,
+    commitId: b64e(c.commitId),
+    parents: c.parents.map(b64e),
+    manifestSeq: c.manifestSeq,
+    manifestHash: b64e(c.manifestHash),
+    keyEpoch: c.keyEpoch,
+    author: b64e(c.author),
+    iv: b64e(c.iv),
+    ciphertext: b64e(c.ciphertext),
+    authorSignature: b64e(c.authorSignature),
+  };
+}
+
+/** Wire `LeaveRequest`. */
+export interface WireLeaveRequest {
+  repoId: string;
+  memberKey: string;
+  at: number;
+  signature: string;
+}
+
+/** Decodes a wire `LeaveRequest`. */
+export function leaveFromWire(w: WireLeaveRequest): LeaveRequest {
+  return { repoId: w.repoId, memberKey: b64d(w.memberKey), at: w.at, signature: b64d(w.signature) };
+}
+
+/** Encodes a leave request as its wire JSON. */
+export function leaveToWire(l: LeaveRequest): WireLeaveRequest {
+  return { repoId: l.repoId, memberKey: b64e(l.memberKey), at: l.at, signature: b64e(l.signature) };
+}
+
+/** Decodes a wire `Acceptance`. */
+export function acceptanceFromWire(w: WireAcceptance): Acceptance {
+  return { repoId: w.repoId, memberKey: b64d(w.memberKey), hostKey: b64d(w.hostKey), expiresAt: w.expiresAt, signature: b64d(w.signature) };
+}
+
+/** Encodes an acceptance as its wire JSON, fields in the SPEC 11.3 order. */
+export function acceptanceToWire(a: Acceptance): WireAcceptance {
+  return { repoId: a.repoId, memberKey: b64e(a.memberKey), hostKey: b64e(a.hostKey), expiresAt: a.expiresAt, signature: b64e(a.signature) };
+}
+
+// ─── AVP 0.5 vector files ───────────────────────────────────────────────────────────
+
+/** One AVP owner case of `vectors/bip39-owner.json` (SPEC 3.1), passphrase empty. */
+export interface Bip39OwnerCase {
+  name: string;
+  entropyHex: string;
+  mnemonic: string;
+  passphrase: string;
+  seedHex: string;
+  ed25519SeedHex: string;
+  ed25519PublicKeyHex: string;
+  x25519PrivateHex: string;
+  x25519PublicKeyHex: string;
+}
+
+/** One external BIP39 anchor (Trezor reference vectors). */
+export interface Bip39AnchorCase {
+  entropyHex: string;
+  mnemonic: string;
+  seedHex: string;
+}
+
+/** `vectors/bip39-owner.json`. */
+export interface Bip39OwnerFile {
+  description: string;
+  wordlist: { file: string; sha256: string; words: number };
+  anchors: { source: string; passphrase: string; cases: Bip39AnchorCase[] };
+  cases: Bip39OwnerCase[];
+}
+
+/** A keyed party in the manifest and commit seeds. */
+export interface VectorParty {
+  label: string;
+  ed25519SeedHex: string;
+  ed25519PublicKey: string;
+  x25519PrivateHex?: string;
+  x25519PublicKey?: string;
+}
+
+/** One case of `vectors/manifest.json` (SPEC 4.2). */
+export interface ManifestCase {
+  name: string;
+  note: string;
+  signedManifest: WireSignedManifest;
+  expected: { stateHex: string; manifestHashHex: string; repoId?: string };
+}
+
+/** `vectors/manifest.json`. */
+export interface ManifestFile {
+  description: string;
+  seeds: {
+    owner: { entropyHex: string; ed25519SeedHex: string; ownerKey: string; x25519PrivateHex: string; x25519PublicKey: string };
+    hosts: Array<{ label: string; ed25519SeedHex: string; hostKey: string; locator: string }>;
+    members: VectorParty[];
+    genesisNonceHex: string;
+    dataKeys: Array<{ keyEpoch: number; dataKeyHex: string }>;
+    wrapDerivation: string;
+  };
+  cases: ManifestCase[];
+}
+
+/** One case of `vectors/commit.json` (SPEC 4.3). */
+export interface CommitCase {
+  name: string;
+  note: string;
+  authorLabel: string;
+  plaintextUtf8: string;
+  commit: WireCommit;
+  expected: { headerHex: string; commitIdHex: string; aadHex: string };
+}
+
+/** `vectors/commit.json`. */
+export interface CommitFile {
+  description: string;
+  seeds: { dataKeyHex: string; ivHex: string; authors: VectorParty[] };
+  cases: CommitCase[];
+}
+
+/** @returns The parsed `vectors/bip39-owner.json`. */
+export function loadBip39OwnerVectors(): Bip39OwnerFile {
+  return JSON.parse(readFileSync(join(vectorsDir, "bip39-owner.json"), "utf8")) as Bip39OwnerFile;
+}
+
+/** @returns The parsed `vectors/manifest.json`. */
+export function loadManifestVectors(): ManifestFile {
+  return JSON.parse(readFileSync(join(vectorsDir, "manifest.json"), "utf8")) as ManifestFile;
+}
+
+/** @returns The parsed `vectors/commit.json`. */
+export function loadCommitVectors(): CommitFile {
+  return JSON.parse(readFileSync(join(vectorsDir, "commit.json"), "utf8")) as CommitFile;
 }

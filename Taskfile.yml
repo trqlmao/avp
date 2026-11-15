@@ -4,8 +4,10 @@
 # .github/workflows/examples-*.yml job, so "green locally" means "green in CI". Each language
 # is independent; run only the toolchains you have installed.
 #
-# Requirements per target: conformance/typescript -> Bun; go -> Go; python -> Python 3;
-# rust -> Cargo; java -> a JDK. `task test` runs every target and needs them all.
+# Requirements per target: conformance -> Bun; rust -> Cargo (with rustfmt and clippy); java -> JDK 21+.
+# `task test` runs the conformance, vector, rust and java targets and needs them all. harness, multihost and
+# interop start the reference hosts with harness/run-hosts.sh (the launcher CI uses: build, start on
+# AVP_BIND=127.0.0.1, poll /.well-known/avp, stop) and need Bun, Cargo, a JDK, bash and curl.
 version: "3"
 
 tasks:
@@ -20,9 +22,6 @@ tasks:
     cmds:
       - task: conformance
       - task: vectors-check
-      - task: go
-      - task: typescript
-      - task: python
       - task: rust
       - task: java
 
@@ -45,53 +44,42 @@ tasks:
       - bunx @stoplight/spectral-cli@6 lint openapi.yaml --ruleset .spectral.yaml --fail-severity error
 
   harness:
-    desc: Run the black-box conformance harness against a server (AVP_SERVER_URL=http://host:port task harness).
-    dir: harness
+    desc: Run the single-host conformance harness against the Rust and then the Java reference host (about 2 min each).
     cmds:
-      - bun conformance.ts --server "{{.AVP_SERVER_URL}}"
-    env:
-      AVP_SERVER_URL: '{{.AVP_SERVER_URL | default "http://localhost:8787"}}'
+      - bash harness/run-hosts.sh rust -- bun harness/conformance.ts --server http://127.0.0.1:19201
+      - bash harness/run-hosts.sh java -- bun harness/conformance.ts --server http://127.0.0.1:19201
 
-  go:
-    desc: Vet, test, and build the Go client and server.
-    dir: examples/go
+  multihost:
+    desc: Run the multi-host harness on three hosts for each pairing (rust-rust, java-java, rust-java; about 70 s each).
     cmds:
-      - go vet ./...
-      - go test ./...
-      - go build ./...
-
-  typescript:
-    desc: Typecheck and test the TypeScript client and server.
-    cmds:
-      - for: { var: PROJECTS }
-        cmd: cd examples/typescript/{{.ITEM}} && bun install --frozen-lockfile && bun run typecheck && (grep -q '"test"' package.json && bun run test || echo "no test script in {{.ITEM}}")
-    vars:
-      PROJECTS: client server
-
-  python:
-    desc: Byte-compile and unit-test the Python client and server.
-    cmds:
-      - cd examples/python/server && pip install -r requirements.txt && python -m py_compile server.py test_server.py && python -m unittest test_server.py
-      - cd examples/python/client && pip install -r requirements.txt && python -m py_compile client.py crypto.py && python -m unittest test_crypto.py
+      - for: ["rust rust rust", "java java java", "rust java java"]
+        cmd: >-
+          bash harness/run-hosts.sh {{.ITEM}} -- bun harness/multihost.ts
+          --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
 
   rust:
-    desc: Build and test the Rust client and server.
+    desc: Format-check, lint and test the Rust avp library, host and client.
     cmds:
-      - cd examples/rust/server && cargo test
-      - cd examples/rust/client && cargo test
+      - for: [avp, server, client]
+        cmd: >-
+          cd examples/rust/{{.ITEM}} &&
+          cargo fmt --check -- --config-path ../rustfmt.toml &&
+          cargo clippy --all-targets -- -D warnings &&
+          cargo test
 
   java:
-    desc: Compile and run the Java server smoke test and client crypto vectors.
+    desc: Compile and run the Java library vectors (AvpVectors), host smoke test (SmokeTest) and client tests (ClientTest).
     cmds:
-      - cd examples/java/server && javac Server.java SmokeTest.java && java SmokeTest
-      - cd examples/java/client && javac Crypto.java CryptoVectors.java Client.java && java CryptoVectors
+      - cd examples/java/avp && javac -d build *.java && java -cp build AvpVectors
+      - cd examples/java/server && javac -d build ../avp/*.java *.java && java -cp build SmokeTest
+      - cd examples/java/client && javac -d build ../avp/*.java ../server/Server.java ../server/Replication.java *.java && java -cp build ClientTest
 
   interop:
-    desc: Cross-language wire interop (informational; runs in CI).
+    desc: Run each reference client against the other language's host, alone and as bob's home host (AVP_SERVER_URL_B).
     cmds:
-      - |
-        echo "The cross-language interop matrix (each lang's client -> Go server, Go client ->"
-        echo "each lang's server) runs in .github/workflows/examples-interop.yml. Reproducing the"
-        echo "full matrix locally needs all five toolchains plus port-readiness polling; the"
-        echo "workflow is the reference. Per-language correctness is covered by 'task test'."
-    silent: true
+      - cargo build --manifest-path examples/rust/client/Cargo.toml
+      - cd examples/java/client && javac -d build ../avp/*.java Vault.java Client.java
+      - bash harness/run-hosts.sh java -- cargo run --quiet --manifest-path examples/rust/client/Cargo.toml
+      - bash harness/run-hosts.sh rust -- java -Davp.wordlist=vectors/bip39-english.txt -cp examples/java/client/build Client
+      - bash harness/run-hosts.sh rust java -- cargo run --quiet --manifest-path examples/rust/client/Cargo.toml
+      - bash harness/run-hosts.sh java rust -- java -Davp.wordlist=vectors/bip39-english.txt -cp examples/java/client/build Client

@@ -1,43 +1,90 @@
 {
-  "manifest": {
-    "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
-    "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
-    "keyEpoch": 0,
-    "payloadVersion": 1,
-    "shareRefreshTokens": false,
-    "members": [
-      {
-        "ed25519PublicKey": "YWxpY2UtZWQyNTUxOS1wdWJsaWMta2V5",
-        "x25519PublicKey": "YWxpY2UteDI1NTE5LXB1YmxpYy1rZXk",
-        "wrappedDataKey": {
-          "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
-          "ephemeralPublicKey": "ZXBoZW1lcmFsLWZvci1hbGljZQ",
-          "iv": "AAAAAAAAAAAAAAAA",
-          "ciphertext": "d3JhcHBlZC1rZXktZm9yLWFsaWNl"
-        },
+  "manifests": [
+    {
+      "state": {
+        "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+        "manifestSeq": 2,
+        "prevManifestHash": "4ejv9v0ECxIZICcuNTxDSlFYX2ZtdHuCiZCXnqWss7o=",
+        "ownerKey": "JSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4=",
+        "genesisNonce": "",
+        "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
         "keyEpoch": 0,
-        "keyBindingSig": null
+        "shareRefreshTokens": false,
+        "hosts": [
+          {
+            "hostKey": "ucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5I=",
+            "locator": "a.vault.example"
+          },
+          {
+            "hostKey": "3uXs8/oBCA8WHSQrMjlAR05VXGNqcXh/ho2Um6KpsLc=",
+            "locator": "b.vault.example"
+          }
+        ],
+        "members": [
+          {
+            "ed25519PublicKey": "JSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4=",
+            "x25519PublicKey": "SlFYX2ZtdHuCiZCXnqWss7rByM/W3eTr8vkABw4VHCM=",
+            "wrappedDataKey": {
+              "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+              "ephemeralPublicKey": "cnmAh46VnKOqsbi/xs3U2+Lp8Pf+BQwTGiEoLzY9REs=",
+              "iv": "l56lrLO6wcjP1t3k",
+              "ciphertext": "vMPK0djf5u30+wIJEBceJSwzOkFIT1ZdZGtyeYCHjpWco6qxuL/GzdTb4unw9/4F"
+            },
+            "keyEpoch": 0,
+            "homeHostKey": "ucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5I="
+          },
+          {
+            "ed25519PublicKey": "b3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUg=",
+            "x25519PublicKey": "lJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm0=",
+            "wrappedDataKey": {
+              "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+              "ephemeralPublicKey": "5Ovy+QAHDhUcIyoxOD9GTVRbYmlwd36FjJOaoaivtr0=",
+              "iv": "CRAXHiUsMzpBSE9W",
+              "ciphertext": "LjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6/L5AAcOFRwjKjE4P0ZNVFtiaXB3"
+            },
+            "keyEpoch": 0,
+            "homeHostKey": "3uXs8/oBCA8WHSQrMjlAR05VXGNqcXh/ho2Um6KpsLc="
+          },
+          {
+            "ed25519PublicKey": "Vl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC8=",
+            "x25519PublicKey": "EhkgJy41PENKUVhfZm10e4KJkJeepayzusHIz9bd5Os=",
+            "wrappedDataKey": {
+              "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
+              "ephemeralPublicKey": "Nz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3+bt9PsCCRA=",
+              "iv": "XGNqcXh/ho2Um6Kp",
+              "ciphertext": "gYiPlp2kq7K5wMfO1dzj6vH4/wYNFBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK"
+            },
+            "keyEpoch": 0,
+            "homeHostKey": "ucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5I="
+          }
+        ],
+        "removals": []
       },
-      {
-        "ed25519PublicKey": "Ym9iLWVkMjU1MTktcHVibGljLWtleQ",
-        "x25519PublicKey": "Ym9iLXgyNTUxOS1wdWJsaWMta2V5",
-        "wrappedDataKey": {
-          "schemeId": "X25519-HKDF-SHA256-AESGCM-v1",
-          "ephemeralPublicKey": "ZXBoZW1lcmFsLWZvci1ib2I",
-          "iv": "BBBBBBBBBBBBBBBB",
-          "ciphertext": "d3JhcHBlZC1rZXktZm9yLWJvYg"
-        },
-        "keyEpoch": 0,
-        "keyBindingSig": "aXNzdWVyLXNpZ25hdHVyZS1vdmVyLWJvYnMta2V5cw"
-      }
-    ]
-  },
-  "envelope": {
-    "repoId": "3b1f9c64-0b2a-4f1e-9c3d-1a2b3c4d5e6f",
-    "payloadVersion": 1,
-    "keyEpoch": 0,
-    "iv": "EBESExQVFhcYGRobHA",
-    "ciphertext": "ZW5jcnlwdGVkLWFsdC1wYXlsb2FkLWNpcGhlcnRleHQ"
-  },
-  "unchanged": false
+      "ownerSignature": "CRAXHiUsMzpBSE9WXWRrcnmAh46VnKOqsbi/xs3U2+Lp8Pf+BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ+mrbS7wg=="
+    }
+  ],
+  "heads": [
+    {
+      "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+      "commitId": "LjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6/L5AAc=",
+      "parents": [
+        "vMPK0djf5u30+wIJEBceJSwzOkFIT1ZdZGtyeYCHjpU="
+      ],
+      "manifestSeq": 2,
+      "manifestHash": "U1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBceJSw=",
+      "keyEpoch": 0,
+      "author": "b3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUg=",
+      "iv": "eH+GjZSboqmwt77F",
+      "ciphertext": "naSrsrnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3/gUMExohKC82",
+      "authorSignature": "wsnQ197l7PP6AQgPFh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm10ew=="
+    }
+  ],
+  "leaves": [
+    {
+      "repoId": "q3Z0m1xV8c2LrT5nB7yKpA",
+      "memberKey": "b3Z9hIuSmaCnrrW8w8rR2N/m7fT7AgkQFx4lLDM6QUg=",
+      "at": 1790000000000,
+      "signature": "5+71/AMKERgfJi00O0JJUFdeZWxzeoGIj5adpKuyucDHztXc4+rx+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoA=="
+    }
+  ]
 }
