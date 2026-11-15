@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPublicKey, verify as rawVerify } from "node:crypto";
+import { createHash, createPublicKey, verify as rawVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +45,7 @@ const negative = JSON.parse(readFileSync(join(root, "vectors", "negative.json"),
 
 const fromB64 = (s: string) => Buffer.from(s, "base64");
 const fromHex = (s: string) => Buffer.from(s, "hex");
-/** DER prefix for an Ed25519 SubjectPublicKeyInfo (RFC 8410), for the cofactorless check below. */
+/** DER prefix for an Ed25519 SubjectPublicKeyInfo (RFC 8410), for the node:crypto checks below. */
 const SPKI = Buffer.from("302a300506032b6570032100", "hex");
 
 function safeVerify(pub: Buffer, msg: Buffer, sig: Buffer): boolean {
@@ -226,19 +226,85 @@ test("each 0.5 negative differs from a valid base by its one mutation (the base 
 });
 
 /**
+ * A deliberately lenient Ed25519 verifier (RFC 8032 section 5.1.7 without its encoding checks):
+ * it decodes a point without requiring y < p or rejecting a set sign bit on x = 0, accepts
+ * small-order points, and checks the cofactorless equation [S]B = R + [k]A. It is written out here
+ * so the test does not depend on which checks the platform's OpenSSL happens to apply; newer
+ * OpenSSL builds reject some of these encodings themselves.
+ */
+const P = 2n ** 255n - 19n;
+const L = (1n << 252n) + 27742317777372353535851937790883648493n;
+const md = (a: bigint) => ((a % P) + P) % P;
+const pw = (b: bigint, e: bigint) => {
+  let r = 1n;
+  for (b = md(b); e > 0n; e >>= 1n, b = md(b * b)) if (e & 1n) r = md(r * b);
+  return r;
+};
+const D = md(-121665n * pw(121666n, P - 2n));
+const SQRT_M1 = pw(2n, (P - 1n) / 4n);
+type Pt = [bigint, bigint, bigint, bigint];
+const le = (b: Uint8Array) => {
+  let n = 0n;
+  for (let i = b.length - 1; i >= 0; i--) n = (n << 8n) | BigInt(b[i]);
+  return n;
+};
+const decodeLenient = (b: Uint8Array): Pt | null => {
+  const sign = BigInt(b[31] >> 7);
+  const y = md(le(b) & ((1n << 255n) - 1n));
+  const x2 = md((y * y - 1n) * pw(D * y * y + 1n, P - 2n));
+  let x = pw(x2, (P + 3n) / 8n);
+  if (md(x * x - x2) !== 0n) x = md(x * SQRT_M1);
+  if (md(x * x - x2) !== 0n) return null;
+  if ((x & 1n) !== sign) x = md(-x);
+  return [x, y, 1n, md(x * y)];
+};
+const add = ([x1, y1, z1, t1]: Pt, [x2, y2, z2, t2]: Pt): Pt => {
+  const a = md((y1 - x1) * (y2 - x2));
+  const b = md((y1 + x1) * (y2 + x2));
+  const c = md(2n * D * t1 * t2);
+  const d = md(2n * z1 * z2);
+  const e = b - a, f = d - c, g = d + c, h = b + a;
+  return [md(e * f), md(g * h), md(f * g), md(e * h)];
+};
+const mul = (k: bigint, p: Pt): Pt => {
+  let r: Pt = [0n, 1n, 1n, 0n];
+  for (; k > 0n; k >>= 1n, p = add(p, p)) if (k & 1n) r = add(r, p);
+  return r;
+};
+const same = ([x1, y1, z1]: Pt, [x2, y2, z2]: Pt) => md(x1 * z2 - x2 * z1) === 0n && md(y1 * z2 - y2 * z1) === 0n;
+const BASE = decodeLenient(Buffer.from("5866666666666666666666666666666666666666666666666666666666666666", "hex"))!;
+const cofactorlessVerify = (pub: Uint8Array, msg: Uint8Array, sig: Uint8Array) => {
+  const a = decodeLenient(pub);
+  const r = decodeLenient(sig.subarray(0, 32));
+  if (!a || !r) return false;
+  const k = le(createHash("sha512").update(sig.subarray(0, 32)).update(pub).update(msg).digest()) % L;
+  return same(mul(le(sig.subarray(32, 64)), BASE), add(r, mul(k, a)));
+};
+
+test("the lenient verifier accepts a valid RFC 8032 signature and rejects a tampered one", () => {
+  const cases = JSON.parse(readFileSync(join(root, "vectors", "ed25519.json"), "utf8")).cases as any[];
+  assert.ok(cases.length > 0);
+  for (const v of cases) {
+    const pub = fromHex(v.publicKeyHex);
+    const msg = fromHex(v.messageHex);
+    const sig = fromHex(v.signatureHex);
+    assert.equal(cofactorlessVerify(pub, msg, sig), true, `${v.name}: valid signature`);
+    const bad = Buffer.from(sig);
+    bad[40] ^= 1;
+    assert.equal(cofactorlessVerify(pub, msg, bad), false, `${v.name}: tampered S`);
+    const badMsg = Buffer.concat([msg, Buffer.from([0])]);
+    assert.equal(cofactorlessVerify(pub, badMsg, sig), false, `${v.name}: different message`);
+  }
+});
+
+/**
  * The strict Ed25519 cases (SPEC 2) are only meaningful if a verifier without the strict checks
- * accepts them: Node's OpenSSL verification is cofactorless and accepts the small-order forgeries
- * (including the order-8 key with its sign bit set, whose R is not the identity) and the
- * non-canonical key, and the S + L signature verifies once S is reduced modulo L.
+ * accepts them: the lenient verifier above accepts the small-order forgeries (including the order-8
+ * key with its sign bit set, whose R is not the identity) and the non-canonical key, and the S + L
+ * signature verifies once S is reduced modulo L.
  */
 test("the strict ed25519 negatives are accepted by a cofactorless verifier", () => {
-  const lenient = (c: any) =>
-    rawVerify(
-      null,
-      fromHex(c.messageHex),
-      createPublicKey({ key: Buffer.concat([SPKI, fromHex(c.publicKeyHex)]), format: "der", type: "spki" }),
-      fromHex(c.signatureHex),
-    );
+  const lenient = (c: any) => cofactorlessVerify(fromHex(c.publicKeyHex), fromHex(c.messageHex), fromHex(c.signatureHex));
   const byName = new Map((negative.cases as any[]).map((c) => [c.name, c]));
   const forgeries = [
     "ed25519/identity-key-forgery",
@@ -255,7 +321,6 @@ test("the strict ed25519 negatives are accepted by a cofactorless verifier", () 
   const c = byName.get("ed25519/s-plus-l");
   assert.ok(c, "missing negative ed25519/s-plus-l");
   const sig = fromHex(c.signatureHex);
-  const L = (1n << 252n) + 27742317777372353535851937790883648493n;
   let s = 0n;
   for (let i = 63; i >= 32; i--) s = (s << 8n) | BigInt(sig[i]);
   assert.ok(s >= L, "S is not reduced");
