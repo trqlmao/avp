@@ -19,7 +19,7 @@ path = "src/main.rs"
 avp = { path = "../avp" }
 ed25519-dalek = "=3.0.0"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 tiny_http = "=0.12.0"
 ureq = { version = "=3.5.2", default-features = false }
 
