@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 //! In-memory AVP 0.5 reference host, HTTP/JSON profile: the client-facing API and host-to-host
-//! replication.
+//! replication; and the gRPC client profile (SPEC 10.3) over the same operations.
 //!
 //! The host is a thin layer over the shared `avp` crate: [`api`] authenticates the caller, decodes
 //! the body, checks the caller identity each operation requires (SPEC 10.1), and hands the item to
@@ -17,6 +17,7 @@
 //! - [`store`]: the repositories and the acceptances this host issued.
 //! - [`api`]: routing and the per-operation rules of SPEC 10, and the host routes of SPEC 9.3.
 //! - [`replication`]: the peer list, host request signatures, and the replication workers (SPEC 9).
+//! - [`grpc`]: the `avp.Vault` service, transcoding each RPC to its HTTP/JSON body (SPEC 10.3).
 //!
 //! Illustrative reference code, not production: state lives in memory and there is no TLS.
 
@@ -24,6 +25,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod grpc;
 pub mod replication;
 pub mod store;
 
@@ -124,6 +126,9 @@ pub struct State {
     pub(crate) repl: replication::Runtime,
     /// Counters of the work replication did, for tests and diagnostics.
     pub replication_stats: replication::Stats,
+    /// Whether this host also serves the gRPC client profile; discovery then lists `grpc`
+    /// (SPEC 11.7).
+    pub grpc: bool,
 }
 
 impl State {
@@ -140,6 +145,7 @@ impl State {
             replication: replication::Config::default(),
             repl: replication::Runtime::default(),
             replication_stats: replication::Stats::default(),
+            grpc: false,
         }
     }
 

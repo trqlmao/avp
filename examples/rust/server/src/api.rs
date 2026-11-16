@@ -139,8 +139,74 @@ impl ApiError {
         }
         e
     }
+}
 
-    fn body(&self) -> Value {
+type Answer = Result<Value, ApiError>;
+
+// ─── The client-operation seam ──────────────────────────────────────────────────────────
+
+/// A client operation of SPEC 10.1, or discovery (SPEC 11.7), with the repository it names when
+/// the HTTP/JSON profile carries that in the path. Both profiles call [`client_call`] with one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientOp {
+    /// `GET /.well-known/avp`, `GetHostInfo`.
+    Discovery,
+    /// `challenge` (SPEC 3.3).
+    Challenge,
+    /// `token` (SPEC 3.3).
+    Token,
+    /// `createRepo` (SPEC 8.2).
+    CreateRepo,
+    /// `prepareJoin` (SPEC 8.2).
+    PrepareJoin,
+    /// `pull` of the named repository.
+    Pull(String),
+    /// `push` to the named repository.
+    Push(String),
+    /// `publishManifest` to the named repository.
+    Manifest(String),
+    /// `leave` of the named repository.
+    Leave(String),
+}
+
+/// A refused client call: the HTTP status, the SPEC 10.4 `code` (none for a `503` or `500`), a
+/// human message, the optional `detail`, and the `Retry-After` seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The HTTP/JSON status.
+    pub status: u16,
+    /// The SPEC 10.4 machine code.
+    pub code: Option<&'static str>,
+    /// The human-readable message, which clients never parse.
+    pub message: String,
+    /// The SPEC 10.4 `detail`.
+    pub detail: Option<String>,
+    /// The SPEC 12.2 `Retry-After`, in seconds.
+    pub retry_after_s: Option<i64>,
+}
+
+impl From<ApiError> for Refused {
+    fn from(e: ApiError) -> Refused {
+        Refused {
+            status: e.status,
+            code: e.code,
+            message: e.message,
+            detail: e.detail,
+            retry_after_s: e.retry_after_s,
+        }
+    }
+}
+
+impl Refused {
+    /// A refusal with a code: `413 too_large`, `400 bad_request`, and the like.
+    #[must_use]
+    pub fn new(status: u16, code: &'static str, message: impl Into<String>) -> Refused {
+        ApiError::new(status, code, message).into()
+    }
+
+    /// The HTTP/JSON error body of SPEC 10.4.
+    #[must_use]
+    pub fn body(&self) -> Value {
         let mut v = json!({ "error": self.message });
         if let Some(code) = self.code {
             v["code"] = json!(code);
@@ -152,7 +218,38 @@ impl ApiError {
     }
 }
 
-type Answer = Result<Value, ApiError>;
+/// Runs one client operation over its JSON body, whichever profile carried it: the bearer check
+/// (every operation but discovery and the two auth operations), the decode, and the operation. The
+/// answer is the JSON reply body.
+///
+/// # Errors
+///
+/// The [`Refused`] answer SPEC 10.4 gives the call.
+pub fn client_call(
+    state: &Mutex<State>,
+    op: ClientOp,
+    authorization: Option<&str>,
+    body: &[u8],
+) -> Result<Value, Refused> {
+    let mut guard = state.lock().map_err(|_| ApiError::internal())?;
+    let st: &mut State = &mut guard;
+    let answer = match op {
+        ClientOp::Discovery => discovery(st),
+        ClientOp::Challenge => challenge(st, body),
+        ClientOp::Token => token(st, body),
+        ClientOp::CreateRepo => authenticate(st, authorization).and_then(|caller| create_repo(st, caller, body)),
+        ClientOp::PrepareJoin => authenticate(st, authorization).and_then(|caller| prepare_join(st, caller, body)),
+        ClientOp::Pull(repo_id) => authenticate(st, authorization).and_then(|caller| pull(st, caller, &repo_id, body)),
+        ClientOp::Push(repo_id) => authenticate(st, authorization).and_then(|caller| push(st, caller, &repo_id, body)),
+        ClientOp::Manifest(repo_id) => {
+            authenticate(st, authorization).and_then(|caller| publish_manifest(st, caller, &repo_id, body))
+        }
+        ClientOp::Leave(repo_id) => {
+            authenticate(st, authorization).and_then(|caller| leave(st, caller, &repo_id, body))
+        }
+    };
+    answer.map_err(Refused::from)
+}
 
 /// Serializes a response value; a failure here is the host's, not the caller's.
 fn to_json<T: Serialize>(v: &T) -> Answer {
@@ -291,7 +388,9 @@ struct Incoming {
 /// Every outcome is a response: a malformed, oversized, or unauthenticated request, a bad path, and
 /// a poisoned lock each produce an error body, never a panic.
 pub fn route(mut req: Request, state: &Mutex<State>) {
-    let answer = read(&mut req, state).and_then(|incoming| handle(&incoming, state));
+    let answer = read(&mut req, state)
+        .map_err(Refused::from)
+        .and_then(|incoming| handle(&incoming, state));
     let (status, value, retry_after) = match answer {
         Ok(v) => (200, v, None),
         Err(e) => (e.status, e.body(), e.retry_after_s),
@@ -410,51 +509,48 @@ fn percent_decode(segment: &str) -> Result<String, ApiError> {
     String::from_utf8(out).map_err(|_| bad())
 }
 
-/// Routes a read request under the state lock.
-fn handle(req: &Incoming, state: &Mutex<State>) -> Answer {
+/// Routes a read request: every client route through [`client_call`], the host routes and the test
+/// control under the state lock.
+fn handle(req: &Incoming, state: &Mutex<State>) -> Result<Value, Refused> {
     let route = parse_route(&req.method, &req.path)?;
-    if let Route::Host(repo_id, HostOp::Offer) = &route {
+    let client = |op: ClientOp| client_call(state, op, req.authorization.as_deref(), &req.body);
+    match route {
+        Route::Discovery => client(ClientOp::Discovery),
+        Route::Challenge => client(ClientOp::Challenge),
+        Route::Token => client(ClientOp::Token),
+        Route::CreateRepo => client(ClientOp::CreateRepo),
+        Route::PrepareJoin => client(ClientOp::PrepareJoin),
+        Route::Repo(repo_id, op) => client(match op {
+            RepoOp::Pull => ClientOp::Pull(repo_id),
+            RepoOp::Push => ClientOp::Push(repo_id),
+            RepoOp::Manifest => ClientOp::Manifest(repo_id),
+            RepoOp::Leave => ClientOp::Leave(repo_id),
+        }),
         // An offer of a first copy is validated outside the state lock (SPEC 9.2).
-        return host_offer(state, req, repo_id);
+        Route::Host(repo_id, HostOp::Offer) => host_offer(state, req, &repo_id).map_err(Refused::from),
+        Route::Host(repo_id, op) => host_route(state, req, &repo_id, op).map_err(Refused::from),
+        Route::TestControl => {
+            let mut guard = state.lock().map_err(|_| ApiError::internal())?;
+            test_control(&mut guard, &req.body).map_err(Refused::from)
+        }
     }
+}
+
+/// A host route other than `offer` (SPEC 9.3), under the state lock.
+fn host_route(state: &Mutex<State>, req: &Incoming, repo_id: &str, op: HostOp) -> Answer {
     let mut guard = state.lock().map_err(|_| ApiError::internal())?;
     let st: &mut State = &mut guard;
     let body = req.body.as_slice();
-    match route {
-        Route::Discovery => discovery(st),
-        Route::Challenge => challenge(st, body),
-        Route::Token => token(st, body),
-        Route::CreateRepo => {
-            let caller = authenticate(st, req.authorization.as_deref())?;
-            create_repo(st, caller, body)
-        }
-        Route::PrepareJoin => {
-            let caller = authenticate(st, req.authorization.as_deref())?;
-            prepare_join(st, caller, body)
-        }
-        Route::Repo(repo_id, op) => {
-            let caller = authenticate(st, req.authorization.as_deref())?;
-            match op {
-                RepoOp::Pull => pull(st, caller, &repo_id, body),
-                RepoOp::Push => push(st, caller, &repo_id, body),
-                RepoOp::Manifest => publish_manifest(st, caller, &repo_id, body),
-                RepoOp::Leave => leave(st, caller, &repo_id, body),
-            }
-        }
-        Route::Host(repo_id, op) => {
-            if st.repl.paused {
-                return Err(ApiError::paused());
-            }
-            // SPEC 9.3: signed over the method, the path as sent, and the exact body bytes.
-            let peer = replication::authenticate(st, req.method.as_str(), &req.path, body, &req.host)
-                .ok_or_else(|| ApiError::unauthorized("bad host request signature"))?;
-            match op {
-                HostOp::Heads => host_heads(st, &peer, &repo_id, body),
-                HostOp::Fetch => host_fetch(st, &peer, &repo_id, body),
-                HostOp::Offer => Err(ApiError::internal()),
-            }
-        }
-        Route::TestControl => test_control(st, body),
+    if st.repl.paused {
+        return Err(ApiError::paused());
+    }
+    // SPEC 9.3: signed over the method, the path as sent, and the exact body bytes.
+    let peer = replication::authenticate(st, req.method.as_str(), &req.path, body, &req.host)
+        .ok_or_else(|| ApiError::unauthorized("bad host request signature"))?;
+    match op {
+        HostOp::Heads => host_heads(st, &peer, repo_id, body),
+        HostOp::Fetch => host_fetch(st, &peer, repo_id, body),
+        HostOp::Offer => Err(ApiError::internal()),
     }
 }
 
@@ -475,7 +571,12 @@ fn authenticate(st: &State, authorization: Option<&str>) -> Result<[u8; 32], Api
 // ─── Discovery and authentication (SPEC 11.7, 3.3) ──────────────────────────────────────
 
 fn discovery(st: &State) -> Answer {
-    Ok(json!({ "version": VERSION, "profiles": ["http-json"], "hostKey": b64_encode(&st.host_key()) }))
+    let profiles = if st.grpc {
+        json!(["http-json", "grpc"])
+    } else {
+        json!(["http-json"])
+    };
+    Ok(json!({ "version": VERSION, "profiles": profiles, "hostKey": b64_encode(&st.host_key()) }))
 }
 
 fn challenge(st: &mut State, body: &[u8]) -> Answer {
@@ -563,7 +664,8 @@ fn create_repo(st: &mut State, caller: [u8; 32], body: &[u8]) -> Answer {
 
 /// Whether `id` has the shape of a `repoId`: 22 characters of base64url-nopad over 16 bytes
 /// (SPEC 4.2, 12.4).
-fn is_repo_id(id: &str) -> bool {
+#[must_use]
+pub fn is_repo_id(id: &str) -> bool {
     id.len() == 22 && b64url_decode(id).is_ok_and(|b| b.len() == 16)
 }
 

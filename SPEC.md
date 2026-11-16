@@ -1044,10 +1044,70 @@ in `Authorization: Bearer <token>`. The conformance schema is
 
 ### 10.3 gRPC profile
 
-[`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable. The `Vault` service
-carries the client operations of §10.1 and the `Replication` service carries `Heads`, `Fetch`, and `Offer`
-(§9.1) for a deployment whose host-to-host profile is gRPC. Implementations MAY support either or both
-profiles; the message semantics are identical.
+[`proto/avp.proto`](proto/avp.proto) is canonical. Field numbers and names are stable. Implementations MAY
+support either or both profiles. The gRPC profile is a framing change only: the operations, authorization,
+error codes, limits, and every signed construction are those of the HTTP/JSON profile.
+
+**Service.** The `avp.Vault` service carries every client operation of §10.1 and discovery (§11.7):
+
+| RPC | Operation (§10.1) | HTTP/JSON route (§10.2) | Authorization |
+|---|---|---|---|
+| `GetHostInfo` | discovery (§11.7) | `GET /.well-known/avp` | none |
+| `Challenge` | `challenge` | `POST /api/auth/keypair/challenge` | none |
+| `Token` | `token` | `POST /api/auth/keypair/token` | none (the host mints the token) |
+| `CreateRepo` | `createRepo` | `POST /v1/repos` | bearer; caller is the genesis `ownerKey` |
+| `Pull` | `pull` | `POST /v1/repos/{repoId}/pull` | bearer; caller is a member of the tip |
+| `Push` | `push` | `POST /v1/repos/{repoId}/push` | bearer; caller is a member of the tip and the `author` |
+| `PublishManifest` | `publishManifest` | `POST /v1/repos/{repoId}/manifest` | bearer; caller is `ownerKey` |
+| `Leave` | `leave` | `POST /v1/repos/{repoId}/leave` | bearer; caller is the leaving member |
+| `PrepareJoin` | `prepareJoin` | `POST /v1/prepare-join` | bearer; caller is `memberKey` |
+
+**Authentication.** The token travels in the `authorization` request metadata as `Bearer <token>`. A token is
+host-local (§3.3), not profile-local: a host that serves both profiles MUST accept, over either profile, a
+token it minted over either profile.
+
+**Addressing.** There is no path. The repository is the one the request body names: `CreateRepo`
+`manifest.state.repoId`, `Pull` `repoId`, `Push` `commit.repoId`, `PublishManifest` `manifest.state.repoId`,
+`Leave` `repoId`, and `PrepareJoin` `repoId`. A malformed `repoId` is `bad_request`.
+`PullRequest.repoId` is a gRPC-only addressing field: an HTTP/JSON pull body never carries it (the path
+does), and [`schema/avp.schema.json`](schema/avp.schema.json) does not list it.
+
+**Encoding.** Binary values are base64 strings exactly as in §2 and §10.2. Proto3 has no presence for
+scalars: a scalar left at its default is read as that default, and a host MUST NOT tell it apart from an
+explicit default. A message-typed field that the JSON schema requires (for example `CreateRepoRequest.commit`,
+`PushRequest.commit`, `PublishManifestRequest.manifest`, `SignedManifest.state`,
+`MemberEntry.wrappedDataKey`) MUST be present; a request without it is `bad_request`.
+
+**Errors.** A refused call ends with the gRPC status below, and the status message is the §10.4 `code`
+string exactly:
+
+| `code` | gRPC status |
+|---|---|
+| `bad_request` | `INVALID_ARGUMENT` |
+| `unauthorized` | `UNAUTHENTICATED` |
+| `forbidden`, `policy_denied`, `not_hosted` | `PERMISSION_DENIED` |
+| `not_found` | `NOT_FOUND` |
+| `duplicate_repo` | `ALREADY_EXISTS` |
+| `too_many_heads`, `manifest_conflict`, `missing_parents` | `FAILED_PRECONDITION` |
+| `quota_exceeded`, `too_large` | `RESOURCE_EXHAUSTED` |
+
+The §10.4 `detail`, when present, travels in the `avp-error-detail` trailing metadata (ASCII), and the §12.2
+`Retry-After` in the `retry-after` trailing metadata as decimal seconds. A client MUST branch on the status
+message when it is a §10.4 code and fall back to the gRPC status code when it is not, as an HTTP/JSON
+client falls back to the HTTP status. A request that does not decode as the RPC's request message MAY be
+refused with the gRPC library's own status, the counterpart of the bare `400` exception of §10.4.
+
+**Limits.** §12 applies to the encoded request message: a request over the host's body limit is `too_large`
+(`RESOURCE_EXHAUSTED`).
+
+**Values.** A host MUST store and serve an item with the same decoded values whichever profile carried it,
+so an item written over one profile pulls over the other unchanged. Signatures cover the canonical encoding
+of §4.1, built from the decoded values, and never a transport encoding.
+
+**Discovery.** `GetHostInfo` answers what `GET /.well-known/avp` answers (§11.7).
+
+**Replication.** The `Replication` service carries `Heads`, `Fetch`, and `Offer` (§9.1) for a deployment
+whose host-to-host profile is gRPC; this section does not change it or §9.3.
 
 ### 10.4 Errors
 
@@ -1082,10 +1142,11 @@ only the status.
 
 Every error except `422 missing_parents` is **terminal** for that request: a client MUST NOT retry it
 unchanged. `too_many_heads` and `manifest_conflict` tell the client what to do next (merge, or pull from
-seq 0 and rebuild, §6.3, §6.4); a request rebuilt on a new tip after that re-pull is not unchanged. The gRPC profile maps them to `INVALID_ARGUMENT` (`bad_request`), `UNAUTHENTICATED`
-(`unauthorized`), `PERMISSION_DENIED` (`forbidden`, `not_hosted`), `NOT_FOUND`, `ALREADY_EXISTS`
-(`duplicate_repo`), `FAILED_PRECONDITION` (`too_many_heads`, `manifest_conflict`, `missing_parents`), and
-`RESOURCE_EXHAUSTED` (`quota_exceeded`), and carries the same `code` string as the status message.
+seq 0 and rebuild, §6.3, §6.4); a request rebuilt on a new tip after that re-pull is not unchanged. The gRPC profile (§10.3) maps them to
+`INVALID_ARGUMENT` (`bad_request`), `UNAUTHENTICATED` (`unauthorized`), `PERMISSION_DENIED` (`forbidden`,
+`policy_denied`, `not_hosted`), `NOT_FOUND`, `ALREADY_EXISTS` (`duplicate_repo`), `FAILED_PRECONDITION`
+(`too_many_heads`, `manifest_conflict`, `missing_parents`), and `RESOURCE_EXHAUSTED` (`quota_exceeded`,
+`too_large`), and carries the same `code` string as the status message.
 
 ## 11. Tokens, addressing, device linking
 
@@ -1154,6 +1215,11 @@ A host MAY expose an unauthenticated `GET /.well-known/avp` returning at least
 resolving a locator knows which transport profiles to use and can check the host key against the one in a
 token or in `hosts`. A client MUST match hosts by key (§3.3), never by locator alone. Absent discovery, a
 client SHOULD default to the HTTP/JSON profile over HTTPS.
+
+Over gRPC, discovery is the `GetHostInfo` RPC (§10.3), which answers the same document. `profiles` lists
+`grpc` on a host that serves the gRPC profile and `http-json` on one that serves the HTTP/JSON profile. A
+locator names where the host's HTTP/JSON profile is reached; a host that serves the gRPC profile at another
+address states that address out of band.
 
 ## 12. Operational limits
 
@@ -1265,6 +1331,8 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
 - **Tokens and addresses**: every token of §11 (with the acceptance and leave signatures, the link
   confirmation code, and the owner and member fingerprints), `avp://` locators, and the challenge
   transcript `challengeMessage` of §3.3 with its signature (`federation.json`).
+- **gRPC encodings** (`grpc.json`, §10.3): the proto3 bytes of one request and one reply body of every
+  `avp.Vault` RPC in the canonical encoding the file states, and the full-form JSON each decodes to.
 - **Negative cases**: `negative.json`, valid constructions with one mutation each that a conformant
   implementation MUST reject, including a manifest with a bad signature or a wrong previous hash, a commit
   whose id does not recompute or whose author signed another id, a payload whose AAD v2 has a swapped parent,
@@ -1276,9 +1344,11 @@ An implementation is conformant if it satisfies every MUST above and reproduces 
   non-canonical public key, and a non-canonical `S`. Reproducing the positive vectors is necessary but not
   sufficient.
 
-Every committed vector is reproducible from documented seeds by [`vectors/generate.ts`](vectors/generate.ts)
-(`--check` re-derives and asserts them; it also owns `negative.json`). See
-[`vectors/README.md`](vectors/README.md).
+Every committed vector except `grpc.json` is reproducible from documented seeds by
+[`vectors/generate.ts`](vectors/generate.ts) (`--check` re-derives and asserts them; it also owns
+`negative.json`). `grpc.json` is reproducible by
+[`examples/conformance/scripts/grpc-vectors.ts`](examples/conformance/scripts/grpc-vectors.ts), whose
+`--check` the conformance runner runs. See [`vectors/README.md`](vectors/README.md).
 
 A **host** additionally proves conformance by passing the black-box harness in [`harness/`](harness/), which
 drives the client wire contract (the auth failure modes of §3.3, including a signature over the raw nonce
@@ -1286,7 +1356,8 @@ and a transcript built with another host key, `createRepo` checks, the pulled ch
 forks and merges, the head bound, `manifest_conflict`, the removal cutoff, leave, `prepareJoin`
 acceptances, and zero-knowledge), and its multi-host scenarios, which drive §9 between two or more hosts
 (convergence after a paused host, concurrent writes on two hosts, a removed member rejected on both, an
-unlisted host refused, an old-epoch head merged forward, and diverged owner states converging).
+unlisted host refused, an old-epoch head merged forward, and diverged owner states converging). A host
+that serves the gRPC profile (§10.3) additionally passes the same harness with `--profile grpc`.
 
 ## 15. Security considerations and open items
 

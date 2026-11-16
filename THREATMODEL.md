@@ -58,7 +58,8 @@ There is no identity service in 0.5. Each host mints its own tokens for any key 
 
 *Defended:* payloads and wrapped keys are encrypted (AES-256-GCM, X25519 + HKDF wrap); data keys and
 plaintext never appear on the wire. Client-to-host transport MUST be TLS, so ciphertext, manifests, and
-bearer tokens are not exposed in transit.
+bearer tokens are not exposed in transit. Over the gRPC profile the token rides the `authorization` request
+metadata, which the same TLS protects.
 
 *Residual:* without TLS, an observer sees ciphertext, public keys, counters, the commit graph, and bearer
 tokens. Host-to-host links are protected only as well as the deployment profile protects them; even in the
@@ -176,8 +177,8 @@ rotate the alts' credentials out of band. Store the phrase offline and link devi
 *Capability:* possesses a valid, unexpired token.
 
 *Defended:* tokens are host-local, scoped to the bearer's memberships at that host, and short-lived. They
-never leave TLS. A token cannot sign a commit, a manifest state, or a leave request, so it cannot write as
-the member or change membership.
+never leave TLS, in either profile (over gRPC they ride the `authorization` metadata). A token cannot sign
+a commit, a manifest state, or a leave request, so it cannot write as the member or change membership.
 
 *Residual:* until it expires, a stolen token lets its holder pull as that member at that host (ciphertext
 only) and call `prepareJoin` as that key. Keep token TTLs short.

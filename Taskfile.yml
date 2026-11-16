@@ -57,6 +57,21 @@ tasks:
           bash harness/run-hosts.sh {{.ITEM}} -- bun harness/multihost.ts
           --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
 
+  harness-grpc:
+    desc: Run the single-host conformance harness over the gRPC client profile against the Rust reference host (about 2 min).
+    cmds:
+      - bun install --frozen-lockfile --cwd harness
+      - bash harness/run-hosts.sh rust -- bun harness/conformance.ts --profile grpc --server grpc://127.0.0.1:19211
+
+  multihost-grpc:
+    desc: Run the multi-host harness over the gRPC client profile on three Rust hosts (about 70 s).
+    cmds:
+      - bun install --frozen-lockfile --cwd harness
+      - >-
+        bash harness/run-hosts.sh rust rust rust -- bun harness/multihost.ts --profile grpc
+        --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 --c http://127.0.0.1:19203
+        --a-grpc grpc://127.0.0.1:19211 --b-grpc grpc://127.0.0.1:19212 --c-grpc grpc://127.0.0.1:19213
+
   rust:
     desc: Format-check, lint and test the Rust avp library, host and client.
     cmds:

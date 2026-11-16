@@ -143,6 +143,18 @@
       "construction": "valid key-wrap / ed25519 constructions and 0.5 manifest, commit, payload, link grant, acceptance, and leave items with one mutation each (flipped tag or byte, truncation, wrong key, wrong owner signature, wrong previous hash, commit id that does not recompute, author signature over another id, AAD v2 with a wrong parent set, epoch, author, or repoId, wrong wrap label), and challenge domain separation cases (a challenge signature presented as a commit author signature and the reverse, a challenge signature for another host key, a signature over the raw nonce)",
       "expects": "each case MUST be rejected: unwrap and decrypt fail authentication, verify returns false, the link check fails; each 0.5 case's `base` is accepted",
       "generatedBy": "vectors/generate.ts (from the same seeds as the positive vectors)"
+    },
+    {
+      "id": "grpc",
+      "file": "grpc.json",
+      "kind": "deterministic",
+      "specSection": "10.3",
+      "construction": "proto3 binary encoding of each avp.Vault request and reply body in the canonical encoding: fields in ascending field number, scalars at their proto3 default and empty repeated fields omitted, absent message fields omitted, packed encoding not used (no packable fields exist)",
+      "expects": "the proto bytes of each case's message, and the full-form JSON back",
+      "anchors": [
+        "Protocol Buffers proto3 binary wire format"
+      ],
+      "generatedBy": "examples/conformance/scripts/grpc-vectors.ts"
     }
   ]
 }

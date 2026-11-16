@@ -11,6 +11,11 @@
 # repository root with AVP_SERVER_URL set to host A and, when present, AVP_SERVER_URL_B and
 # AVP_SERVER_URL_C set to hosts B and C. It stops every host on exit and exits with COMMAND's status.
 #
+# Every `rust` host also serves the gRPC client profile (SPEC 10.3) with AVP_GRPC_PORT 19211, 19212 or
+# 19213 (A, B, C). curl cannot call GetHostInfo, so for a rust host the script also waits for the
+# startup line `grpc on 127.0.0.1:<port>` and exports AVP_GRPC_URL, AVP_GRPC_URL_B and AVP_GRPC_URL_C
+# (grpc://127.0.0.1:1921N) for the rust hosts only. The java host serves HTTP/JSON only.
+#
 # Environment: AVP_HOSTS_LOG_DIR (where host logs go; default a new temporary directory), JAVA_HOME (the
 # JDK to build and run the Java host with; default `javac` and `java` on PATH), CARGO_TARGET_DIR (honored
 # when locating the Rust host binary). Host logs are printed when a host fails to start or COMMAND fails.
@@ -28,6 +33,7 @@ usage() {
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAMES=(A B C)
 PORTS=(19201 19202 19203)
+GRPC_PORTS=(19211 19212 19213)
 SEEDS=(
   a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
   b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
@@ -109,8 +115,8 @@ for i in $(seq 0 $((count - 1))); do
   log="$LOG_DIR/host-${NAMES[$i]}.log"
   case "${kinds[$i]}" in
     rust)
-      PORT=${PORTS[$i]} AVP_BIND=127.0.0.1 AVP_HOST_SEED=${SEEDS[$i]} AVP_PEERS="$peers" AVP_TEST_CONTROL=1 \
-        "$rust_exe" >"$log" 2>&1 &
+      PORT=${PORTS[$i]} AVP_GRPC_PORT=${GRPC_PORTS[$i]} AVP_BIND=127.0.0.1 AVP_HOST_SEED=${SEEDS[$i]} \
+        AVP_PEERS="$peers" AVP_TEST_CONTROL=1 "$rust_exe" >"$log" 2>&1 &
       ;;
     java)
       PORT=${PORTS[$i]} AVP_BIND=127.0.0.1 AVP_HOST_SEED=${SEEDS[$i]} AVP_PEERS="$peers" AVP_TEST_CONTROL=1 \
@@ -132,23 +138,37 @@ for i in $(seq 0 $((count - 1))); do
       exit 1
     fi
     if curl -fsS "$url/.well-known/avp" >/dev/null 2>&1 && grep -qF "listening on $url," "$log"; then
-      ready=1
-      break
+      # A rust host also logs its gRPC listener once it is bound.
+      if [ "${kinds[$i]}" != rust ] || grep -qF "grpc on 127.0.0.1:${GRPC_PORTS[$i]}" "$log"; then
+        ready=1
+        break
+      fi
     fi
     sleep 0.2
   done
   if [ -z "$ready" ]; then
-    echo "host ${NAMES[$i]} (${kinds[$i]}) did not serve $url/.well-known/avp and log 'listening on $url' within 30 s" >&2
+    echo "host ${NAMES[$i]} (${kinds[$i]}) did not serve $url/.well-known/avp and log 'listening on $url' (rust: and 'grpc on 127.0.0.1:${GRPC_PORTS[$i]}') within 30 s" >&2
     dump_logs >&2
     exit 1
   fi
   echo "host ${NAMES[$i]} (${kinds[$i]}): $(grep -F "listening on $url," "$log")"
+  if [ "${kinds[$i]}" = rust ]; then
+    echo "host ${NAMES[$i]} (${kinds[$i]}): $(grep -F "grpc on 127.0.0.1:${GRPC_PORTS[$i]}" "$log")"
+  fi
 done
 
 export AVP_SERVER_URL="http://127.0.0.1:${PORTS[0]}"
 unset AVP_SERVER_URL_B AVP_SERVER_URL_C
 [ "$count" -ge 2 ] && export AVP_SERVER_URL_B="http://127.0.0.1:${PORTS[1]}"
 [ "$count" -ge 3 ] && export AVP_SERVER_URL_C="http://127.0.0.1:${PORTS[2]}"
+# gRPC targets for the rust hosts only; a java host serves HTTP/JSON only.
+unset AVP_GRPC_URL AVP_GRPC_URL_B AVP_GRPC_URL_C
+GRPC_VARS=(AVP_GRPC_URL AVP_GRPC_URL_B AVP_GRPC_URL_C)
+for i in $(seq 0 $((count - 1))); do
+  if [ "${kinds[$i]}" = rust ]; then
+    export "${GRPC_VARS[$i]}=grpc://127.0.0.1:${GRPC_PORTS[$i]}"
+  fi
+done
 
 status=0
 (cd "$ROOT" && "$@") || status=$?

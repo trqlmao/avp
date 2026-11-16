@@ -3,7 +3,7 @@ name = "avp-reference-server"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
-description = "In-memory AVP 0.5 reference host (HTTP/JSON profile: client-facing API and host-to-host replication) over the shared avp crate. Illustrative, not production."
+description = "In-memory AVP 0.5 reference host (HTTP/JSON profile: client-facing API and host-to-host replication; the gRPC client profile) over the shared avp crate. Illustrative, not production."
 license = "MIT"
 publish = false
 
@@ -22,6 +22,15 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 tiny_http = "=0.12.0"
 ureq = { version = "=3.5.2", default-features = false }
+# The gRPC client profile (SPEC 10.3). The 0.14.5 family keeps rust-version 1.85 (0.14.9 needs 1.88).
+prost = "=0.14.6"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync"] }
+tonic = "=0.14.5"
+tonic-prost = "=0.14.5"
+
+[build-dependencies]
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.5"
 
 [profile.release]
 opt-level = 2

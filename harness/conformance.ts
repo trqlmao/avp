@@ -1,5 +1,5 @@
 /**
- * AVP 0.5 black-box conformance harness, single host (HTTP/JSON profile).
+ * AVP 0.5 black-box conformance harness, single host (HTTP/JSON or gRPC client profile).
  *
  * Point it at one running AVP host and it drives the client wire contract end to end, asserting the
  * SPEC MUSTs with the exact status and `code` of the SPEC 10.4 error table:
@@ -27,6 +27,12 @@
  *
  *   bun conformance.ts --server http://127.0.0.1:19101
  *   AVP_SERVER_URL=http://127.0.0.1:19101 bun conformance.ts
+ *   bun conformance.ts --profile grpc --server grpc://127.0.0.1:19111   (or AVP_GRPC_URL)
+ *
+ * `--profile grpc` runs the same checks over the gRPC client profile (SPEC 10.3, ./transport.ts);
+ * each expected error also asserts its gRPC status, and the checks of HTTP framing (a bad percent
+ * escape, a non-JSON body, a path naming another repository than the body) print
+ * `SKIP (http-json only)`.
  *
  * Options: `--challenge-ttl-ms N` (the host's challenge lifetime, default 120000, the SPEC 3.3
  * RECOMMENDED maximum; the expired-nonce check waits this long plus a margin), `--head-bound N` (the
@@ -95,6 +101,7 @@ import {
   wireM,
   type Party,
 } from "./common.ts";
+import { GRPC_CODE, grpcTransport, httpTransport, profileFlag, type Resp, type Transport } from "./transport.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────────────
 
@@ -111,7 +118,12 @@ function numberFlag(name: string, fallback: number): number {
   return n;
 }
 
-const BASE_URL = (flag("--server") ?? process.env.AVP_SERVER_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+const PROFILE = profileFlag(process.argv);
+const BASE_URL = (
+  flag("--server") ??
+  (PROFILE === "grpc" ? process.env.AVP_GRPC_URL : process.env.AVP_SERVER_URL) ??
+  (PROFILE === "grpc" ? "grpc://127.0.0.1:8788" : "http://127.0.0.1:8787")
+).replace(/\/$/, "");
 const CHALLENGE_TTL_MS = numberFlag("--challenge-ttl-ms", 120_000);
 const HEAD_BOUND = numberFlag("--head-bound", 16);
 const STARTUP_TIMEOUT_MS = numberFlag("--startup-timeout-ms", 30_000);
@@ -147,34 +159,16 @@ function checkDoes(section: string, name: string, fn: () => void): void {
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────────────
 
-interface Resp {
-  status: number;
-  body: any;
-  text: string;
-}
-
 /** Every response text the host sent, scanned for the plaintext marker at the end (SPEC 13). */
 const seen: string[] = [];
 
+/** Set in main: the HTTP/JSON or the gRPC profile against BASE_URL. */
+let transport: Transport;
+
 async function req(method: string, path: string, body?: unknown, token?: string): Promise<Resp> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
-    // A host that never answers fails the run (the abort throws) instead of hanging it.
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  const text = await res.text();
-  seen.push(text);
-  let parsed: any = undefined;
-  try {
-    parsed = text ? JSON.parse(text) : undefined;
-  } catch {
-    parsed = undefined;
-  }
-  return { status: res.status, body: parsed, text };
+  const r = method === "GET" && path === "/.well-known/avp" ? await transport.discovery() : await transport.req(method, path, body, token);
+  seen.push(r.text);
+  return r;
 }
 
 const repoPath = (repoId: string, op: string) => `/v1/repos/${encodeURIComponent(repoId)}/${op}`;
@@ -188,8 +182,26 @@ function show(r: Resp): string {
  * whose `code` is the exact machine code of the error table.
  */
 function expectError(section: string, name: string, r: Resp, status: number, code: string): void {
-  const ok = r.status === status && typeof r.body?.error === "string" && r.body?.code === code;
-  check(section, name, ok, `want ${status} ${code}, ${show(r)}`);
+  const grpcOk = PROFILE !== "grpc" || r.grpcCode === GRPC_CODE[code];
+  const ok = r.status === status && typeof r.body?.error === "string" && r.body?.code === code && grpcOk;
+  const grpcWant = PROFILE === "grpc" ? ` (gRPC status ${GRPC_CODE[code]}, got ${r.grpcCode})` : "";
+  check(section, name, ok, `want ${status} ${code}${grpcWant}, ${show(r)}`);
+}
+
+/** Skipped checks, printed in the report: checks of HTTP framing that have no gRPC form. */
+const skipped: { section: string; name: string }[] = [];
+
+/**
+ * Runs `fn` under the HTTP/JSON profile only. It wraps the checks of HTTP framing: a bad percent
+ * escape, a non-JSON body, and a path naming another repository than the body. Over gRPC the
+ * repository is the body's (SPEC 10.3), so none of them has a gRPC form.
+ */
+async function httpOnly(section: string, name: string, fn: () => Promise<void>): Promise<void> {
+  if (PROFILE === "grpc") {
+    skipped.push({ section, name });
+    return;
+  }
+  await fn();
 }
 
 // ─── Parties and constructions ────────────────────────────────────────────────────────
@@ -304,8 +316,9 @@ async function run(): Promise<void> {
   // §11.7 Discovery: the host key every acceptance and every `hosts` entry is matched against.
   const disc = await waitForHost();
   check("§11.7", "discovery answers version 0.5", disc.body?.version === "0.5", show(disc));
-  check("§11.7", "discovery lists the http-json profile",
-    Array.isArray(disc.body?.profiles) && disc.body.profiles.includes("http-json"), show(disc));
+  const wantProfile = PROFILE === "grpc" ? "grpc" : "http-json";
+  check("§11.7", `discovery${PROFILE === "grpc" ? " (GetHostInfo)" : ""} lists the ${wantProfile} profile`,
+    Array.isArray(disc.body?.profiles) && disc.body.profiles.includes(wantProfile), show(disc));
   const hostKey = Buffer.from(String(disc.body?.hostKey ?? ""), "base64");
   check("§11.7", "discovery hostKey is a 32-byte base64 key", hostKey.length === 32, show(disc));
   if (hostKey.length !== 32) throw new Error("cannot continue without the host key");
@@ -493,13 +506,15 @@ async function run(): Promise<void> {
     expectError("§10.1", "push to a repository the host does not hold is 404 not_found",
       await req("POST", repoPath(ghost, "push"), { commit: wireC(c) }, alice.token), 404, "not_found");
   }
-  {
+  await httpOnly("§10.4", "a request target with a bad percent escape is 400", async () => {
     // SPEC 10.4 exception: an unparseable request target may get a bare 400; only the status is checked.
     const r = await req("POST", "/v1/repos/%zz/pull", { sinceManifestSeq: 0, knownHeads: [] }, alice.token);
     check("§10.4", "a request target with a bad percent escape is 400", r.status === 400, show(r));
-  }
-  expectError("§10.4", "a pull whose body is not JSON is 400 bad_request",
-    await req("POST", repoPath(repoId, "pull"), "{not json", alice.token), 400, "bad_request");
+  });
+  await httpOnly("§10.4", "a pull whose body is not JSON is 400 bad_request", async () => {
+    expectError("§10.4", "a pull whose body is not JSON is 400 bad_request",
+      await req("POST", repoPath(repoId, "pull"), "{not json", alice.token), 400, "bad_request");
+  });
 
   // ─── §10.1 pull after genesis ────────────────────────────────────────────────────────
 
@@ -673,7 +688,9 @@ async function run(): Promise<void> {
   {
     const other = makeCommit({ repoId: deriveRepoId(alice.pub, randomBytes(16)), author: bob, parents: [b1.commitId], manifest: m2,
       dataKey: k0, plaintext: payloadWith(MARKER, bob) });
-    expectError("§7.1", "a commit whose repoId is another repository is 400 bad_request", await push(other, bob.token), 400, "bad_request");
+    await httpOnly("§7.1", "a commit whose repoId is another repository is 400 bad_request", async () => {
+      expectError("§7.1", "a commit whose repoId is another repository is 400 bad_request", await push(other, bob.token), 400, "bad_request");
+    });
   }
   {
     // negative.json ed25519/identity-key-forgery on a commit: a strict host fails the signature (400)
@@ -836,8 +853,10 @@ async function run(): Promise<void> {
     const l = leaveOf(bob);
     const bad = { ...l, signature: b64(ed25519Sign(importEd25519Private(dave.seed), Buffer.from("x"))) };
     expectError("§8.4", "a leave request with a bad signature is 400 bad_request", await postLeave(bad, bob.token), 400, "bad_request");
-    expectError("§8.4", "a leave request signed for another repository is 400 bad_request",
-      await postLeave(leaveOf(bob, deriveRepoId(alice.pub, randomBytes(16))), bob.token), 400, "bad_request");
+    await httpOnly("§8.4", "a leave request signed for another repository is 400 bad_request", async () => {
+      expectError("§8.4", "a leave request signed for another repository is 400 bad_request",
+        await postLeave(leaveOf(bob, deriveRepoId(alice.pub, randomBytes(16))), bob.token), 400, "bad_request");
+    });
     expectError("§8.4", "a leave request whose memberKey is not the caller is 403 forbidden", await postLeave(l, alice.token), 403, "forbidden");
     expectError("§8.4", "the owner's leave request is 403 forbidden", await postLeave(leaveOf(alice), alice.token), 403, "forbidden");
     expectError("§8.4", "a non-member's leave request is 403 forbidden", await postLeave(leaveOf(dave), dave.token), 403, "forbidden");
@@ -993,9 +1012,14 @@ async function run(): Promise<void> {
 // ─── Report ───────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  console.log(`AVP 0.5 single-host conformance harness → ${BASE_URL}\n`);
+  console.log(`AVP 0.5 single-host conformance harness (${PROFILE}) → ${BASE_URL}\n`);
   try {
-    await run();
+    transport = PROFILE === "grpc" ? await grpcTransport(BASE_URL, REQUEST_TIMEOUT_MS) : httpTransport(BASE_URL, REQUEST_TIMEOUT_MS);
+    try {
+      await run();
+    } finally {
+      transport.close();
+    }
   } catch (err) {
     console.error(`\nHarness aborted (could not complete the flow): ${err instanceof Error ? err.message : err}`);
     process.exitCode = 1;
@@ -1005,6 +1029,7 @@ async function main(): Promise<void> {
     console.log(`  [${r.ok ? "PASS" : "FAIL"}] ${r.section.padEnd(6)} ${r.name}${r.ok ? "" : `  (${r.detail})`}`);
     if (r.ok) passed += 1;
   }
+  for (const s of skipped) console.log(`  [SKIP] ${s.section.padEnd(6)} ${s.name}  SKIP (http-json only)`);
   const failed = results.length - passed;
   console.log(`\n${passed}/${results.length} checks passed${failed ? `, ${failed} FAILED` : ""}.`);
   if (failed > 0) process.exitCode = 1;
