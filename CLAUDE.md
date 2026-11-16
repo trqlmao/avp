@@ -11,7 +11,7 @@ application to run here. The deliverables are documents, a proto schema, a JSON
 schema, conformance vectors, a black-box host harness, and small illustrative
 examples.
 
-AVP 0.5 (draft) in one breath: a repository lives on several hosts that
+AVP 0.5 in one breath: a repository lives on several hosts that
 replicate it; an owner holding a BIP39 phrase signs a hash-linked manifest
 chain (members, wrapped data keys, key epoch, refresh-token policy, hosts);
 members sign commits carrying the full encrypted payload; concurrent heads
