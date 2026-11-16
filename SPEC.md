@@ -1,7 +1,7 @@
 # Alt Vault Protocol (AVP): Specification
 
-**Version:** 0.5 (draft)
-**Status:** draft wire contract; see §15 for open items.
+**Version:** 0.5
+**Status:** stable wire contract; see §15 for open items.
 
 AVP lets independent Minecraft clients share alt accounts through zero-knowledge hosts. This document is
 the normative contract. An implementation is *conformant* if it satisfies every MUST here and reproduces

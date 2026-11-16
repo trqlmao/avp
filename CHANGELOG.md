@@ -4,6 +4,15 @@ Notable changes to the Alt Vault Protocol (AVP) and this repository. The format 
 [Keep a Changelog](https://keepachangelog.com/). The protocol version is independent of any
 implementation's version.
 
+## 0.5 marked stable - 2026-11-15
+
+### Status
+
+- 0.5 is now **stable**. A second, independent host implementation passed both conformance harnesses
+  (the single-host harness, 117 checks, and the multi-host harness, 77 checks). No specification,
+  schema, proto, or vector content changed; only the draft label was dropped from `SPEC.md`, the README,
+  `llms.txt`, `llms-full.txt`, and the site layout.
+
 ## [0.5] - 2026-11-13
 
 Multi-host repositories. A repository now lives on several hosts that replicate it with each other, an

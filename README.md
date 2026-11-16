@@ -5,7 +5,7 @@ zero-knowledge hosts that replicate each repository between them.
 
 [![License](https://img.shields.io/badge/license-CC--BY--4.0%20%2F%20MIT-blue.svg)](LICENSE)
 [![no-leak](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml/badge.svg)](https://github.com/trqlmao/avp/actions/workflows/no-leak.yml)
-[![spec](https://img.shields.io/badge/spec-v0.5%20draft-orange.svg)](SPEC.md)
+[![spec](https://img.shields.io/badge/spec-v0.5%20stable-brightgreen.svg)](SPEC.md)
 
 Read it online at **[avp.trq.lol](https://avp.trq.lol)**, or jump straight to the
 [specification](SPEC.md), the [proto schema](proto/avp.proto), or the [worked examples](examples/).
@@ -176,7 +176,7 @@ This repository is dual-licensed:
 
 ## Status
 
-Draft v0.5 of the protocol: multi-host repositories with an owner-signed manifest chain, a signed commit
+Stable v0.5 of the protocol: multi-host repositories with an owner-signed manifest chain, a signed commit
 graph, per-field merge, host-issued authentication, and a BIP39 owner identity. 0.5 is a breaking version,
 not wire compatible with 0.4. Open items are tracked in `SPEC.md` §15.
 
