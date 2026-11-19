@@ -115,7 +115,7 @@ bun harness/multihost.ts --a http://127.0.0.1:19201 --b http://127.0.0.1:19202 -
 ```
 
 Each prints `PASS`/`FAIL` per check and exits non-zero on any failure. CI
-([`.github/workflows/conformance.yml`](.github/workflows/conformance.yml)) runs both against the Rust and
+([`.github/workflows/conformance.yml`](https://github.com/trqlmao/avp/blob/main/.github/workflows/conformance.yml)) runs both against the Rust and
 Java reference hosts, the multi-host suite in every language pairing, lints [`openapi.yaml`](openapi.yaml),
 and checks that the schema, example bodies, and vector index stay consistent.
 

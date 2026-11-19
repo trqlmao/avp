@@ -1,7 +1,7 @@
 # AVP reference client (Rust)
 
 A reference client for [AVP 0.5](../../../SPEC.md), HTTP/JSON profile, built on the shared
-[`avp`](../avp/) crate. The library (`src/lib.rs`) holds one member device's copy of a repository;
+[`avp`](https://github.com/trqlmao/avp/tree/main/examples/rust/avp) crate. The library (`src/lib.rs`) holds one member device's copy of a repository;
 the binary (`src/main.rs`) runs a worked flow against live hosts and prints each step. It talks to
 the [Rust reference host](../server/) and to any other conformant host.
 

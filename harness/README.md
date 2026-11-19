@@ -129,7 +129,7 @@ Every payload carries a random marker, which must appear in no response (SPEC §
 ## How it works
 
 The only AVP-specific code is the client-side construction, re-exported by [`crypto.ts`](crypto.ts) from
-the vector-tested conformance runner in [`../examples/conformance/src`](../examples/conformance/src/):
+the vector-tested conformance runner in [`../examples/conformance/src`](https://github.com/trqlmao/avp/tree/main/examples/conformance/src):
 the CE writer, manifest and commit constructions, AAD v2, the wrap scheme, BIP39 owner keys, and strict
 Ed25519. Every body is built from real keys and real signatures, so the harness itself stays a thin wire
 driver; [`common.ts`](common.ts) holds the parties and constructions both harnesses share. It runs

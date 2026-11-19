@@ -1,7 +1,7 @@
 # AVP reference client (Java)
 
 A reference client for [AVP 0.5](../../../SPEC.md), HTTP/JSON profile, built on the shared Java sources
-in [`../avp`](../avp/). [`Vault.java`](Vault.java) holds one member device's copy of a repository;
+in [`../avp`](https://github.com/trqlmao/avp/tree/main/examples/java/avp). [`Vault.java`](Vault.java) holds one member device's copy of a repository;
 [`Client.java`](Client.java) runs a worked flow against live hosts and prints each step. It behaves like
 the [Rust reference client](../../rust/client/) and talks to the [Java](../server/) and
 [Rust](../../rust/server/) reference hosts and to any other conformant host.
