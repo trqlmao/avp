@@ -427,8 +427,8 @@ This mirrors SPEC §14.
     `AVP_TEST_CONTROL=1`; [`harness/run-hosts.sh`](harness/run-hosts.sh) builds and starts the reference
     hosts for it. See [`harness/README.md`](harness/README.md).
 11. **Interop.** Run your client against another implementation's host and replicate your host with
-    another implementation's host. [`.github/workflows/examples-interop.yml`](.github/workflows/examples-interop.yml)
-    and the `multihost` job of [`conformance.yml`](.github/workflows/conformance.yml) do this for the
+    another implementation's host. [`.github/workflows/examples-interop.yml`](https://github.com/trqlmao/avp/blob/main/.github/workflows/examples-interop.yml)
+    and the `multihost` job of [`conformance.yml`](https://github.com/trqlmao/avp/blob/main/.github/workflows/conformance.yml) do this for the
     reference implementations.
 
 `bun vectors/generate.ts --check` re-derives every committed vector from its documented seeds; see
@@ -442,8 +442,8 @@ examples stopped at 0.4; see the `v0.4` tag.
 
 | Language | Shared library | Host | Client |
 |---|---|---|---|
-| Rust | [`examples/rust/avp/`](examples/rust/avp/) | [`examples/rust/server/`](examples/rust/server/) | [`examples/rust/client/`](examples/rust/client/) |
-| Java | [`examples/java/avp/`](examples/java/avp/) | [`examples/java/server/`](examples/java/server/) | [`examples/java/client/`](examples/java/client/) |
+| Rust | [`examples/rust/avp/`](https://github.com/trqlmao/avp/tree/main/examples/rust/avp) | [`examples/rust/server/`](examples/rust/server/) | [`examples/rust/client/`](examples/rust/client/) |
+| Java | [`examples/java/avp/`](https://github.com/trqlmao/avp/tree/main/examples/java/avp) | [`examples/java/server/`](examples/java/server/) | [`examples/java/client/`](examples/java/client/) |
 
 Where to look when you are stuck on a subtlety:
 

@@ -21,8 +21,8 @@ illustrative, not production.
 
 | Language | Shared library | Host | Client |
 |---|---|---|---|
-| Rust | [`rust/avp/`](rust/avp/) | [`rust/server/`](rust/server/) | [`rust/client/`](rust/client/) |
-| Java | [`java/avp/`](java/avp/) | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
+| Rust | [`rust/avp/`](https://github.com/trqlmao/avp/tree/main/examples/rust/avp) | [`rust/server/`](rust/server/) | [`rust/client/`](rust/client/) |
+| Java | [`java/avp/`](https://github.com/trqlmao/avp/tree/main/examples/java/avp) | [`java/server/`](java/server/) | [`java/client/`](java/client/) |
 
 Both libraries reproduce every vector in [`../vectors/`](../vectors/) and replay
 [`acceptance.json`](../vectors/acceptance.json) unchanged. Cross-language compatibility is checked

@@ -6,7 +6,7 @@ client-facing API of SPEC section 10 (host-issued authentication, `createRepo`, 
 hosts over the reference host-to-host profile of SPEC section 9.3 (signed HTTP/JSON). It behaves like
 the [Rust reference host](../../rust/server/), and the two replicate with each other.
 
-The host is a thin HTTP/JSON layer over the shared Java sources in [`../avp`](../avp/). Their
+The host is a thin HTTP/JSON layer over the shared Java sources in [`../avp`](https://github.com/trqlmao/avp/tree/main/examples/java/avp). Their
 `AvpRules.RepoView` runs every manifest chain and commit rule (SPEC sections 6 and 7); the host only
 authenticates the caller, decodes the body, checks the caller identity each operation requires, maps
 the engine's reject codes to the status table of SPEC 10.4, and serializes the answer. Items received
