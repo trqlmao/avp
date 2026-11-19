@@ -143,12 +143,13 @@ AI). The committer is the responsible author.
   the Rust and Java reference hosts + the multi-host harness per language pairing),
   and `docs.yml` (llms-full sync). `no-leak.yml` is the vendor-neutrality gate.
 - The Pages site builds on push (no local step required). If you want to preview
-  it locally and have Ruby, `bundle exec jekyll serve` renders `_layouts/default.html`
-  with `assets/css/style.css`.
+  it locally and have Ruby, copy the repo Markdown into `site/` and run
+  `bundle exec jekyll serve` there.
 
 ## Site (GitHub Pages)
 
-`_config.yml` uses a hand-written layout (`_layouts/default.html` +
-`assets/css/style.css`), not a gem theme. The look is minimal, light, text-first,
-monospace headings, no accent color (neutrality). `CNAME` pins `avp.trq.lol`; do
-not change it. Keep the layout dependency-free (no JS frameworks).
+The site lives in `site/`: `_config.yml` and a hand-written layout
+(`_layouts/default.html` + `assets/css/style.css`), not a gem theme. The look is minimal, light, text-first,
+monospace headings, no accent color (neutrality). `.github/workflows/pages.yml` copies the
+repo Markdown into `site/`, builds it and deploys from main; the `avp.trq.lol`
+domain is set in the repo Pages settings. Keep the layout dependency-free (no JS frameworks).

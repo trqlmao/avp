@@ -1,10 +1,11 @@
 title: "AVP: Alt Vault Protocol"
 description: An open, vendor-neutral, zero-knowledge, federated protocol for sharing Minecraft alt accounts across clients.
+url: https://avp.trq.lol
+baseurl: ""
 
-# GitHub Pages renders the Markdown in this repo as a site. The README is the home page;
-# SPEC.md and the guides become pages. jekyll-relative-links (on by default on Pages)
-# rewrites the .md links so they resolve on the site. The look is a hand-written layout
-# (_layouts/default.html + assets/css/style.css), not a gem theme.
+# The site source is this folder; the pages workflow copies the repo Markdown in
+# before building. The README is the home page; jekyll-relative-links rewrites the
+# .md links. The look is a hand-written layout, not a gem theme.
 defaults:
   - scope:
       path: ""
