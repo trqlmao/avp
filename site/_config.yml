@@ -19,3 +19,7 @@ exclude:
   - PULL_REQUEST_TEMPLATE.md
   - "examples/**/node_modules"
   - "examples/**/target"
+
+kramdown:
+  syntax_highlighter_opts:
+    guess_lang: true
